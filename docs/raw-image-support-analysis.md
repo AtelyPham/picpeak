@@ -207,7 +207,7 @@ Sony's embedded `PreviewImage` is widely reported as **~1616×1080 (~1.7 MP)** a
 
 `core/048_add_video_support.js` is the template: it added a `media_type` discriminator defaulting to `'image'`, format-specific columns (`duration`, `video_codec`, `audio_codec`), `width`/`height`, then backfilled (`:48-55`).
 
-**Do NOT introduce `media_type = 'raw'.** The codebase encodes *"not video"* as a proxy for *"sharp can decode this"*, in at least six places:
+**Do NOT introduce `media_type = 'raw'`.** The codebase encodes *"not video"* as a proxy for *"sharp can decode this"*, in at least six places:
 
 - `backend/src/routes/adminPhotoDimensions.js:30`, `:125`, `:132`
 - `backend/src/routes/adminThumbnails.js:208`
