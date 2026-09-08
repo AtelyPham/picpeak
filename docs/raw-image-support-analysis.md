@@ -10,6 +10,65 @@
 
 ---
 
+## 0. Drift note (2026-09-08) - read before using any line number below
+
+This document was written against `d62e21c`. The branch now sits on `c71ffae`, 228 commits later.
+**Every FILE:LINE below is stale. Re-resolve each one with grep before editing anything.**
+
+`git log --oneline d62e21c..c71ffae` is a large security batch that touches the upload and
+photo-serving paths this plan edits. Skim it before starting Phase 1.
+
+### The four load-bearing findings still hold
+
+Re-verified by hand on 2026-09-08 at these locations:
+
+| Finding | Written as | Now at |
+|---|---|---|
+| `validateFileType` is still MIME-first. The core blocker. | `fileSecurityUtils.js:159-175` | `backend/src/utils/fileSecurityUtils.js:160` |
+| Both extension to MIME maps are still dng-only, no arw. Still CI-enforced identical. | `uploadSettings.js:21-42`, `fileTypes.ts:4-20` | `backend/src/services/uploadSettings.js:30-51`, `frontend/src/utils/fileTypes.ts:4-20` |
+| Watch-folder gate unchanged. | `fileWatcher.js:79` | `backend/src/services/fileWatcher.js:100` |
+| Archive-restore data loss unchanged. | `adminArchives.js:233` | `backend/src/routes/adminArchives.js:452` |
+
+### Obsolete: Phase 1 item 14
+
+Upstream `063977d` ("never serve a photo under its stored MIME, and stop trusting the
+chunked-upload type") removed the `photo.mime_type || 'image/jpeg'` pattern. Zero occurrences
+remain anywhere in `backend/src`. Item 14 needs re-scoping against what `063977d` actually
+built, not implementing as written.
+
+### Other upstream work that overlaps this plan
+
+Verified 2026-09-08:
+
+- **`adminThumbnails.js` was rewritten by `97d92f84`.** It no longer calls sharp directly. The
+  regenerate loop now goes through `ensureThumbnail({ ...photo, thumbnail_path: null })`, and the
+  delete of the superseded object is guarded on the storage key actually having changed. Trap 2
+  is resolved for managed photos. It is **not** resolved for external and reference photos, whose
+  branch still bypasses RAW handling, and `backend/scripts/regenerate-square-thumbnails.js:71`
+  still calls `generateThumbnail(originalPath, { regenerate: true })` directly.
+- **The `imageProcessor.js:358` gap still holds**, now at `imageProcessor.js:493`: the
+  external/reference branch of `ensureThumbnail` calls `generateThumbnail` without
+  `withProcessableImage`. The sized-tier work (`887bdbe6`, `011f6ae7`) added a second copy of the
+  same gap at `imageProcessor.js:1077` inside `ensureThumbnailAtWidth`. Phase 2 has to fix both.
+- **`extractRawPreview` now separates "exiftool is not installed" from "this file has no
+  preview"** and names the install command per platform. The Phase 4 bullet asking for that, and
+  the environment note calling the error opaque, are both done.
+- **EXIF orientation landed.** `c18f54ed` added orientation handling to thumbnails, heroes and
+  previews; `edef4d73` backfilled existing libraries. There is now an `orientedDimensions()`
+  helper at `imageProcessor.js:417`. Check Phase 1 item 10(d) against it before writing any new
+  orientation code.
+- **`withProcessableImage` call sites went from 6 to 10**: `imageProcessor.js:503, 731, 1079,
+  1146, 1225`, `photoProcessor.js:171, 535`, `photoReplacementService.js:164`, and
+  `adminPhotoDimensions.js:670, 680`. The last two close the Phase 2 row for
+  `adminPhotoDimensions.js:86`.
+- **`AuthenticatedImage.tsx` already has a `fallbackSrc` error path** at `:300-301`, plus a
+  fallback fetch at `:224-226`. Phase 1 item 15 should be re-checked against that rather than
+  adding one.
+
+Everything else in this document was written against `d62e21c` and has not been re-verified.
+
+---
+
 ## 1. Executive summary
 
 **PicPeak can already *process* a Sony `.ARW`. It just refuses to *accept* one.** The RAW decode shim that landed under upstream issue #821 — `RAW_EXTENSIONS`, `isRawFilename()`, `extractRawPreview()`, `withProcessableImage()` at `backend/src/services/imageProcessor.js:22-82` — explicitly lists `'arw'` and is wired into the real ingest worker (`backend/src/services/photoProcessor.js:517`) and all three lazy rendition generators. `exiftool` is installed in both `backend/Dockerfile:85` and `backend/Dockerfile.dev:14`. But every *admission* layer around it — the extension→MIME map (`backend/src/services/uploadSettings.js:21-42`), the security validator's allow-list (`backend/src/utils/fileSecurityUtils.js:105-116`), the browser file picker (`frontend/src/utils/fileTypes.ts:4-20`), the watch folder (`backend/src/services/fileWatcher.js:79`), the external-media importer, the archive restorer, and the transfer routes — knows only `dng`. `'arw'` appears **exactly once in the entire source tree**: `imageProcessor.js:22-25`.

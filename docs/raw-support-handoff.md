@@ -2,6 +2,28 @@
 
 You are picking up work that is **analysis-complete and implementation-not-started**. Read this file, then `docs/raw-image-support-analysis.md`, which is the actual plan.
 
+> **Drift note, 2026-09-08.** Both docs were written against `d62e21c`. The branch now sits on
+> `c71ffae`, 228 commits later. **Every FILE:LINE in this file and in the analysis is stale -
+> re-resolve each one with grep before editing anything.** The four load-bearing findings were
+> re-verified by hand and all still hold, at these locations:
+>
+> - `validateFileType` still MIME-first, the core blocker: `backend/src/utils/fileSecurityUtils.js:160`
+> - both extension to MIME maps still dng-only, no arw: `backend/src/services/uploadSettings.js:30-51` and `frontend/src/utils/fileTypes.ts:4-20`
+> - watch-folder gate unchanged: `backend/src/services/fileWatcher.js:100`
+> - archive-restore data loss unchanged: `backend/src/routes/adminArchives.js:452`
+>
+> Trap 2 below is now **half stale**. `97d92f84` rewrote `adminThumbnails.js` to regenerate
+> through `ensureThumbnail` instead of calling sharp, and guarded the delete on the storage key
+> actually changing, so managed RAW photos are safe. External and reference photos are not, and
+> `backend/scripts/regenerate-square-thumbnails.js:71` is unchanged.
+>
+> Phase 1 item 14 is obsolete: `063977d` removed the `photo.mime_type || 'image/jpeg'` pattern
+> everywhere in `backend/src`. It needs re-scoping, not implementing.
+>
+> `git log --oneline d62e21c..c71ffae` is a large security batch touching the upload and
+> photo-serving paths this plan edits. Skim it first. Section 0 of the analysis has the full
+> list of overlapping upstream work.
+
 ---
 
 ## Where the work lives
