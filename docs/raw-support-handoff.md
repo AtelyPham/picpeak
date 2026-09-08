@@ -12,10 +12,11 @@ You are picking up work that is **analysis-complete and implementation-not-start
 > - watch-folder gate unchanged: `backend/src/services/fileWatcher.js:100`
 > - archive-restore data loss unchanged: `backend/src/routes/adminArchives.js:452`
 >
-> Trap 2 below is now **half stale**. `97d92f84` rewrote `adminThumbnails.js` to regenerate
-> through `ensureThumbnail` instead of calling sharp, and guarded the delete on the storage key
-> actually changing, so managed RAW photos are safe. External and reference photos are not, and
-> `backend/scripts/regenerate-square-thumbnails.js:71` is unchanged.
+> Trap 2 below is **obsolete**. `#1129` removed the delete from `generateThumbnail`'s
+> `regenerate` option for its own reasons, so nothing destructive remains on that path, and
+> `97d92f84` rewrote `adminThumbnails.js` to regenerate through `ensureThumbnail`. All that was
+> left of the finding was RAW never getting a thumbnail through the external branch or through
+> `backend/scripts/regenerate-square-thumbnails.js:71`.
 >
 > Phase 1 item 14 is obsolete: `063977d` removed the `photo.mime_type || 'image/jpeg'` pattern
 > everywhere in `backend/src`. It needs re-scoping, not implementing.

@@ -334,5 +334,20 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
     );
   }
 
-  return <img src={imageSrc} alt={alt} onLoad={onLoad} {...props} />;
+  // onError as well as the fetch catch. A derivative that is present but
+  // undecodable — a truncated write, or an original a browser cannot render —
+  // comes back as HTTP 200, so the fetch succeeds and only the decode fails.
+  // Without this the tile silently shows nothing and the fallback never runs.
+  return (
+    <img
+      src={imageSrc}
+      alt={alt}
+      onLoad={onLoad}
+      {...props}
+      onError={(e) => {
+        setError(true);
+        props.onError?.(e);
+      }}
+    />
+  );
 };

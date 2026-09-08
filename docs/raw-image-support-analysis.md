@@ -40,12 +40,19 @@ built, not implementing as written.
 
 Verified 2026-09-08:
 
-- **`adminThumbnails.js` was rewritten by `97d92f84`.** It no longer calls sharp directly. The
-  regenerate loop now goes through `ensureThumbnail({ ...photo, thumbnail_path: null })`, and the
-  delete of the superseded object is guarded on the storage key actually having changed. Trap 2
-  is resolved for managed photos. It is **not** resolved for external and reference photos, whose
-  branch still bypasses RAW handling, and `backend/scripts/regenerate-square-thumbnails.js:71`
-  still calls `generateThumbnail(originalPath, { regenerate: true })` directly.
+- **Trap 2 is fully obsolete.** `#1129` removed the delete from `generateThumbnail`'s
+  `regenerate` option, and the comment at `imageProcessor.js:293-305` explains why: the delete ran
+  before sharp had opened the source, so an unreadable source left the old thumbnail gone and the
+  row pointing at nothing. Nothing destructive remains on this path. `97d92f84` separately
+  rewrote `adminThumbnails.js` to regenerate through `ensureThumbnail` rather than calling sharp,
+  guarding the superseded-object delete on the storage key actually having changed. What was left
+  of the finding was only that RAW could never *get* a thumbnail through the external/reference
+  branch or through `backend/scripts/regenerate-square-thumbnails.js:71`; both are fixed here.
+- **Phase 2's `adminPhotoDimensions.js:86` row is done upstream.** Both sharp calls are wrapped in
+  `withProcessableImage` at `:670` and `:680`.
+- **`nginx/nginx.conf` does exist and did lack `client_max_body_size`**, so anything including it
+  inherited nginx's 1 MB default. `frontend/nginx.conf`, the one that actually ships, has had 1G
+  at `:24` and `:129` all along.
 - **The `imageProcessor.js:358` gap still holds**, now at `imageProcessor.js:493`: the
   external/reference branch of `ensureThumbnail` calls `generateThumbnail` without
   `withProcessableImage`. The sized-tier work (`887bdbe6`, `011f6ae7`) added a second copy of the

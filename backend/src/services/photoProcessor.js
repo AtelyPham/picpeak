@@ -6,6 +6,7 @@ const { generatePhotoFilename } = require('../utils/filenameSanitizer');
 const { processUploadedVideo, extractVideoMetadata, isVideoMimeType } = require('./videoProcessor');
 const { getStorage } = require('./storage');
 const { resolvePhotoStorageKey } = require('./photoResolver');
+const { resolveUploadMimeType } = require('../utils/fileSecurityUtils');
 const logger = require('../utils/logger');
 
 function normalizeFiles(files) {
@@ -227,7 +228,9 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
         uploaded_by: uploadedBy,
         source_origin: 'managed',
         media_type: mediaType,
-        mime_type: file.mimetype
+        // Resolved, not claimed: a RAW arrives with an empty type from the
+        // browser, and storing that leaves the row with no type at all.
+        mime_type: resolveUploadMimeType(file.originalname, file.mimetype) || null
       };
 
       // Add video-specific metadata if applicable
@@ -428,7 +431,8 @@ async function queueFilesForProcessing(files, options = {}) {
           size_bytes: tempStats.size,
           captured_at: null,
           media_type: isVideo ? 'video' : 'image',
-          mime_type: file.mimetype,
+          // Resolved, not claimed — see the sync path above.
+          mime_type: resolveUploadMimeType(file.originalname, file.mimetype) || null,
           processing_status: 'pending',
           upload_id: uploadId,
         })

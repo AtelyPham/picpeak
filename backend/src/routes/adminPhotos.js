@@ -27,6 +27,7 @@ const {
   EXTENSION_TO_MIME
 } = require('../services/uploadSettings');
 const { resolvePhotoContentType } = require('../utils/photoContentType');
+const { originalNeedsPreview } = require('../utils/rawFormats');
 const { processUploadedPhotos } = require('../services/photoProcessor');
 const chunkedUpload = require('../services/chunkedUploadService');
 const watermarkGeneratorService = require('../services/watermarkGeneratorService');
@@ -1370,8 +1371,14 @@ router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requ
         id: photo.id,
         filename: photo.filename,
         original_filename: photo.original_filename || null,
-        // Use the correct admin photos router base for serving images
-        url: `/admin/photos/${eventId}/photo/${photo.id}`,
+        // Use the correct admin photos router base for serving images.
+        // RAW and HEIC originals go to the generated JPEG preview instead:
+        // this URL is only ever an <img>/<video> src admin-side (downloads use
+        // the /download route), and a browser cannot decode the original, so
+        // the admin viewer showed nothing but a broken frame for those.
+        url: originalNeedsPreview(photo)
+          ? `/admin/photos/${eventId}/preview/${photo.id}`
+          : `/admin/photos/${eventId}/photo/${photo.id}`,
         // Always expose a thumbnail URL; backend will generate on demand if missing
         thumbnail_url: `/admin/photos/${eventId}/thumbnail/${photo.id}`,
         type: photo.type,
