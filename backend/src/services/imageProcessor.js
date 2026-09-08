@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const logger = require('../utils/logger');
 const { db } = require('../database/db');
 const { getStorage } = require('./storage');
+const { ALLOWED_IMAGE_TYPES } = require('../utils/fileSecurityUtils');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -28,6 +29,41 @@ function isRawFilename(name) {
   if (!name || typeof name !== 'string') return false;
   const ext = path.extname(name).toLowerCase().replace(/^\./, '');
   return RAW_EXTENSIONS.has(ext);
+}
+
+/**
+ * Formats whose ORIGINAL bytes a browser can't render in an <img>: HEIC/HEIF
+ * and every camera RAW. For these the lightbox must be served the generated
+ * JPEG preview instead of the original, otherwise it shows a broken image, so
+ * gallery.js forces preview_url for them whatever the lightbox_preview_enabled
+ * toggle says.
+ *
+ * Detection is by MIME first, extension as a fallback, because browsers report
+ * these MIMEs inconsistently and often not at all.
+ *
+ * Both sets are derived. They used to be written out by hand in gallery.js and
+ * went stale the moment the RAW set grew past DNG: an .arw would upload, get a
+ * thumbnail, and then show a broken image the moment anyone opened it.
+ *
+ * EXPERIMENTAL: whether a preview actually renders still depends on the backend
+ * being able to decode the source — HEVC-in-HEIC on the prod image, exiftool
+ * for RAW. See #821.
+ */
+const NON_DISPLAYABLE_ORIGINAL_EXT = new Set([...RAW_EXTENSIONS, 'heic', 'heif']);
+const NON_DISPLAYABLE_ORIGINAL_MIME = new Set([
+  'image/heic',
+  'image/heif',
+  ...Object.entries(ALLOWED_IMAGE_TYPES)
+    .filter(([, config]) => config.raw)
+    .map(([mimeType]) => mimeType),
+]);
+
+function originalNeedsPreview(photo) {
+  const mime = (photo.mime_type || '').toLowerCase();
+  if (NON_DISPLAYABLE_ORIGINAL_MIME.has(mime)) return true;
+  const name = photo.original_filename || photo.filename || '';
+  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  return NON_DISPLAYABLE_ORIGINAL_EXT.has(ext);
 }
 
 /**
@@ -1296,6 +1332,13 @@ async function extractCaptureDate(imagePath) {
  */
 async function resizeToBox(inputBuffer, box, options = {}) {
   if (!box || !box.width || !box.height) return inputBuffer;
+  // RAW, for the same reason as HEIC below, but decided on the name because
+  // the bytes cannot be trusted to give the answer. Most RAW makes sharp throw
+  // and lands in the catch, which returns the input — the accident this makes
+  // deliberate. The one that does not is the danger: a RAW that libvips' TIFF
+  // loader happens to open falls through to the JPEG branch and ships JPEG
+  // bytes under a .arw name with a RAW mime, a file no converter will open.
+  if (options.sourceName && isRawFilename(options.sourceName)) return inputBuffer;
   try {
     const probe = sharp(inputBuffer, { limitInputPixels: 268402689, failOn: 'none' });
     const metadata = await probe.metadata();
@@ -1373,6 +1416,7 @@ module.exports = {
   extractCaptureDate,
   withLocalCopy,
   isRawFilename,
+  originalNeedsPreview,
   extractRawPreview,
   withProcessableImage,
   RAW_EXTENSIONS,

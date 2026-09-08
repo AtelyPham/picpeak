@@ -52,7 +52,7 @@ const { handleAsync, errorResponse } = require('../utils/routeHelpers');
 const { isGalleryHidden, guestBlockedByReveal, blockHiddenGallery } = require('../utils/revealMode');
 const { toIso } = require('../utils/dateNormalize');
 const { NotFoundError } = require('../utils/errors');
-const { ensureThumbnail, ensureHeroImage, ensurePreviewImage, withLocalCopy } = require('../services/imageProcessor');
+const { ensureThumbnail, ensureHeroImage, ensurePreviewImage, withLocalCopy, originalNeedsPreview } = require('../services/imageProcessor');
 const downloadZipService = require('../services/downloadZipService');
 const { renderPhotoForDownload, resolveWatermarkSettings } = require('../services/downloadRendition');
 const downloadJobService = require('../services/downloadJobService');
@@ -72,23 +72,6 @@ const {
 const { buildContentDisposition } = require('../utils/filenameSanitizer');
 const { getStorage } = require('../services/storage');
 
-// Formats whose ORIGINAL bytes a browser can't render in an <img> (HEIC/HEIF,
-// camera RAW/DNG). For these the lightbox must be served the generated JPEG
-// preview instead of `url` (the original) — otherwise it shows a broken image.
-// So we force `preview_url` for them regardless of the lightbox_preview_enabled
-// toggle. Detection is by MIME first, extension as a fallback (browsers report
-// these MIMEs inconsistently). EXPERIMENTAL: whether a preview actually renders
-// still depends on the backend being able to decode the source (HEVC-in-HEIC on
-// the prod image; exiftool for DNG) — see #821.
-const NON_DISPLAYABLE_ORIGINAL_EXT = new Set(['heic', 'heif', 'dng']);
-const NON_DISPLAYABLE_ORIGINAL_MIME = new Set(['image/heic', 'image/heif', 'image/x-adobe-dng']);
-function originalNeedsPreview(photo) {
-  const mime = (photo.mime_type || '').toLowerCase();
-  if (NON_DISPLAYABLE_ORIGINAL_MIME.has(mime)) return true;
-  const name = photo.original_filename || photo.filename || '';
-  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
-  return NON_DISPLAYABLE_ORIGINAL_EXT.has(ext);
-}
 const { setGalleryAuthCookies } = require('../utils/tokenUtils');
 // Read globals from app_settings (the real table) — settingsService.getSetting
 // queries a non-existent `settings` table and throws.
