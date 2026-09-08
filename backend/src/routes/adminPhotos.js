@@ -91,7 +91,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const { validateFileType, createFileUploadValidator } = require('../utils/fileSecurityUtils');
+const { validateFileType, createFileUploadValidator, resolveUploadMimeType } = require('../utils/fileSecurityUtils');
 
 // Create a multer instance that uses dynamically resolved allowed MIME types.
 // The allowed types are fetched from the database once per request (before multer
@@ -464,7 +464,9 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
             size_bytes: tempStats.size,
             captured_at: null,
             media_type: isVideo ? 'video' : 'image',
-            mime_type: file.mimetype,
+            // Resolved, not claimed. A RAW arrives with an empty type from the
+            // browser, and storing that leaves the row with no type at all.
+            mime_type: resolveUploadMimeType(file.originalname, file.mimetype) || null,
             processing_status: 'pending',
             upload_id: uploadId,
           })
