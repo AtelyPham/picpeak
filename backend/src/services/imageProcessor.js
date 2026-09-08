@@ -68,30 +68,76 @@ function originalNeedsPreview(photo) {
 
 /**
  * Extract the embedded full-resolution JPEG preview from a RAW/DNG file to a
- * temp .jpg and return its path. Tries the largest previews first
- * (JpgFromRaw → PreviewImage → ThumbnailImage). Throws if none can be extracted
- * or the result isn't a valid image — the caller treats that as a processing
- * failure (photo → 'failed'), same as any unreadable upload.
+ * temp .jpg and return its path. Throws if none can be extracted or the result
+ * isn't a valid image — the caller treats that as a processing failure
+ * (photo → 'failed'), same as any unreadable upload.
  */
+
+// Tag order matters, and the original order was wrong for most cameras.
+//
+// JpgFromRaw does not exist for ARW, and it does not exist for CR2 either.
+// exiftool defines JpgFromRawStart only for DNG, NEF, NRW, SRW, PEF, RW2 and
+// Canon CRW. Sony and Canon expose their full-size JPEG as PreviewImage. So
+// asking for JpgFromRaw first meant every Sony and Canon file paid for a whole
+// extra exiftool process — a Perl interpreter start, which is most of the cost
+// — before falling through to the tag that was always going to answer.
+//
+// PreviewImage first covers the common case in one spawn and costs the DNG and
+// Nikon files nothing but a reordering: they answer on the second tag instead
+// of the first.
+const RAW_PREVIEW_TAGS = ['-PreviewImage', '-JpgFromRaw', '-ThumbnailImage'];
+
+// The smallest long edge worth treating as a gallery source.
+//
+// ThumbnailImage is a 160x120 screen thumbnail. Some bodies have no
+// PreviewImage at all — exiftool documents the ILCE-5100, 7M2, 7RM2 and 7SM2
+// as writing an empty one — and without a floor the loop below would take that
+// 160x120 and hand it to the pipeline as the photo, silently. Every real
+// embedded preview clears this comfortably; the smallest widely reported is
+// Sony's 1616x1080.
+const MIN_RAW_PREVIEW_LONG_EDGE = 512;
+
+// exiftool is given a deadline and killed if it misses it.
+//
+// A wedged exiftool otherwise holds its worker slot until the janitor resets
+// the row to 'pending', at which point the next worker picks up the same file
+// and wedges on it too. One bad file could occupy the pool indefinitely.
+const EXIFTOOL_TIMEOUT_MS = 30_000;
+// Enough for any embedded preview - a full-size one off a 61 MP body is a few
+// megabytes. The old 256 MB let a malformed file balloon a worker's memory.
+const EXIFTOOL_MAX_BUFFER = 64 * 1024 * 1024;
+
 async function extractRawPreview(rawPath) {
   const outDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'picpeak-raw-'));
   const outPath = path.join(outDir, `${crypto.randomBytes(4).toString('hex')}.jpg`);
-  const tags = ['-JpgFromRaw', '-PreviewImage', '-ThumbnailImage'];
+  const cleanup = () => fsp.rm(outDir, { recursive: true, force: true }).catch(() => {});
   let lastErr;
-  for (const tag of tags) {
+  // Best result seen so far that did not clear the floor. Used only if nothing
+  // better turns up: a soft photo beats a photo the client cannot see at all.
+  let undersized = null;
+
+  for (const tag of RAW_PREVIEW_TAGS) {
     try {
       // `-b` writes the raw tag bytes to stdout; -w isn't reliable across tags,
       // so capture stdout as a buffer and write it ourselves.
       const { stdout } = await execFileAsync('exiftool', ['-b', tag, rawPath], {
         encoding: 'buffer',
-        maxBuffer: 256 * 1024 * 1024,
+        maxBuffer: EXIFTOOL_MAX_BUFFER,
+        timeout: EXIFTOOL_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
       });
       if (stdout && stdout.length > 0) {
         await fsp.writeFile(outPath, stdout);
         // Validate it's a real, decodable image before handing it to the pipeline.
         const meta = await sharp(outPath).metadata();
         if (meta.width && meta.height) {
-          return { path: outPath, cleanup: () => fsp.rm(outDir, { recursive: true, force: true }).catch(() => {}) };
+          const longEdge = Math.max(meta.width, meta.height);
+          if (longEdge >= MIN_RAW_PREVIEW_LONG_EDGE) {
+            return { path: outPath, cleanup };
+          }
+          if (!undersized || longEdge > undersized.longEdge) {
+            undersized = { longEdge, size: `${meta.width}x${meta.height}`, tag, bytes: stdout };
+          }
         }
       }
     } catch (err) {
@@ -103,7 +149,20 @@ async function extractRawPreview(rawPath) {
       if (err && err.code === 'ENOENT') break;
     }
   }
-  await fsp.rm(outDir, { recursive: true, force: true }).catch(() => {});
+
+  if (undersized) {
+    // Say so. This is the difference between a gallery that looks bad and a
+    // gallery that looks bad for no discoverable reason.
+    logger.warn(
+      `${path.basename(rawPath)}: no embedded preview above `
+      + `${MIN_RAW_PREVIEW_LONG_EDGE}px. Falling back to ${undersized.tag.replace(/^-/, '')} `
+      + `at ${undersized.size}, so this photo will be soft everywhere it is shown.`
+    );
+    await fsp.writeFile(outPath, undersized.bytes);
+    return { path: outPath, cleanup };
+  }
+
+  await cleanup();
 
   // Distinguish "the tool isn't installed" from "this file has no preview".
   // Both used to surface as `No usable embedded preview in RAW file X:
@@ -525,7 +584,16 @@ async function ensureThumbnail(photo) {
     const sourceBasename = path.basename(photo.external_relpath || photo.filename || `photo-${photo.id}`);
     const outputBasename = `ext${photo.id}_${sourceBasename}`;
     logger.info(`Ensuring thumbnail for external photo ${photo.id} from ${localPath}`);
-    newThumbnailPath = await generateThumbnail(localPath, { regenerate: true, outputBasename });
+    // Through the RAW extraction, like the managed branch below. Without it a
+    // RAW on a NAS mount can never have a thumbnail: sharp throws on the
+    // original every time, eagerly and lazily, so the tile stays blank
+    // permanently rather than being repaired on the next view.
+    const proc = await withProcessableImage(localPath, sourceBasename);
+    try {
+      newThumbnailPath = await generateThumbnail(proc.path, { regenerate: true, outputBasename });
+    } finally {
+      await proc.cleanup();
+    }
   } else {
     let sourceKey;
     try {
@@ -1107,7 +1175,12 @@ async function ensureThumbnailAtWidth(photo, width) {
       // either the old file or the new one and never a hole.
       if (isExternal) {
         const localPath = resolvePhotoFilePath(event, photo);
-        return await generateThumbnail(localPath, { outputBasename, width, height });
+        const proc = await withProcessableImage(localPath, photo.external_relpath || photo.filename);
+        try {
+          return await generateThumbnail(proc.path, { outputBasename, width, height });
+        } finally {
+          await proc.cleanup();
+        }
       }
       const sourceKey = resolvePhotoStorageKey(event, photo);
       if (!sourceKey) return null;
