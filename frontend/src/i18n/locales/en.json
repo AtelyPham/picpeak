@@ -252,7 +252,8 @@
     "replacedFiles_other": "{{count}} photos replaced",
     "uploadingChunks_one": "{{count}} chunk uploading",
     "uploadingChunks_other": "{{count}} chunks uploading",
-    "fileTooLarge": "File too large: {{name}} (max {{limit}}MB)"
+    "fileTooLarge": "File too large: {{name}} (max {{limit}}MB)",
+    "invalidFileType": "Unsupported file type: {{names}}"
   },
   "navigation": {
     "dashboard": "Dashboard",

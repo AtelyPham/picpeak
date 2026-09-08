@@ -30,6 +30,26 @@ const EXTENSION_TO_MIME: Record<string, string> = {
   srw: 'image/x-samsung-srw',
 };
 
+/**
+ * Extensions no browser puts a type on.
+ *
+ * macOS and Windows register no MIME for camera RAW, so `file.type` is an
+ * empty string for a .arw the user just picked, and some Linux desktops report
+ * application/octet-stream. Matching on `file.type` alone drops those files
+ * before they are ever uploaded.
+ *
+ * Kept in step with the backend's RAW set by
+ * backend/__tests__/services/uploadSettingsFileTypes.test.js. Widening it here
+ * without widening it there would let the picker accept a file the server then
+ * rejects, which is a worse experience than the greyed-out picker.
+ */
+const UNTYPED_EXTENSIONS = new Set([
+  'dng', 'arw', 'sr2', 'srf', 'cr2', 'nef', 'nrw', 'orf', 'pef', 'srw',
+]);
+
+const extensionOf = (filename: string): string =>
+  filename.toLowerCase().split('.').pop() || '';
+
 const DEFAULT_ALLOWED = 'jpg,jpeg,png,webp';
 
 /**
@@ -58,9 +78,48 @@ export function extensionsToMimeTypes(extString?: string | null): string[] {
 /**
  * Convert a comma-separated extension string to an HTML `accept` attribute
  * value, e.g. "image/jpeg,image/png,video/mp4".
+ *
+ * The untyped extensions are also listed in their dotted form. A MIME-only
+ * accept list cannot match a file the OS has no MIME for, so without this a
+ * .arw is greyed out in the file picker and cannot be selected at all. Only
+ * those extensions get a token, so a default install's accept string is
+ * unchanged - which matters on Android, where a non-MIME token reroutes the
+ * system picker (see buildUploadAcceptString).
  */
 export function extensionsToAcceptString(extString?: string | null): string {
-  return extensionsToMimeTypes(extString).join(',');
+  const mimeTypes = extensionsToMimeTypes(extString);
+  const dotted = (extString?.trim() || DEFAULT_ALLOWED)
+    .split(',')
+    .map(ext => ext.trim().toLowerCase().replace(/^\./, ''))
+    .filter(ext => UNTYPED_EXTENSIONS.has(ext) && EXTENSION_TO_MIME[ext])
+    .map(ext => `.${ext}`);
+  return [...mimeTypes, ...Array.from(new Set(dotted))].join(',');
+}
+
+/**
+ * The MIME type an upload should be judged as.
+ *
+ * Mirrors resolveUploadMimeType in backend/src/utils/fileSecurityUtils.js, and
+ * has to keep mirroring it: if this is looser, the picker accepts files the
+ * server then rejects with a message about system settings.
+ */
+export function resolveUploadMimeType(filename: string, type: string): string {
+  const claimed = (type || '').trim();
+  if (claimed && claimed.toLowerCase() !== 'application/octet-stream') return claimed;
+
+  const ext = extensionOf(filename);
+  return UNTYPED_EXTENSIONS.has(ext) ? (EXTENSION_TO_MIME[ext] || '') : '';
+}
+
+/**
+ * Is this file one the configured settings accept?
+ */
+export function isAllowedUploadFile(
+  file: { name: string; type: string },
+  allowedMimeTypes: string[]
+): boolean {
+  const mime = resolveUploadMimeType(file.name, file.type);
+  return !!mime && allowedMimeTypes.includes(mime);
 }
 
 /**
@@ -90,8 +149,8 @@ export function extensionsToAcceptString(extString?: string | null): string {
  * accept token the browser ignores.
  *
  * Neither token widens what is actually accepted: `addFiles` validates every
- * file against `extensionsToMimeTypes`, which only ever emits types it has a
- * mapping for, so nothing new can get past it.
+ * file through `isAllowedUploadFile`, which only ever resolves to a type the
+ * map has, so nothing new can get past it.
  */
 export function buildUploadAcceptString(extString?: string | null, userAgent?: string): string {
   const accept = extensionsToAcceptString(extString);
