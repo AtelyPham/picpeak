@@ -21,34 +21,47 @@ sharp.concurrency(2); // Limit concurrent operations
 const { RAW_EXTENSIONS, isRawFilename, originalNeedsPreview } = require('../utils/rawFormats');
 
 /**
- * Extract the embedded full-resolution JPEG preview from a RAW/DNG file to a
- * temp .jpg and return its path. Throws if none can be extracted or the result
- * isn't a valid image — the caller treats that as a processing failure
- * (photo → 'failed'), same as any unreadable upload.
+ * Distinguish "the tool isn't installed" from "this file has no preview".
+ *
+ * Both used to surface as `No usable embedded preview in RAW file X: spawn
+ * exiftool ENOENT`, which reads as a corrupt photo and sends people hunting
+ * through their RAWs instead of installing a package. RAW upload is the only
+ * feature that needs exiftool, so an install can be missing it and not find
+ * out until someone uploads a CR3.
  */
+const exiftoolMissingError = (rawPath) => new Error(
+  'exiftool is not installed on the server, and it is required to read '
+  + `RAW files (${path.basename(rawPath)}). Install it (Debian/Ubuntu: `
+  + 'apt-get install libimage-exiftool-perl, Alpine: apk add exiftool, '
+  + 'macOS: brew install exiftool) and retry. JPEG and other ordinary '
+  + 'images do not need it.'
+);
 
-// Tag order matters, and the original order was wrong for most cameras.
+// The embedded images a RAW might carry, and how to ask how big each one is.
 //
-// JpgFromRaw does not exist for ARW, and it does not exist for CR2 either.
-// exiftool defines JpgFromRawStart only for DNG, NEF, NRW, SRW, PEF, RW2 and
-// Canon CRW. Sony and Canon expose their full-size JPEG as PreviewImage. So
-// asking for JpgFromRaw first meant every Sony and Canon file paid for a whole
-// extra exiftool process — a Perl interpreter start, which is most of the cost
-// — before falling through to the tag that was always going to answer.
+// A camera embeds more than one. A Sony ILCE-7M5 ARW carries all three: a
+// 7008x4672 JpgFromRaw, a 1616x1080 PreviewImage, and a 160x120
+// ThumbnailImage. Which tag holds the big one is not something you can predict
+// from the format - older Sony bodies have no JpgFromRaw at all and their
+// PreviewImage is the best available - so the choice is made per file from
+// what is actually in it rather than from a fixed order.
 //
-// PreviewImage first covers the common case in one spawn and costs the DNG and
-// Nikon files nothing but a reordering: they answer on the second tag instead
-// of the first.
-const RAW_PREVIEW_TAGS = ['-PreviewImage', '-JpgFromRaw', '-ThumbnailImage'];
+// This matters by a factor of twenty. Taking PreviewImage from an ILCE-7M5
+// would cap a 36.7 MP photo at 1.7 MP, below PicPeak's own 1920px preview
+// target, and the hero generator would then upscale that.
+const RAW_PREVIEW_TAGS = [
+  { tag: '-JpgFromRaw', lengthTag: 'JpgFromRawLength' },
+  { tag: '-PreviewImage', lengthTag: 'PreviewImageLength' },
+  { tag: '-ThumbnailImage', lengthTag: 'ThumbnailLength' },
+];
 
 // The smallest long edge worth treating as a gallery source.
 //
-// ThumbnailImage is a 160x120 screen thumbnail. Some bodies have no
-// PreviewImage at all — exiftool documents the ILCE-5100, 7M2, 7RM2 and 7SM2
-// as writing an empty one — and without a floor the loop below would take that
-// 160x120 and hand it to the pipeline as the photo, silently. Every real
-// embedded preview clears this comfortably; the smallest widely reported is
-// Sony's 1616x1080.
+// ThumbnailImage is a 160x120 screen thumbnail. Some bodies write an empty
+// PreviewImage - exiftool documents the ILCE-5100, 7M2, 7RM2 and 7SM2 - and
+// without a floor a file like that would hand 160x120 to the pipeline as the
+// photo, silently. Every real embedded preview clears this comfortably; the
+// smallest widely reported is Sony's 1616x1080.
 const MIN_RAW_PREVIEW_LONG_EDGE = 512;
 
 // exiftool is given a deadline and killed if it misses it.
@@ -57,29 +70,137 @@ const MIN_RAW_PREVIEW_LONG_EDGE = 512;
 // the row to 'pending', at which point the next worker picks up the same file
 // and wedges on it too. One bad file could occupy the pool indefinitely.
 const EXIFTOOL_TIMEOUT_MS = 30_000;
-// Enough for any embedded preview - a full-size one off a 61 MP body is a few
-// megabytes. The old 256 MB let a malformed file balloon a worker's memory.
+// Enough for any embedded preview - the full-size JPEG in a 36.7 MP ARW is
+// 2.4 MB. The old 256 MB let a malformed file balloon a worker's memory.
 const EXIFTOOL_MAX_BUFFER = 64 * 1024 * 1024;
 
+const runExiftool = (args, options = {}) => execFileAsync('exiftool', args, {
+  maxBuffer: EXIFTOOL_MAX_BUFFER,
+  timeout: EXIFTOOL_TIMEOUT_MS,
+  killSignal: 'SIGKILL',
+  ...options,
+});
+
+/**
+ * Ask what a RAW actually contains: how many bytes each embedded image is, and
+ * the orientation the camera recorded.
+ *
+ * One spawn, and it settles both of the things that used to be guessed.
+ *
+ * Byte length rather than pixel size because there is no size tag for
+ * JpgFromRaw - only PreviewImageSize exists - and the lengths are far enough
+ * apart (2.4 MB against 285 KB against 7.8 KB on the same file) to rank the
+ * candidates correctly. The extracted result is still measured before it is
+ * accepted, so a pathologically compressed preview cannot slip through on
+ * bytes alone.
+ *
+ * @param {string} rawPath
+ * @returns {Promise<{tags: string[], orientation: number|null}>}
+ */
+async function probeRawPreviews(rawPath) {
+  const { stdout } = await runExiftool([
+    '-json', '-n',
+    ...RAW_PREVIEW_TAGS.map(({ lengthTag }) => `-${lengthTag}`),
+    '-Orientation',
+    rawPath,
+  ], { encoding: 'utf8' });
+
+  const [probe] = JSON.parse(stdout);
+  const present = RAW_PREVIEW_TAGS
+    .map(({ tag, lengthTag }) => ({ tag, length: Number(probe && probe[lengthTag]) || 0 }))
+    .filter(({ length }) => length > 0)
+    .sort((a, b) => b.length - a.length);
+
+  const orientation = Number(probe && probe.Orientation);
+  return {
+    tags: present.map(({ tag }) => tag),
+    orientation: Number.isInteger(orientation) ? orientation : null,
+  };
+}
+
+/**
+ * Record the camera's orientation on the extracted preview.
+ *
+ * The extracted bytes carry NO EXIF at all - verified on an ILCE-7M5 ARW,
+ * where the container reports Orientation 8 (rotate 270) and all three
+ * embedded images come out bare. So the `.rotate()` in generateThumbnail and
+ * its siblings has nothing to act on, and every portrait RAW would be sideways
+ * in the grid, the lightbox and the hero, with photos.width/height describing
+ * the landscape frame.
+ *
+ * Writing the tag rather than rotating the pixels, for two reasons. exiftool
+ * rewrites metadata without touching the JPEG's pixel data, so it costs no
+ * quality where a sharp re-encode of a 32.7 MP frame would. And it leaves the
+ * preview looking exactly like an ordinary EXIF-tagged JPEG upload, so every
+ * consumer downstream - `.rotate()`, `orientedDimensions()` - keeps behaving
+ * the way it already does, with no RAW special case.
+ *
+ * A preview that states its own orientation is left alone. Sony's states
+ * nothing, but this runs for seventeen formats and the vendors agree on very
+ * little; where a preview does carry the tag it is describing its own pixels,
+ * which the container's value may well contradict. Overwriting it would rotate
+ * an already-upright photo.
+ *
+ * @param {string} previewPath
+ * @param {number|null} orientation - from the RAW container
+ * @param {number|undefined} previewOrientation - what the extracted preview declares, if any
+ */
+async function applyContainerOrientation(previewPath, orientation, previewOrientation) {
+  if (!orientation || orientation === 1) return;
+  if (previewOrientation !== undefined) return;
+  try {
+    await runExiftool([`-Orientation=${orientation}`, '-n', '-overwrite_original', previewPath]);
+  } catch (err) {
+    // A preview that is right side up in every other respect beats a failed
+    // photo, so this warns rather than throws.
+    logger.warn(
+      `Could not set orientation ${orientation} on the preview extracted from `
+      + `${path.basename(previewPath)}: ${err.message}. A portrait photo may appear rotated.`
+    );
+  }
+}
+
+/**
+ * Extract the embedded full-resolution JPEG preview from a RAW/DNG file to a
+ * temp .jpg and return its path. Throws if none can be extracted or the result
+ * isn't a valid image — the caller treats that as a processing failure
+ * (photo → 'failed'), same as any unreadable upload.
+ */
 async function extractRawPreview(rawPath) {
   const outDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'picpeak-raw-'));
   const outPath = path.join(outDir, `${crypto.randomBytes(4).toString('hex')}.jpg`);
   const cleanup = () => fsp.rm(outDir, { recursive: true, force: true }).catch(() => {});
   let lastErr;
-  // Best result seen so far that did not clear the floor. Used only if nothing
+  // Best result so far that did not clear the floor. Used only if nothing
   // better turns up: a soft photo beats a photo the client cannot see at all.
   let undersized = null;
 
-  for (const tag of RAW_PREVIEW_TAGS) {
+  let candidates = RAW_PREVIEW_TAGS.map(({ tag }) => tag);
+  let orientation = null;
+  try {
+    const probe = await probeRawPreviews(rawPath);
+    // Narrow to what the probe actually found. An empty list means the probe
+    // read the file and it carries nothing, so trying all three would be three
+    // spawns to learn what one already said.
+    candidates = probe.tags;
+    orientation = probe.orientation;
+  } catch (err) {
+    lastErr = err;
+    if (err && err.code === 'ENOENT') {
+      await cleanup();
+      throw exiftoolMissingError(rawPath);
+    }
+    // Any other probe failure falls back to trying every tag, biggest first.
+    // Worth doing: the probe is the fussier of the two calls, and an
+    // extraction that would have worked should not be lost to it.
+    logger.debug(`RAW probe failed for ${path.basename(rawPath)}, trying every tag: ${err.message}`);
+  }
+
+  for (const tag of candidates) {
     try {
       // `-b` writes the raw tag bytes to stdout; -w isn't reliable across tags,
       // so capture stdout as a buffer and write it ourselves.
-      const { stdout } = await execFileAsync('exiftool', ['-b', tag, rawPath], {
-        encoding: 'buffer',
-        maxBuffer: EXIFTOOL_MAX_BUFFER,
-        timeout: EXIFTOOL_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-      });
+      const { stdout } = await runExiftool(['-b', tag, rawPath], { encoding: 'buffer' });
       if (stdout && stdout.length > 0) {
         await fsp.writeFile(outPath, stdout);
         // Validate it's a real, decodable image before handing it to the pipeline.
@@ -87,10 +208,17 @@ async function extractRawPreview(rawPath) {
         if (meta.width && meta.height) {
           const longEdge = Math.max(meta.width, meta.height);
           if (longEdge >= MIN_RAW_PREVIEW_LONG_EDGE) {
+            await applyContainerOrientation(outPath, orientation, meta.orientation);
             return { path: outPath, cleanup };
           }
           if (!undersized || longEdge > undersized.longEdge) {
-            undersized = { longEdge, size: `${meta.width}x${meta.height}`, tag, bytes: stdout };
+            undersized = {
+              longEdge,
+              size: `${meta.width}x${meta.height}`,
+              tag,
+              bytes: stdout,
+              orientation: meta.orientation,
+            };
           }
         }
       }
@@ -113,25 +241,14 @@ async function extractRawPreview(rawPath) {
       + `at ${undersized.size}, so this photo will be soft everywhere it is shown.`
     );
     await fsp.writeFile(outPath, undersized.bytes);
+    await applyContainerOrientation(outPath, orientation, undersized.orientation);
     return { path: outPath, cleanup };
   }
 
   await cleanup();
 
-  // Distinguish "the tool isn't installed" from "this file has no preview".
-  // Both used to surface as `No usable embedded preview in RAW file X:
-  // spawn exiftool ENOENT`, which reads as a corrupt photo and sends people
-  // hunting through their RAWs instead of installing a package. RAW upload is
-  // the only feature that needs exiftool, so an install can be missing it and
-  // not find out until someone uploads a CR3.
   if (lastErr && lastErr.code === 'ENOENT') {
-    throw new Error(
-      'exiftool is not installed on the server, and it is required to read '
-      + `RAW files (${path.basename(rawPath)}). Install it (Debian/Ubuntu: `
-      + 'apt-get install libimage-exiftool-perl, Alpine: apk add exiftool, '
-      + 'macOS: brew install exiftool) and retry. JPEG and other ordinary '
-      + 'images do not need it.'
-    );
+    throw exiftoolMissingError(rawPath);
   }
 
   throw new Error(`No usable embedded preview in RAW file ${path.basename(rawPath)}: ${lastErr ? lastErr.message : 'no preview tag returned data'}`);

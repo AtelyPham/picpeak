@@ -83,19 +83,35 @@ Every `FILE:LINE` in the analysis was read, not inferred — nine parallel agent
 
 5. **The backend and frontend extension→MIME maps are CI-enforced identical.** `backend/__tests__/services/uploadSettingsFileTypes.test.js:48-50` parses `frontend/src/utils/fileTypes.ts` with a strict regex that **throws** on anything it cannot read. Keep entries as `arw: 'image/x-sony-arw',` — one pair per line, single quotes, no computed keys. Both maps must change in the same commit.
 
-6. **`-JpgFromRaw` does not exist for ARW or CR2.** `imageProcessor.js:43` tries it first, so every ARW burns a wasted exiftool spawn before succeeding on `-PreviewImage`. Worse, there is **no minimum-size floor** at `:57`, so any RAW lacking a preview silently accepts a 160×120 `ThumbnailImage` as the gallery source. Also add `timeout` + `killSignal` to the `execFile` at `:49-52` — without them a wedged exiftool holds a worker slot until the janitor resets the row to `'pending'`, and the next worker wedges on the same file (unbounded retry loop).
+6. ~~**`-JpgFromRaw` does not exist for ARW or CR2.**~~ **WRONG, and wrong in the expensive direction. Corrected 2026-09-11 against a real file.** A Sony ILCE-7M5 ARW carries a 7008×4672 `JpgFromRaw` (2.4 MB) *and* a 1616×1080 `PreviewImage` (285 KB) *and* a 160×120 `ThumbnailImage`. Putting `PreviewImage` first, as this trap advised, would have capped a 36.7 MP photo at 1.7 MP. Which tag holds the big image varies by body, so extraction now probes the file first and takes the largest thing present. The rest of the trap held: there was no minimum-size floor at `:57`, so a RAW lacking its larger previews silently accepted a 160×120 `ThumbnailImage` as the gallery source, and `execFile` had no `timeout` or `killSignal`, so a wedged exiftool held a worker slot until the janitor reset the row to `'pending'` and the next worker wedged on the same file.
+
+7. **The extracted preview carries no EXIF at all.** Verified on the same file: the container says `Orientation` 8 (rotate 270 CW) and all three embedded images come out bare. The `.rotate()` in `generateThumbnail` and its siblings therefore has nothing to act on, and every portrait RAW is sideways in the grid, the lightbox and the hero, with `photos.width/height` describing the landscape frame. The orientation has to be written onto the extracted preview. Write the tag with exiftool rather than rotating pixels with sharp: it touches no pixel data, and it leaves the preview looking like an ordinary EXIF-tagged JPEG so nothing downstream needs a RAW special case.
 
 ---
 
-## Two questions that change the plan — ask the user first
+## Both blocking questions are answered
 
-1. **What resolution is the embedded preview on their actual camera bodies?**
-   ```
-   exiftool -PreviewImageSize -ThumbnailImageSize -Orientation -ImageSize DSC0001.ARW
-   ```
-   Sony's embedded `PreviewImage` is widely reported at ~1616×1080 — *below* PicPeak's own 1920px hero/preview targets, and the hero generator upscales. If that holds, a 61 MP file gets a sub-1080p gallery and `photos.width/height` advertises 1.7 MP. That moves the LibRaw option (§4 option b, planned for Phase 4) from optional to required. **This could not be determined from the repo and is the single most decision-relevant fact.**
+1. **Embedded preview resolution: full, on a current body.** Sony **ILCE-7M5**, `DSC00632.ARW`
+   (41 MB), exiftool 13.55:
 
-2. **Gallery browsing, or download-only delivery?** If clients only need to *download* RAW and never browse it, the entire quality question disappears and the work shrinks substantially. Related: "deliver RAW to clients" maps more naturally onto PicTransfer (`adminTransfers.js`) than onto galleries — a separate settings path, a smaller independent change, and its client-facing upload page currently has no client-side type gate at all.
+   ```
+   JpgFromRawLength   : 2393931   ->  7008x4672  (32.7 MP)
+   PreviewImageLength :  285137   ->  1616x1080  ( 1.7 MP)
+   ThumbnailLength    :    7833   ->   160x120
+   Orientation        : 8 (rotate 270 CW)
+   ImageSize          : 7168x5120 (36.7 MP sensor)
+   ```
+
+   Taking the largest embedded image yields a 1280×1920 lightbox preview (hits the 1920 target),
+   a 1920×1080 hero with no upscale, a correctly portrait thumbnail, and `4672x7008` stored
+   dimensions. **LibRaw is not required.** Extraction is 611 ms in 3 exiftool spawns.
+
+   An older Sony without `JpgFromRaw` really is capped at 1616×1080. Re-run the probe per body.
+
+2. **Gallery browsing plus download.** Confirmed by the user, so Phases 1 through 3 are in scope
+   and PicTransfer is not the delivery surface. Note the transfer routes are separately broken
+   for PDF, ZIP and TIFF: all three are advertised in `DEFAULT_ALLOWED` but have no
+   `ALLOWED_MEDIA_TYPES` entry, so `validateFileType` rejects every one of them.
 
 §10 of the analysis has eight more open questions (XMP sidecar pairing for Lightroom, watermarking policy for files that can't carry a watermark, what to do when a RAW has no extractable preview).
 

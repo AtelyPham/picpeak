@@ -72,6 +72,27 @@ Verified 2026-09-08:
   fallback fetch at `:224-226`. Phase 1 item 15 should be re-checked against that rather than
   adding one.
 
+### Measured against a real file, 2026-09-11
+
+Sony **ILCE-7M5**, `DSC00632.ARW`, 41 MB, exiftool 13.55. This refutes two load-bearing claims in
+§4 (both corrected in place there) and answers §10 Q1:
+
+- `JpgFromRaw` **exists** for ARW and is the full-size frame: 7008x4672, 2393931 bytes.
+  `PreviewImage` is 1616x1080 as predicted, and `ThumbnailImage` is 160x120. So the plan's
+  recommended reorder to put `PreviewImage` first would have been a twenty-fold quality
+  regression. Extraction now probes the file and takes the largest image present.
+- There is **no `JpgFromRawSize` tag**, so the §4.3 discovery probe as specified cannot see the
+  biggest preview. `JpgFromRawLength`, `PreviewImageLength` and `ThumbnailLength` all exist, so
+  the probe ranks on byte length and verifies real dimensions after extraction.
+- The extracted preview carries **no EXIF at all**. The container reports `Orientation` 8, and
+  all three embedded images come out bare, so every portrait RAW would be sideways everywhere.
+  The orientation is now written onto the preview with exiftool, which touches no pixel data.
+- Renditions from the largest image: 200x300 thumbnail (portrait), 1280x1920 lightbox preview
+  (hits the 1920 target), 1920x1080 hero with no upscale, `4672x7008` stored dimensions.
+- 611 ms, 3 exiftool spawns for a portrait file and 2 for a landscape one.
+- A Windows PE binary renamed `evil.arw` passes the extension gate and is rejected by the
+  magic-number check, which is Phase 1 acceptance criterion 8.
+
 Everything else in this document was written against `d62e21c` and has not been re-verified.
 
 ---
@@ -216,20 +237,57 @@ Two consequences worth internalising:
 
 ## 4. Architecture decision — how to decode RAW
 
-### The Sony tag-ordering trap (verified against exiftool source)
+### The Sony tag-ordering trap
+
+> **CORRECTED 2026-09-11 against a real file.** Everything below this quote was wrong in the
+> direction that matters, and acting on it would have cost a factor of twenty in resolution.
+> Measured on `DSC00632.ARW` from a Sony **ILCE-7M5**, exiftool 13.55:
+>
+> ```
+> [IFD2] JpgFromRawLength    : 2393931   ->  7008x4672  (32.7 MP)
+> [IFD0] PreviewImageLength  :  285137   ->  1616x1080  ( 1.7 MP)
+> [IFD1] ThumbnailLength     :    7833   ->   160x120
+> [IFD0] Orientation         : 8 (rotate 270 CW)
+> ```
+>
+> **`JpgFromRaw` does exist for ARW**, at least on current bodies, and it is the full-size
+> frame. The original order (`JpgFromRaw` first) was therefore *right* for this camera, and
+> "reorder to put `PreviewImage` first" would have capped a 36.7 MP photo at 1.7 MP.
+>
+> The real lesson is that neither order is safe, because which tag holds the big image varies
+> by body. `imageProcessor.js` now probes the file first - one `exiftool -json -n` spawn reading
+> `JpgFromRawLength`, `PreviewImageLength`, `ThumbnailLength` and `Orientation` - and takes the
+> largest thing actually present. Note there is **no `JpgFromRawSize` tag**; only
+> `PreviewImageSize` exists, which is why the probe ranks on byte length and then verifies the
+> real pixel dimensions after extraction.
 
 `imageProcessor.js:43`: `const tags = ['-JpgFromRaw', '-PreviewImage', '-ThumbnailImage'];`
 
-**`JpgFromRaw` does not exist for ARW — and it does not exist for CR2 either.** In exiftool, `JpgFromRawStart` is defined only for DNG SubIFD2, NEF/NRW/SRW SubIFD, PEF IFD2, Panasonic RW2, and Canon CRW (`Exif.pm:673-682`, `:1238-1247`, `:1251-1260`). Canon CR2's full-res JPEG is exposed as `PreviewImage` in IFD0 (`Exif.pm:645-655`). Sony ARW's preview is likewise `PreviewImageStart` in IFD0, "for all models" (`Exif.pm:1226-1232`).
+The claim as originally written: in exiftool, `JpgFromRawStart` is defined only for DNG SubIFD2, NEF/NRW/SRW SubIFD, PEF IFD2, Panasonic RW2, and Canon CRW (`Exif.pm:673-682`, `:1238-1247`, `:1251-1260`); Canon CR2's full-res JPEG is exposed as `PreviewImage` in IFD0 (`Exif.pm:645-655`); Sony ARW's preview is likewise `PreviewImageStart` in IFD0, "for all models" (`Exif.pm:1226-1232`). **The ILCE-7M5 measurement above refutes the Sony half of this.** The Canon half is untested.
 
-Of PicPeak's 17 `RAW_EXTENSIONS`, `-JpgFromRaw` can return data for **6** (`dng nef nrw srw pef rw2`) and returns nothing for **11** (`arw sr2 srf cr2 cr3 raf orf raw 3fr dcr kdc`).
-
-- **Consequence today:** every ARW burns a wasted `exiftool` process spawn before succeeding on `-PreviewImage`. exiftool is a Perl script — interpreter startup dominates. With three lazy generators each calling `withProcessableImage` independently (`imageProcessor.js:370`, `:547`, `:682`, no caching), one ARW can cost **~8 spawns** over its lifetime.
-- **It does *not* degrade to a 160×120 thumbnail** for Sony — `-PreviewImage` always hits. But `imageProcessor.js:57` has no size floor (`if (meta.width && meta.height)`), so for any RAW where `PreviewImage` is absent (exiftool `Sony.pm:918-926` documents ILCE-5100/7M2/7RM2/7SM2 with `Size 0, Offset 0`), a `ThumbnailImage` **is** silently accepted.
+- **A wasted spawn was still a real cost**, just not on the file it was claimed for: a body with no `JpgFromRaw` paid for the miss. With three lazy generators each calling `withProcessableImage` independently (`imageProcessor.js:370`, `:547`, `:682`, no caching), one RAW can cost **~8 spawns** over its lifetime. The probe does not fix that; caching the extracted preview (Phase 4) does.
+- **The missing size floor was real.** `imageProcessor.js:57` had none (`if (meta.width && meta.height)`), so for any RAW where the larger previews are absent (exiftool `Sony.pm:918-926` documents ILCE-5100/7M2/7RM2/7SM2 with `Size 0, Offset 0`), a 160×120 `ThumbnailImage` **was** silently accepted as the photo.
 
 ### The quality ceiling
 
-Sony's embedded `PreviewImage` is widely reported as **~1616×1080 (~1.7 MP)** across the Alpha line. Against PicPeak's own constants:
+> **CORRECTED 2026-09-11: there is no ceiling on a current Sony body.** The 1616×1080 figure is
+> right for `PreviewImage` and confirmed on an ILCE-7M5 - but that body also carries a
+> 7008×4672 `JpgFromRaw`, so the table below describes a file that was never the best available.
+> Measured end to end on `DSC00632.ARW` once extraction takes the largest embedded image:
+>
+> | Rendition | Result |
+> |---|---|
+> | Thumbnail 300px | 200×300, correctly portrait |
+> | Preview 1920px long edge | 1280×1920, hits the target exactly |
+> | Hero 1920×1080 | 1920×1080, **no upscale** |
+> | `photos.width/height` | 4672×7008, the real frame |
+>
+> Extraction takes **611 ms** for a 41 MB ARW, in 3 exiftool spawns (probe, extract, orientation
+> write; 2 for a landscape shot). **This answers §10 Q1: the LibRaw option in §4(b) is not
+> required.** It stays a Phase 4 nice-to-have, and it would matter only for a body whose largest
+> embedded image is small.
+
+The original claim: Sony's embedded `PreviewImage` is widely reported as **~1616×1080 (~1.7 MP)** across the Alpha line. Against PicPeak's own constants, *if `PreviewImage` were the only thing available*:
 
 | Rendition | Constant | Enlarges? | ARW outcome |
 |---|---|---|---|
@@ -558,8 +616,20 @@ Worse: if libvips' `tiffload` *does* open an ARW, `imageProcessor.js:796-798` an
 
 ## 10. Open questions for the user
 
-1. **What is the actual embedded preview resolution on your bodies?**
-   Run `exiftool -PreviewImageSize -ThumbnailImageSize -Orientation -ImageSize DSC0001.ARW` on 2–3 files. If it reports ~1616×1080, the embedded-preview approach gives you a **sub-1080p gallery** for a 61 MP file, and Phase 4's LibRaw option moves from "nice to have" to "required." This is the single most decision-relevant fact and I could not determine it from the repo.
+1. ~~**What is the actual embedded preview resolution on your bodies?**~~ **ANSWERED 2026-09-11.**
+   Sony **ILCE-7M5**, `DSC00632.ARW`: `PreviewImage` is 1616×1080 as predicted, but `JpgFromRaw`
+   is **7008×4672 (32.7 MP)** off a 7168×5120 sensor, and `Orientation` is 8. Taking the largest
+   embedded image gives a full-quality gallery with no upscaled hero, so **LibRaw is not
+   required** and §4(b) stays optional.
+
+   Two things this turned up that the analysis had backwards. `JpgFromRaw` **does** exist for
+   ARW, so the recommended tag reorder would have been a twenty-fold quality regression; see the
+   correction in §4. And the extracted preview carries **no EXIF whatsoever**, so the container's
+   orientation has to be written onto it or every portrait RAW is sideways in the grid, the
+   lightbox and the hero, with `photos.width/height` describing the landscape frame.
+
+   Still open for other bodies: an older Sony (a7 II era) has no `JpgFromRaw` and is genuinely
+   capped at 1616×1080. Anyone shooting one should re-run the probe.
 
 2. **Gallery browsing of RAW, or download-only delivery?**
    (a) RAW photos appear in the client gallery with JPEG derivatives *and* a RAW download — everything in Phases 1–3. (b) RAW is a *download-only asset* with no gallery representation — dramatically cheaper: a `media_type` that bypasses the derivative pipeline entirely, and the quality ceiling stops mattering.
