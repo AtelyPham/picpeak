@@ -241,6 +241,33 @@ describe('archive restore rebuilds the photo row faithfully', () => {
       .toEqual({ 'clip.mov': 'video', 'still.png': 'image' });
   });
 
+  it('restores a watcher-imported video as a video despite its stale media_type', async () => {
+    // fileWatcher sets type='video' and a video/* mime but never media_type,
+    // so its rows carry the 'image' column default. Readers know those clips
+    // through mime_type alone. The archive writer copies that row as-is, and
+    // a restore that trusts the manifest 'image' and drops the mime turns the
+    // clip into a photo.
+    const archiveRelPath = await writeArchive('watcher.zip', {
+      'individual/auto.mp4': BYTES,
+      'photos_manifest.json': manifestOf([
+        {
+          filename: 'auto.mp4',
+          original_filename: 'auto.mp4',
+          type: 'video',
+          media_type: 'image',
+          mime_type: 'video/mp4',
+        },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, 'watcher-event');
+
+    await restore(eventId);
+
+    const photo = await db('photos').where('event_id', eventId).first();
+    expect(photo.media_type).toBe('video');
+    expect(photo.mime_type).toBe('video/mp4');
+  });
+
   it('keeps the original upload time rather than stamping the restore time', async () => {
     const uploadedAt = '2026-06-27T10:30:00.000Z';
     const archiveRelPath = await writeArchive('uploadedat.zip', {

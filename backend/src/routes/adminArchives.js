@@ -521,6 +521,9 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
 
               // Store relative path from storage root
               const relativePath = path.relative(storagePath, actualFilePath);
+              const isVideoEntry = manifestEntry?.media_type === 'video'
+                || String(manifestEntry?.mime_type || '').startsWith('video/')
+                || VIDEO_EXTENSIONS.has(extension);
               extractedPhotos.push({
                 event_id: archive.id,
                 filename: filename,
@@ -540,9 +543,15 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
                   || (dirPath.split(path.sep)[0] === 'collages' ? 'collage' : 'individual'),
                 // Omitted entirely before, and the column defaults to 'image',
                 // so restoring an event turned its videos into photos the
-                // player would not play.
-                media_type: manifestEntry?.media_type
-                  || (VIDEO_EXTENSIONS.has(extension) ? 'video' : 'image'),
+                // player would not play. Any video signal wins over a manifest
+                // 'image': fileWatcher never sets media_type, so its videos sit
+                // at the 'image' default with a video/* mime_type, and every
+                // reader recognises them through the mime alone.
+                media_type: isVideoEntry ? 'video' : 'image',
+                // The readers' second signal, and the only one a watcher video
+                // has. Legacy archives never carried it and still resolve
+                // through the extension.
+                mime_type: manifestEntry?.mime_type || null,
                 size_bytes: stats.size,
                 category_id: categoryId,
                 // Restore order is not upload order; stamping the clock here
