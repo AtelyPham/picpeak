@@ -4,6 +4,7 @@ const { db } = require('../database/db');
 const { verifyGalleryAccess, denySlideshowToken } = require('../middleware/gallery');
 const { blockHiddenGallery, bypassesReveal, isGalleryHidden } = require('../utils/revealMode');
 const secureImageService = require('../services/secureImageService');
+const galleryAccessService = require('../services/galleryAccessService');
 const secureImageMiddleware = require('../middleware/secureImageMiddleware');
 const logger = require('../utils/logger');
 const { formatBoolean } = require('../utils/dbCompat');
@@ -58,6 +59,7 @@ router.post('/:slug/generate-token', async (req, res, next) => {
     
     // Generate secure token with appropriate settings
     const tokenOptions = {
+      galleryAccess: req.galleryAccess,
       expiresIn: protectionLevel === 'maximum' ? 180 : 300, // 3-5 minutes
       maxUses: accessType === 'download' ? 1 : 3,
       clientFingerprint,
@@ -96,6 +98,7 @@ router.post('/:slug/generate-token', async (req, res, next) => {
     });
 
   } catch (error) {
+    if (error.isOperational) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     logger.error('Error generating secure token', {
       error: error.message,
       photoId: req.body.photoId,
@@ -120,8 +123,6 @@ router.get('/:slug/secure/:photoId/:token',
         tokenLength: token?.length,
         hasAuthHeader: Boolean(req.headers.authorization),
       });
-      const { fragment } = req.query;
-
       // Verify secure token
       const tokenValidation = secureImageService.verifySecureToken(
         token,
@@ -152,6 +153,10 @@ router.get('/:slug/secure/:photoId/:token',
       if (!event) {
         return res.status(404).json({ error: 'Gallery not found' });
       }
+
+      // Revalidate the issuing session, ownership and gallery lifecycle at
+      // every use, including capabilities minted before logout or restore.
+      await galleryAccessService.authorize(event, tokenValidation.data?.galleryAccess);
 
       // Bind the token to the gallery + photo it was minted for
       // (GHSA-g94x-8vv8-3c9f). This route serves via <img src> with the
@@ -212,8 +217,7 @@ router.get('/:slug/secure/:photoId/:token',
       const protectionSettings = {
         protectionLevel: event.protection_level || 'standard',
         quality: event.image_quality || 85,
-        addFingerprint: event.add_fingerprint !== false,
-        fragmentImage: event.use_canvas_rendering === true && fragment !== undefined
+        addFingerprint: event.add_fingerprint !== false
       };
 
       let processedImage;
@@ -230,11 +234,6 @@ router.get('/:slug/secure/:photoId/:token',
           error: resolveError.message,
         });
         return res.status(404).json({ error: 'Photo file not found' });
-      }
-
-      // Handle fragmented images
-      if (processedImage.type === 'fragmented') {
-        return await handleFragmentedImage(req, res, processedImage, fragment);
       }
 
       // Log successful access
@@ -256,6 +255,7 @@ router.get('/:slug/secure/:photoId/:token',
       res.send(processedImage);
 
     } catch (error) {
+      if (error.isOperational) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       logger.error('Error serving secure image', {
         error: error.message,
         photoId,
@@ -266,58 +266,6 @@ router.get('/:slug/secure/:photoId/:token',
     }
   }
 );
-
-/**
- * Handle fragmented image delivery
- */
-async function handleFragmentedImage(req, res, fragmentedImage, fragmentIndex) {
-  const { photoId } = req.params;
-  
-  try {
-    if (fragmentIndex === undefined) {
-      // Return fragment metadata
-      res.json({
-        type: 'fragmented',
-        fragments: fragmentedImage.fragments.length,
-        dimensions: fragmentedImage.originalDimensions,
-        fragmentDimensions: fragmentedImage.fragmentDimensions
-      });
-      return;
-    }
-
-    const index = parseInt(fragmentIndex);
-    if (isNaN(index) || index < 0 || index >= fragmentedImage.fragments.length) {
-      return res.status(400).json({ error: 'Invalid fragment index' });
-    }
-
-    const fragment = fragmentedImage.fragments[index];
-    
-    // Log fragment access
-    await secureImageService.logImageAccess(
-      photoId,
-      req.event.id,
-      req.clientInfo,
-      `fragment_${index}`
-    );
-
-    res.set({
-      'Content-Type': 'image/jpeg',
-      'Content-Length': fragment.buffer.length,
-      'X-Fragment-Index': index,
-      'X-Fragment-Position': JSON.stringify(fragment.position)
-    });
-
-    res.send(fragment.buffer);
-
-  } catch (error) {
-    logger.error('Error serving image fragment', {
-      error: error.message,
-      fragmentIndex,
-      photoId
-    });
-    res.status(500).json({ error: 'Failed to serve image fragment' });
-  }
-}
 
 /**
  * Download protected image with watermark
@@ -351,6 +299,8 @@ router.get('/:slug/secure-download/:photoId/:token',
       if (!tokenValidation.valid) {
         return res.status(403).json({ error: 'Invalid or expired token' });
       }
+
+      await galleryAccessService.authorize(req.event, tokenValidation.data?.galleryAccess);
 
       // Bind the token to the photo it was minted for (GHSA-crxv) — the
       // /secure serve route does this, but secure-download did not, so a
@@ -446,6 +396,7 @@ router.get('/:slug/secure-download/:photoId/:token',
       res.send(fileBuffer);
 
     } catch (error) {
+      if (error.isOperational) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       logger.error('Error serving secure download', {
         error: error.message,
         photoId: req.params.photoId
@@ -474,6 +425,7 @@ router.get('/security/stats', adminAuth, requirePermission('settings.view'), asy
     res.json(stats);
 
   } catch (error) {
+    if (error.isOperational) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     logger.error('Error getting security stats', { error: error.message });
     res.status(500).json({ error: 'Failed to get security stats' });
   }

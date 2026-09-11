@@ -1,8 +1,23 @@
+const { requestLogPath } = require('../utils/requestLogPath');
 const rateLimit = require('express-rate-limit');
+const { MemoryStore } = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
 const { getAdminTokenFromRequest, getGalleryTokenFromRequest } = require('../utils/tokenUtils');
+
+// What applies when app_settings has no row for a key — a fresh install has
+// none. Keyed by setting name so the admin settings read can surface the
+// same values (#1337): the Security tab must show the budget that is in
+// force, not an empty field that hides it.
+const RATE_LIMIT_DEFAULTS = Object.freeze({
+  rate_limit_enabled: true,
+  rate_limit_window_minutes: 15,
+  rate_limit_max_requests: 300,
+  rate_limit_auth_max_requests: 5,
+  rate_limit_skip_authenticated: true,
+  rate_limit_public_endpoints_only: false
+});
 
 // Cache for rate limit settings
 let settingsCache = null;
@@ -41,12 +56,12 @@ async function getRateLimitSettings() {
     // roughly twenty guests per window. An explicit app_settings value still
     // wins over this fallback.
     const config = {
-      enabled: true,
-      windowMinutes: 15,
-      maxRequests: 300,
-      authMaxRequests: 5,
-      skipAuthenticated: true,
-      publicEndpointsOnly: false
+      enabled: RATE_LIMIT_DEFAULTS.rate_limit_enabled,
+      windowMinutes: RATE_LIMIT_DEFAULTS.rate_limit_window_minutes,
+      maxRequests: RATE_LIMIT_DEFAULTS.rate_limit_max_requests,
+      authMaxRequests: RATE_LIMIT_DEFAULTS.rate_limit_auth_max_requests,
+      skipAuthenticated: RATE_LIMIT_DEFAULTS.rate_limit_skip_authenticated,
+      publicEndpointsOnly: RATE_LIMIT_DEFAULTS.rate_limit_public_endpoints_only
     };
 
     settings.forEach(setting => {
@@ -118,6 +133,8 @@ function isAuthenticated(req) {
     // Only an admin session earns the skip. A gallery token is minted for
     // free on password-less galleries and slideshow links, so treating it as
     // "authenticated" handed anyone an unlimited budget on every /api route.
+    // The one thing a gallery token does buy is its own gallery's images —
+    // see isOwnGalleryImageRequest below.
     if (decoded.type !== 'admin') {
       return false;
     }
@@ -125,6 +142,46 @@ function isAuthenticated(req) {
     req.tokenPayload = decoded;
     
     return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+// The routes a gallery viewer fetches once per tile: thumbnail, preview,
+// hero, photo. Downloads, the photo list, feedback and everything else stay
+// on the budget.
+const GALLERY_IMAGE_RE = /^\/api\/gallery\/([^/]+)\/(thumbnail|preview|hero|photo)\/[^/]+$/i;
+
+/**
+ * A verified gallery viewer fetching that gallery's own images (#1287).
+ *
+ * Since gallery tokens stopped earning the authenticated skip, every guest
+ * has been spending the anonymous per-IP budget — 300 requests per 15
+ * minutes by default — on the gallery's thumbnails. A 546-photo grid runs
+ * out of budget mid-scroll: the remaining tiles come back 429, which the
+ * frontend rendered as blank tiles with no error, and the next refresh
+ * finds the photo list rate-limited too. A per-IP limit that one legitimate
+ * viewer exhausts on one gallery protects nothing.
+ *
+ * So a token that verifies AND names the gallery in the path is exempt on
+ * the image routes only. The token proves the viewer passed whatever gate
+ * the gallery has (the gate itself is still limited), the slug check stops a
+ * token for one gallery buying images from another, and GET-only keeps every
+ * write on the budget. The bandwidth these routes cost was never something a
+ * 300-request budget bounded — a viewer can refetch a cached thumbnail 300
+ * times too — so nothing is given up here that the budget actually held.
+ */
+function isOwnGalleryImageRequest(req) {
+  if (req.method && req.method !== 'GET') return false;
+  const match = (req.path || '').match(GALLERY_IMAGE_RE);
+  if (!match) return false;
+  const slug = match[1];
+  try {
+    const token = getGalleryTokenFromRequest(req, slug);
+    if (!token) return false;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    return Boolean(decoded) && typeof decoded === 'object'
+      && decoded.type === 'gallery' && decoded.eventSlug === slug;
   } catch (error) {
     return false;
   }
@@ -145,8 +202,10 @@ function shouldSkipRateLimit(req, config) {
     return false;
   }
 
-  // Check if we should skip authenticated requests
-  if (config.skipAuthenticated && isAuthenticated(req)) {
+  // Check if we should skip authenticated requests. A gallery viewer's own
+  // image fetches ride on the same switch: an operator who turns the skip
+  // off gets every request counted, guests included.
+  if (config.skipAuthenticated && (isAuthenticated(req) || isOwnGalleryImageRequest(req))) {
     return true;
   }
 
@@ -167,10 +226,11 @@ function shouldSkipRateLimit(req, config) {
 /**
  * Create dynamic rate limiter
  */
-async function createRateLimiter() {
+async function createRateLimiter(store = new MemoryStore()) {
   const config = await getRateLimitSettings();
   
   return rateLimit({
+    store,
     windowMs: config.windowMinutes * 60 * 1000,
     max: async (req) => {
       // Refresh config for each request
@@ -191,19 +251,18 @@ async function createRateLimiter() {
       // Enhanced logging for production analysis
       logger.warn('Rate limit exceeded', {
         ip: clientIp,
-        path: req.path,
+        path: requestLogPath(req.originalUrl || req.path),
         method: req.method,
         authenticated: isAuthenticated(req),
         tokenType: req.tokenType,
         userAgent: req.headers['user-agent'],
-        referer: req.headers['referer'],
         origin: req.headers['origin'],
         timestamp: new Date().toISOString(),
         headers: {
           'x-forwarded-for': req.headers['x-forwarded-for'],
           'x-real-ip': req.headers['x-real-ip']
         },
-        requestUrl: req.originalUrl,
+        requestUrl: requestLogPath(req.originalUrl || req.path),
         rateLimitInfo: {
           limit: req.rateLimit?.limit,
           current: req.rateLimit?.current,
@@ -234,10 +293,11 @@ async function createRateLimiter() {
  * makes a 5-per-window per-IP budget safe behind NAT — a room full of guests on
  * one venue IP who all type the correct gallery password consume nothing.
  */
-async function createAuthRateLimiter() {
+async function createAuthRateLimiter(store = new MemoryStore()) {
   const config = await getRateLimitSettings();
 
   return rateLimit({
+    store,
     windowMs: config.windowMinutes * 60 * 1000,
     // Read per request, like the general limiter, so a change to
     // rate_limit_auth_max_requests in admin Settings takes effect within the
@@ -258,7 +318,7 @@ async function createAuthRateLimiter() {
       // Enhanced logging for auth failures
       logger.warn('Auth rate limit exceeded', {
         ip: clientIp,
-        path: req.path,
+        path: requestLogPath(req.originalUrl || req.path),
         method: req.method,
         userAgent: req.headers['user-agent'],
         timestamp: new Date().toISOString(),
@@ -266,7 +326,7 @@ async function createAuthRateLimiter() {
           'x-forwarded-for': req.headers['x-forwarded-for'],
           'x-real-ip': req.headers['x-real-ip']
         },
-        requestUrl: req.originalUrl,
+        requestUrl: requestLogPath(req.originalUrl || req.path),
         authType: req.path.includes('admin') ? 'admin' : 'gallery',
         rateLimitInfo: {
           limit: req.rateLimit?.limit,
@@ -286,11 +346,45 @@ async function createAuthRateLimiter() {
   });
 }
 
+// The live limiter instances. express-rate-limit fixes windowMs when an
+// instance is built — max and skip re-read the settings per request, the
+// window does not — so a saved window only takes effect on a rebuild. The
+// gates in server.js resolve the instance per request through the getters
+// below, and the settings route rebuilds after a save (#1337). Rebuilding
+// starts fresh counters; on a settings change that is acceptable.
+//
+// The stores are held explicitly because a MemoryStore runs a cleanup
+// interval for as long as it exists: dropping the limiter reference alone
+// would leave one more live timer and one more retained store per save.
+const current = { general: null, auth: null, stores: [] };
+
+async function initializeRateLimiters() {
+  const stores = [new MemoryStore(), new MemoryStore()];
+  const general = await createRateLimiter(stores[0]);
+  const auth = await createAuthRateLimiter(stores[1]);
+  const superseded = current.stores;
+  current.general = general;
+  current.auth = auth;
+  current.stores = stores;
+  for (const store of superseded) {
+    if (typeof store.shutdown === 'function') store.shutdown();
+  }
+  return current;
+}
+
+const getGeneralLimiter = () => current.general;
+const getAuthLimiter = () => current.auth;
+
 module.exports = {
+  RATE_LIMIT_DEFAULTS,
+  initializeRateLimiters,
+  getGeneralLimiter,
+  getAuthLimiter,
   getRateLimitSettings,
   clearSettingsCache,
   createRateLimiter,
   createAuthRateLimiter,
   isAuthenticated,
+  isOwnGalleryImageRequest,
   shouldSkipRateLimit
 };

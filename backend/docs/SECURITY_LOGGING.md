@@ -87,16 +87,18 @@ When rate limits are exceeded, the following is logged:
 
 ## Configuration Settings
 
-All rate limiting settings are configurable via the admin panel:
+The general limiter reads these keys from `app_settings` (cached for 60 seconds). They are edited in the admin panel under Settings → Security (the API rate limiter card), which saves through `PUT /api/admin/settings/security/rate-limit` (all six fields required). The route upserts, so a fresh install needs no rows first, and the live limiters are rebuilt on save, so a new window applies without a restart. The defaults below are what applies when a key has no row; the settings read fills them in, so the form shows the budget in force.
 
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
 | rate_limit_enabled | true | - | Enable/disable rate limiting |
 | rate_limit_window_minutes | 15 | 1-60 | Time window for rate limit |
-| rate_limit_max_requests | 1000 | 10-10000 | Max requests for general endpoints |
-| rate_limit_auth_max_requests | 5 | 1-100 | Max requests for auth endpoints |
-| rate_limit_skip_authenticated | true | - | Skip rate limit for authenticated requests |
-| rate_limit_public_endpoints_only | false | - | Only rate limit public endpoints |
+| rate_limit_max_requests | 300 | 10-10000 | Per-IP budget for `/api/` requests that are not exempt |
+| rate_limit_auth_max_requests | 5 | 1-100 | Per-IP budget of *failed* admin-login / gallery-verify attempts (own bucket) |
+| rate_limit_skip_authenticated | true | - | Admin sessions are exempt; since v3.127.0-beta.0 a verified gallery viewer's image requests (thumbnail, preview, hero, photo) are exempt too |
+| rate_limit_public_endpoints_only | false | - | Only rate limit `/api/public/*` and `/api/gallery/*` |
+
+The limiter keys on the client IP as Express reports it, so behind a proxy `TRUST_PROXY` has to cover that proxy or every visitor shares one budget. Several people behind one NAT (an office, a household, carrier NAT) share a budget by design; before v3.127.0-beta.0 a large gallery could exhaust it for a single viewer, which surfaced as blank tiles with no error (issue 1287).
 
 ## Database Tables
 

@@ -18,9 +18,7 @@ interface GridPhotoProps {
   animationType?: string;
   allowDownloads?: boolean;
   slug?: string;
-  protectionLevel?: 'basic' | 'standard' | 'enhanced' | 'maximum';
   useEnhancedProtection?: boolean;
-  useCanvasRendering?: boolean;
   feedbackEnabled?: boolean;
   feedbackOptions?: {
     allowLikes?: boolean;
@@ -47,9 +45,6 @@ const GridPhoto: React.FC<GridPhotoProps> = ({
   animationType = 'fade',
   allowDownloads = true,
   slug,
-  protectionLevel = 'standard',
-  useEnhancedProtection = false,
-  useCanvasRendering = false,
   feedbackEnabled = false,
   feedbackOptions,
   savedIdentity,
@@ -84,6 +79,44 @@ const GridPhoto: React.FC<GridPhotoProps> = ({
       onToggleSelect={onToggleSelect}
       className={`photo-card relative group cursor-pointer aspect-square ${animationClass}`}
       lazy
+      /*
+       * Pre-load band (#1287). Grid was the only lazy layout passing no
+       * `inViewRootMargin`, so PhotoCard ran the observer at the
+       * IntersectionObserver default of 0px with threshold 0.1 — a tile could
+       * not begin loading until a tenth of it was already on screen. The
+       * gallery owner's description of the symptom is that exact shape:
+       * spinning the wheel outran loading by ~50 images, then it caught up.
+       *
+       * Viewport-relative rather than a fixed 100px like Justified: a phone
+       * and a 4K desktop scroll past very different amounts of grid per
+       * gesture, and a band tuned to one is wrong for the other.
+       *
+       * `%`, not `vh` — rootMargin only accepts px and percentages, and an
+       * IntersectionObserver constructed with a vh value throws. A percentage
+       * resolves against the root's own box, so 100% is one viewport height
+       * of lead in each direction, which is what vh would have meant.
+       */
+      inViewRootMargin="100% 0px"
+      /*
+       * Release band (#1287). The pre-load band above fixed tiles arriving
+       * late; it did nothing about tiles never leaving. Every tile scrolled
+       * past kept its object URL — and, where image protection is on, a
+       * full-resolution canvas that the browser is not allowed to evict — for
+       * the life of the page. On a several-hundred-photo gallery that grows
+       * monotonically, which is the shape a memory-constrained browser
+       * discards the tab over.
+       *
+       * Three viewport heights, against a one-viewport load band: a tile has
+       * to travel two further viewport heights after it stops loading before
+       * it is released, so ordinary scrolling never crosses both edges.
+       * Thumbnails are served `private, max-age=1800`, so coming back costs a
+       * cache hit rather than a round trip.
+       *
+       * Grid only, and deliberately so: the skeleton here is `aspect-square`
+       * and holds the tile's box exactly, so releasing shifts nothing. The
+       * measured layouts have no such guarantee.
+       */
+      releaseRootMargin="300% 0px"
       fadeInWhenVisible={animationType === 'fade'}
       skeletonClassName="skeleton aspect-square w-full rounded-lg"
       imageProps={{
@@ -93,18 +126,6 @@ const GridPhoto: React.FC<GridPhotoProps> = ({
         loading: 'lazy',
         isGallery: true,
         slug,
-        photoId: photo.id,
-        requiresToken: photo.requires_token,
-        secureUrlTemplate: photo.secure_url_template,
-        protectFromDownload: !allowDownloads || useEnhancedProtection,
-        protectionLevel,
-        useEnhancedProtection,
-        useCanvasRendering: useCanvasRendering || protectionLevel === 'maximum',
-        fragmentGrid: protectionLevel === 'enhanced' || protectionLevel === 'maximum',
-        blockKeyboardShortcuts: useEnhancedProtection,
-        detectPrintScreen: useEnhancedProtection,
-        detectDevTools: protectionLevel === 'maximum',
-        watermarkText: useEnhancedProtection ? 'Protected' : undefined,
         onProtectionViolation: (violationType: string) => {
           console.warn(`Protection violation on grid photo ${photo.id}: ${violationType}`);
         },
@@ -174,9 +195,7 @@ export const GridGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
   isSelectionMode = false,
   onPhotoSelect,
   allowDownloads = true,
-  protectionLevel = 'standard',
   useEnhancedProtection = false,
-  useCanvasRendering = false,
   feedbackEnabled = false,
   feedbackOptions,
   isClient = false,
@@ -229,9 +248,7 @@ export const GridGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
               animationType={animation}
               allowDownloads={allowDownloads}
               slug={slug}
-              protectionLevel={protectionLevel}
               useEnhancedProtection={useEnhancedProtection}
-              useCanvasRendering={useCanvasRendering}
               feedbackEnabled={feedbackEnabled}
               feedbackOptions={feedbackOptions}
               savedIdentity={savedIdentity}

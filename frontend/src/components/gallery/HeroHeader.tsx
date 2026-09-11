@@ -23,9 +23,7 @@ interface HeroHeaderProps {
   heroLogoPosition?: 'top' | 'center' | 'bottom';
   dividerStyle?: HeroDividerStyle;
   allowDownloads?: boolean;
-  protectionLevel?: 'basic' | 'standard' | 'enhanced' | 'maximum';
   useEnhancedProtection?: boolean;
-  useCanvasRendering?: boolean;
   onScrollToContent?: () => void;
   // Hero image anchor position (#162) – keyword or "X% Y%" focal point
   heroImageAnchor?: string;
@@ -43,10 +41,6 @@ export const HeroHeader: React.FC<HeroHeaderProps> = ({
   heroLogoSize = 'medium',
   heroLogoPosition = 'top',
   dividerStyle = 'wave',
-  allowDownloads = true,
-  protectionLevel = 'standard',
-  useEnhancedProtection = false,
-  useCanvasRendering = false,
   onScrollToContent,
   heroImageAnchor = 'center'
 }) => {
@@ -144,11 +138,6 @@ export const HeroHeader: React.FC<HeroHeaderProps> = ({
           style={{ objectPosition: heroImageAnchor }}
           isGallery={true}
           slug={slug}
-          photoId={heroPhoto.id}
-          protectFromDownload={!allowDownloads || useEnhancedProtection}
-          protectionLevel={protectionLevel}
-          useEnhancedProtection={useEnhancedProtection}
-          useCanvasRendering={useCanvasRendering || protectionLevel === 'maximum'}
         />
 
         {/* Overlay */}

@@ -1,3 +1,4 @@
+const { changedEvidence } = require('../usage/adoptionEvidence');
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
@@ -31,7 +32,9 @@ const pageLogoStorage = multer.diskStorage({
 
 const pageLogoUpload = multer({
   storage: pageLogoStorage,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  // CVE-2026-82333: single unnamed `logo` field only — no legitimate
+  // array-indexed field names, so reject any bracket-index field name.
+  limits: { fileSize: 5 * 1024 * 1024, fieldArrayIndexLimit: 0 },
   fileFilter: (_req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/svg+xml'];
     if (validateFileType(file.originalname, file.mimetype, allowed)) cb(null, true);
@@ -144,6 +147,8 @@ router.put('/pages/:slug', adminAuth, requirePermission('cms.edit'), [
       { type: 'admin', id: req.admin.id, name: req.admin.username }
     );
 
+    if (!updated.use_external_url) changedEvidence(res, 'cms_content_editing', page, updated,
+      ['title_en', 'title_de', 'content_en', 'content_de']);
     res.json(updated);
   } catch (error) {
     logger.error('Error updating CMS page:', error);

@@ -1,3 +1,7 @@
+const { settingsChanged } = require('../usage/adoptionEvidence');
+const { capabilityEvidence } = require('../usage/capabilityEvidence');
+const SEO_USAGE_KEYS = ['seo_allow_indexing', 'seo_block_ai_crawlers', 'seo_block_social_bots',
+  'seo_blocked_ai_agents', 'seo_custom_rules', 'seo_meta_noindex', 'seo_meta_nofollow', 'seo_meta_noai', 'seo_sitemap_url'];
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
@@ -10,7 +14,8 @@ const { formatBoolean } = require('../utils/dbCompat');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission, userHasAnyPermission } = require('../middleware/permissions');
 const { clearMaintenanceCache } = require('../middleware/maintenance');
-const { clearSettingsCache } = require('../services/rateLimitService');
+const { clearSettingsCache, initializeRateLimiters, RATE_LIMIT_DEFAULTS } = require('../services/rateLimitService');
+const { SETTING_KEY: GALLERY_PASSWORD_SETTING, purgeRecoverablePasswords, purgePlanForSettingWrite } = require('../utils/galleryPasswordVault');
 const {
   DEFAULT_PUBLIC_SITE_HTML,
   DEFAULT_PUBLIC_SITE_CSS,
@@ -148,7 +153,10 @@ const { validateFileType } = require('../utils/fileSecurityUtils');
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  // CVE-2026-82333: single unnamed field (`logo` or `watermarkLogo`) per
+  // route — no legitimate array-indexed field names, so reject any
+  // bracket-index field name.
+  limits: { fileSize: 5 * 1024 * 1024, fieldArrayIndexLimit: 0 }, // 5MB
   fileFilter: (req, file, cb) => {
     // Note: SVG files are excluded from magic number validation for logos
     const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/svg+xml'];
@@ -176,7 +184,9 @@ const faviconStorage = multer.diskStorage({
 
 const faviconUpload = multer({
   storage: faviconStorage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB — roomy enough for a 512×512+ square PNG
+  // CVE-2026-82333: single unnamed `favicon` field only — no legitimate
+  // array-indexed field names, so reject any bracket-index field name.
+  limits: { fileSize: 2 * 1024 * 1024, fieldArrayIndexLimit: 0 }, // 2MB — roomy enough for a 512×512+ square PNG
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = ['image/png', 'image/x-icon', 'image/vnd.microsoft.icon'];
     const name = file.originalname.toLowerCase();
@@ -207,6 +217,21 @@ const faviconUpload = multer({
 // reads 2 of the ~100 rows). The keys filter is allowlist-bounded by
 // what's stored, so passing unknown keys just returns them as `null`
 // — no enumeration risk beyond what GET / returned already.
+/**
+ * Recoverable gallery passwords (#1271): every transition of the setting
+ * starts from a clean vault. Off is a promise that nothing reversible is
+ * left behind; on-from-off must not resurrect copies a write left behind
+ * after the previous purge. Decided BEFORE the upsert (needs the old value),
+ * applied after it. Every writer that accepts a security_ key (general,
+ * analytics and seo take them from a settings.security holder too) does this.
+ */
+// Every writer that accepts a security_ key runs the vault purge on the side
+// of the write the transition calls for (see purgePlanForSettingWrite).
+async function galleryPasswordPurgePlan(settings) {
+  if (!settings || !Object.prototype.hasOwnProperty.call(settings, GALLERY_PASSWORD_SETTING)) return { before: false, after: false };
+  return purgePlanForSettingWrite(settings[GALLERY_PASSWORD_SETTING]);
+}
+
 router.get('/', adminAuth, requirePermission('settings.view'), async (req, res) => {
   try {
     const keysParam = typeof req.query.keys === 'string' ? req.query.keys : null;
@@ -282,6 +307,14 @@ router.get('/', adminAuth, requirePermission('settings.view'), async (req, res) 
       settingsObject.analytics_rybbit_api_key = '••••••••';
     }
 
+    // The general API rate limiter falls back to code defaults when a key has
+    // no row, which is every fresh install. Surface those so the Security tab
+    // shows the budget actually in force instead of an empty field (#1337).
+    for (const [key, value] of Object.entries(RATE_LIMIT_DEFAULTS)) {
+      if (settingsObject[key] === undefined && (!keysFilter || keysFilter.includes(key))) {
+        settingsObject[key] = value;
+      }
+    }
     res.json(settingsObject);
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to fetch settings');
@@ -1028,6 +1061,9 @@ router.put('/branding', adminAuth, requirePermission('settings.edit'), async (re
       ...(promo_alignment !== undefined && { promo_alignment: normalizedPromoAlignment })
     };
 
+    const brandingUpdates = Object.fromEntries(Object.entries(brandingSettings).map(([key, value]) => [`branding_${key}`, value]));
+    const brandingChanged = await settingsChanged(db, brandingUpdates, Object.keys(brandingUpdates));
+
     // Handle favicon deletion if empty string or null is provided
     if (favicon_url === '' || favicon_url === null || favicon_url === undefined) {
       // Get current favicon path to delete file
@@ -1117,6 +1153,7 @@ router.put('/branding', adminAuth, requirePermission('settings.edit'), async (re
       metadata: JSON.stringify({ company_name })
     });
 
+    if (brandingChanged) capabilityEvidence(res, 'branding_editing');
     clearPublicSiteCache();
 
     // Check if watermark settings changed and trigger regeneration
@@ -1221,6 +1258,7 @@ router.post('/logo', adminAuth, requirePermission('settings.edit'), upload.singl
         updated_at: new Date()
       });
 
+    capabilityEvidence(res, 'branding_editing');
     res.json({ 
       message: 'Logo uploaded successfully',
       logoUrl: publicPath
@@ -1239,6 +1277,7 @@ router.delete('/logo', adminAuth, requirePermission('settings.edit'), async (req
     const pathKey = isDark ? 'branding_logo_path_dark' : 'branding_logo_path';
     const urlKey = isDark ? 'branding_logo_url_dark' : 'branding_logo_url';
 
+    const logoChanged = await settingsChanged(db, { [pathKey]: '', [urlKey]: '' }, [pathKey, urlKey]);
     const pathSetting = await db('app_settings').where('setting_key', pathKey).first();
     if (pathSetting && pathSetting.setting_value) {
       try {
@@ -1253,6 +1292,7 @@ router.delete('/logo', adminAuth, requirePermission('settings.edit'), async (req
       .whereIn('setting_key', [pathKey, urlKey])
       .update({ setting_value: JSON.stringify(''), updated_at: new Date() });
 
+    if (logoChanged) capabilityEvidence(res, 'branding_editing');
     res.json({ message: 'Logo removed' });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to remove logo');
@@ -1338,6 +1378,7 @@ router.post('/branding/watermark-logo', adminAuth, requirePermission('settings.e
       watermarkRegenerationStarted = true;
     }
 
+    capabilityEvidence(res, 'branding_editing');
     res.json({
       message: 'Watermark logo uploaded successfully',
       watermarkLogoUrl: publicPath,
@@ -1352,6 +1393,7 @@ router.post('/branding/watermark-logo', adminAuth, requirePermission('settings.e
 router.put('/theme', adminAuth, requirePermission('settings.edit'), async (req, res) => {
   try {
     const themeSettings = req.body;
+    const themeChanged = await settingsChanged(db, { theme_config: themeSettings }, ['theme_config']);
 
     // Save theme settings
     await db('app_settings')
@@ -1378,6 +1420,7 @@ router.put('/theme', adminAuth, requirePermission('settings.edit'), async (req, 
 
     clearPublicSiteCache();
 
+    if (themeChanged) capabilityEvidence(res, 'branding_editing');
     res.json({ message: 'Theme settings updated successfully' });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to update theme settings');
@@ -1510,6 +1553,8 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
     }
 
     // Update or insert each setting
+    const galleryPasswordPurge = await galleryPasswordPurgePlan(settings);
+    if (galleryPasswordPurge.before) await purgeRecoverablePasswords();
     for (const [key, value] of Object.entries(settings)) {
       await db('app_settings')
         .insert({
@@ -1525,6 +1570,8 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
         });
     }
     
+    if (galleryPasswordPurge.after) await purgeRecoverablePasswords();
+
     // Clear maintenance mode cache if it was updated
     if ('general_maintenance_mode' in settings) {
       clearMaintenanceCache();
@@ -1591,6 +1638,8 @@ router.put('/security', adminAuth, requirePermission('settings.security'), async
     if (await rejectUnauthorizedProtectedKeys(settings, req, res)) return;
 
     // Update or insert each setting
+    const galleryPasswordPurge = await galleryPasswordPurgePlan(settings);
+    if (galleryPasswordPurge.before) await purgeRecoverablePasswords();
     for (const [key, value] of Object.entries(settings)) {
       await db('app_settings')
         .insert({
@@ -1607,6 +1656,7 @@ router.put('/security', adminAuth, requirePermission('settings.security'), async
     }
 
     resetSecurityConfigCache();
+    if (galleryPasswordPurge.after) await purgeRecoverablePasswords();
 
     // Log activity
     await db('activity_logs').insert({
@@ -1649,6 +1699,8 @@ router.put('/analytics', adminAuth, requirePermission('settings.edit'), async (r
     }
 
     // Update or insert each setting
+    const galleryPasswordPurge = await galleryPasswordPurgePlan(settings);
+    if (galleryPasswordPurge.before) await purgeRecoverablePasswords();
     for (const [key, value] of Object.entries(settings)) {
       await db('app_settings')
         .insert({
@@ -1663,6 +1715,8 @@ router.put('/analytics', adminAuth, requirePermission('settings.edit'), async (r
           updated_at: new Date()
         });
     }
+
+    if (galleryPasswordPurge.after) await purgeRecoverablePasswords();
 
     // Log activity
     await db('activity_logs').insert({
@@ -1708,7 +1762,10 @@ router.put('/seo', adminAuth, requirePermission('settings.edit'), async (req, re
       }
     }
 
+    const seoChanged = await settingsChanged(db, settings, SEO_USAGE_KEYS);
     // Update or insert each setting
+    const galleryPasswordPurge = await galleryPasswordPurgePlan(settings);
+    if (galleryPasswordPurge.before) await purgeRecoverablePasswords();
     for (const [key, value] of Object.entries(settings)) {
       await db('app_settings')
         .insert({
@@ -1724,6 +1781,8 @@ router.put('/seo', adminAuth, requirePermission('settings.edit'), async (req, re
         });
     }
 
+    if (galleryPasswordPurge.after) await purgeRecoverablePasswords();
+
     // Clear robots.txt cache
     const { clearRobotsTxtCache } = require('../services/robotsTxtService');
     clearRobotsTxtCache();
@@ -1737,6 +1796,7 @@ router.put('/seo', adminAuth, requirePermission('settings.edit'), async (req, re
       metadata: JSON.stringify({ settings_count: Object.keys(settings).length })
     });
 
+    if (seoChanged) capabilityEvidence(res, 'seo_editing');
     res.json({ message: 'SEO settings updated successfully' });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to update SEO settings');
@@ -2034,6 +2094,7 @@ router.post('/favicon', adminAuth, requirePermission('settings.edit'), faviconUp
       { type: 'admin', id: req.admin.id, name: req.admin.username }
     );
 
+    capabilityEvidence(res, 'branding_editing');
     res.json({ faviconUrl });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to upload favicon');
@@ -2074,10 +2135,19 @@ router.put('/security/rate-limit', adminAuth, requirePermission('settings.securi
       { key: 'rate_limit_public_endpoints_only', value: rate_limit_public_endpoints_only }
     ];
 
+    // Upsert, not update: a fresh install has no rate_limit_* rows, and a
+    // plain update matched nothing there — the route answered 200 and
+    // changed nothing (#1337).
     for (const { key, value } of settings) {
       await db('app_settings')
-        .where('setting_key', key)
-        .update({
+        .insert({
+          setting_key: key,
+          setting_value: JSON.stringify(value),
+          setting_type: 'security',
+          updated_at: new Date()
+        })
+        .onConflict('setting_key')
+        .merge({
           setting_value: JSON.stringify(value),
           updated_at: new Date()
         });
@@ -2085,6 +2155,10 @@ router.put('/security/rate-limit', adminAuth, requirePermission('settings.securi
 
     // Clear the rate limit settings cache to apply changes immediately
     clearSettingsCache();
+    // max and skip re-read the settings per request, the window is fixed
+    // per limiter instance: rebuild so a changed window applies now rather
+    // than after a restart (#1337). Counters start fresh.
+    await initializeRateLimiters();
 
     // Log activity
     await logActivity('settings_updated', 

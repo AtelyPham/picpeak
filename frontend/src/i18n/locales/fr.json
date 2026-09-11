@@ -336,7 +336,9 @@
     "backToGallery": "Toutes les photos",
     "downloadFolder": "Télécharger le dossier ({{count}})",
     "downloadFolderCapped": "Télécharger les {{limit}} premières sur {{total}}",
-    "downloadEverything": "Télécharger toutes les photos"
+    "downloadEverything": "Télécharger toutes les photos",
+    "videoFormatUnsupported": "Ce format vidéo ne peut pas être lu dans ce navigateur. Téléchargez-la pour la regarder.",
+    "videoLoadFailed": "Cette vidéo n'a pas pu être chargée."
   },
   "categories": {
     "title": "Catégories de photos",
@@ -498,7 +500,7 @@
     "disableRightClick": "Bloquer le clic droit",
     "watermarkDownloads": "Ajouter un filigrane aux téléchargements",
     "enableDevtoolsProtection": "Détecter les outils de développement",
-    "useCanvasRendering": "Rendu canvas (protection avancée)",
+    "useCanvasRendering": "Rendu canvas dans la visionneuse (protection avancée)",
     "protectionInfo": "Les fonctionnalités de protection aident à prévenir les téléchargements non autorisés mais ne peuvent pas bloquer toutes les méthodes.",
     "protectionLevelBasic": "Basique - Blocage du clic droit uniquement",
     "protectionLevelStandard": "Standard - Blocage des raccourcis clavier",
@@ -911,9 +913,8 @@
       "defaultProtectionHelp": "Ces paramètres s'appliquent à tous les nouveaux événements. Les événements individuels peuvent remplacer ces valeurs par défaut.",
       "protectionLevel": "Niveau de protection par défaut",
       "imageQuality": "Qualité d'image par défaut",
-      "fragmentationLevel": "Niveau de fragmentation",
       "enableDevtools": "Activer la détection des outils DevTools par défaut",
-      "enableCanvas": "Activer le rendu canvas par défaut (protection avancée)",
+      "enableCanvas": "Activer le rendu canvas dans la visionneuse par défaut (protection avancée)",
       "rateLimiting": "Limitation de débit",
       "rateLimitingHelp": "Limitez le nombre d'images qui peuvent être demandées pour éviter le scraping.",
       "requestsPerMinute": "Requêtes par minute",

@@ -1,6 +1,8 @@
+const { isGalleryAvailable } = require('../utils/galleryLifecycle');
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 
 const { db, logActivity } = require('../database/db');
@@ -296,8 +298,22 @@ router.post('/admin/login/mfa', [
       return res.status(401).json({ error: getGenericAuthError() });
     }
 
-    // TOTP first, then a one-time recovery code.
-    let ok = mfaService.verifyTotpEncrypted(code, admin.two_factor_secret);
+    // TOTP first, then a one-time recovery code. verifyTotpEncryptedStep also
+    // enforces replay protection (GHSA-qcwx-r25m-j869): a code whose matched
+    // step doesn't advance past this admin's two_factor_last_used_step is
+    // rejected, so the same code can't complete two logins. The step is
+    // persisted atomically (persistTotpStep) right here, immediately after a
+    // match, so two concurrent requests carrying the same captured code
+    // can't both read the same last-used step and both win — only the first
+    // writer's UPDATE affects a row; the loser falls through and is treated
+    // as a replay below.
+    const totpStep = mfaService.verifyTotpEncryptedStep(
+      code, admin.two_factor_secret, admin.two_factor_last_used_step
+    );
+    let ok = false;
+    if (totpStep !== null) {
+      ok = await mfaService.persistTotpStep(db, admin.id, totpStep, { updated_at: new Date() });
+    }
     let usedRecovery = false;
     let remainingHashes = null;
     if (!ok) {
@@ -326,6 +342,7 @@ router.post('/admin/login/mfa', [
         { type: 'admin', id: admin.id, name: admin.username }
       );
     }
+    // else: the TOTP step was already persisted atomically above.
 
     await logActivity('admin_mfa_login',
       { admin_id: admin.id, method: usedRecovery ? 'recovery_code' : 'totp' },
@@ -354,7 +371,9 @@ router.post('/logout', async (req, res) => {
 
     if (token) {
       // Revoke the token so it can't be reused, then end the session
-      await revokeToken(token, 'user_logout');
+      if (!await revokeToken(token, 'user_logout')) {
+        throw new Error('Token revocation failed');
+      }
       endSession(token);
 
       try {
@@ -398,6 +417,8 @@ router.post('/logout', async (req, res) => {
 
     res.json({ message: 'Logged out successfully', ...(ssoLogoutUrl ? { ssoLogoutUrl } : {}) });
   } catch (error) {
+    clearAdminAuthCookie(res);
+    clearGalleryAuthCookies(res);
     errorResponse(res, error, 500, 'Logout failed');
   }
 });
@@ -420,7 +441,7 @@ router.post('/gallery/verify', [
       .where({ slug, is_active: formatBoolean(true), is_archived: formatBoolean(false) })
       .first();
 
-    if (!event) {
+    if (!isGalleryAvailable(event)) {
       // Perform a dummy bcrypt compare to prevent timing-based slug enumeration
       await bcrypt.compare(password || '', DUMMY_BCRYPT_HASH);
       await trackFailedAttempt(`gallery:${slug}`, ipAddress, userAgent);
@@ -496,6 +517,9 @@ router.post('/gallery/verify', [
       eventId: event.id, 
       eventSlug: event.slug,
       type: 'gallery',
+      // Unique per token: the revocation key falls back to eventId+iat otherwise,
+      // so one guest's logout would revoke every same-second login (#1357).
+      jti: crypto.randomUUID(),
       ip: ipAddress,
       loginTime: Date.now()
     }, process.env.JWT_SECRET, { 
@@ -545,7 +569,7 @@ router.post('/gallery/:slug/client-login', [
       .where({ slug, is_active: formatBoolean(true), is_archived: formatBoolean(false) })
       .first();
 
-    if (!event || !event.client_access_enabled || !event.client_password_hash) {
+    if (!isGalleryAvailable(event) || !event.client_access_enabled || !event.client_password_hash) {
       await trackFailedAttempt(`client:${slug}`, ipAddress, userAgent);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -570,6 +594,9 @@ router.post('/gallery/:slug/client-login', [
       eventId: event.id,
       eventSlug: event.slug,
       type: 'gallery',
+      // Unique per token: the revocation key falls back to eventId+iat otherwise,
+      // so one guest's logout would revoke every same-second login (#1357).
+      jti: crypto.randomUUID(),
       accessLevel: 'client',
       ip: ipAddress,
       loginTime: Date.now()
@@ -631,14 +658,14 @@ router.post('/gallery/share-login', [
       .where({ slug, is_active: formatBoolean(true), is_archived: formatBoolean(false) })
       .first();
 
-    if (!event) {
+    if (!isGalleryAvailable(event)) {
       const resolved = await resolveShareIdentifier(slug);
       if (resolved?.event) {
         event = resolved.event;
       }
     }
 
-    if (!event) {
+    if (!isGalleryAvailable(event)) {
       await trackFailedAttempt(shareIdentifier, ipAddress, userAgent);
       return res.status(404).json({ error: 'Gallery not found' });
     }
@@ -666,6 +693,9 @@ router.post('/gallery/share-login', [
       eventId: event.id,
       eventSlug: event.slug,
       type: 'gallery',
+      // Unique per token: the revocation key falls back to eventId+iat otherwise,
+      // so one guest's logout would revoke every same-second login (#1357).
+      jti: crypto.randomUUID(),
       ip: ipAddress,
       loginTime: Date.now()
     }, process.env.JWT_SECRET, {
@@ -703,11 +733,14 @@ router.post('/gallery/logout', async (req, res) => {
     const { slug } = req.body || {};
     const token = getGalleryTokenFromRequest(req, slug);
     if (token) {
-      await revokeToken(token, 'gallery_logout');
+      if (!await revokeToken(token, 'gallery_logout')) {
+        throw new Error('Token revocation failed');
+      }
     }
     clearGalleryAuthCookies(res, slug);
     res.json({ message: 'Logged out successfully' });
   } catch (error) {
+    clearGalleryAuthCookies(res, req.body?.slug);
     errorResponse(res, error, 500, 'Logout failed');
   }
 });
@@ -743,106 +776,26 @@ router.get('/session', async (req, res) => {
         issuer: 'picpeak-auth'
       });
 
-      // Check if token has been revoked (e.g. after logout)
-      const { isTokenRevoked } = require('../utils/tokenRevocation');
-      if (await isTokenRevoked(decoded)) {
-        return res.status(401).json({ valid: false, error: 'Session has been invalidated' });
-      }
-
-      // The redirect loop reported on the v3.32.4-beta.0 release came
-      // from /auth/session reporting valid: true while the protected
-      // adminAuth / galleryAuth middleware rejected the same token for
-      // reasons /auth/session never checked: the admin user was
-      // deactivated, the admin's password had been changed since iat,
-      // or the gallery event was archived/deleted. Mirror those checks
-      // here so the session endpoint is always at least as strict as
-      // what the protected endpoints will enforce next.
-      // Full user payload for admin sessions — the SSO callback establishes
-      // the session via redirect (no JSON response the SPA could store), so
-      // session restoration must be able to hydrate the user object (#798).
+      const sessions = require('../services/sessionAccessService');
       let adminUser = null;
-
       if (decoded.type === 'admin') {
-        let admin = null;
-        try {
-          admin = await db('admin_users')
-            .leftJoin('roles', 'roles.id', 'admin_users.role_id')
-            .where({ 'admin_users.id': decoded.id, 'admin_users.is_active': formatBoolean(true) })
-            .select(
-              'admin_users.id', 'admin_users.username', 'admin_users.email',
-              'admin_users.password_changed_at', 'admin_users.must_change_password',
-              'roles.name as role_name', 'roles.display_name as role_display_name'
-            )
-            .first();
-        } catch (lookupErr) {
-          // admin_users table not present (test fixture, fresh DB) — fall
-          // through and trust the token. Real deployments always have it.
-          admin = null;
-          // intentional swallow; if the table is missing we do not want
-          // to fail-closed during e.g. early bootstrap.
+        const admin = await sessions.admin(decoded, { includeProfile: true });
+        const { isSessionExpired } = require('../middleware/sessionTimeout');
+        if (await isSessionExpired(token, decoded)) {
+          return res.json({ valid: false, error: 'Session expired' });
         }
-
-        if (admin === null) {
-          // Lookup didn't run because the table is missing; skip the
-          // existence/password checks and treat the token as valid.
-        } else if (!admin) {
-          return res.json({ valid: false, error: 'Admin account no longer active' });
-        } else if (admin.password_changed_at) {
-          const passwordChangedSeconds = Math.floor(
-            new Date(admin.password_changed_at).getTime() / 1000
-          );
-          if (decoded.iat < passwordChangedSeconds) {
-            return res.json({ valid: false, error: 'Token invalid due to password change' });
-          }
-        }
-
-        // Mirror the session-timeout check that sessionTimeoutMiddleware
-        // enforces on every /api/admin endpoint. Without this, /auth/session
-        // returns valid:true for an idle/old-iat token that protected
-        // endpoints reject with 401 SESSION_TIMEOUT — the same redirect-loop
-        // shape as the issuer-claim and password-change asymmetries (issue
-        // #350 recurrence on v3.39.1-beta.0).
-        try {
-          const { isSessionExpired } = require('../middleware/sessionTimeout');
-          if (await isSessionExpired(token, decoded)) {
-            return res.json({ valid: false, error: 'Session expired' });
-          }
-        } catch (timeoutErr) {
-          // Helper lookup failed (test stub may not export it) — fall through
-          // and trust the token. Real deployments always have the middleware.
-        }
-
-        if (admin) {
-          adminUser = {
-            id: admin.id,
-            username: admin.username,
-            email: admin.email,
-            mustChangePassword: admin.must_change_password || false,
-            role: admin.role_name ? {
-              name: admin.role_name,
-              displayName: admin.role_display_name
-            } : null
-          };
-        }
+        adminUser = {
+          id: admin.id, username: admin.username, email: admin.email,
+          mustChangePassword: !!admin.must_change_password,
+          role: admin.role_name ? { name: admin.role_name, displayName: admin.role_display_name } : null,
+        };
       } else if (decoded.type === 'gallery') {
-        try {
-          const event = await db('events')
-            .where({
-              id: decoded.eventId,
-              is_active: formatBoolean(true),
-              is_archived: formatBoolean(false),
-            })
-            .first();
-          if (!event) {
-            return res.json({ valid: false, error: 'Gallery no longer available' });
-          }
-          if (event.expires_at && new Date(event.expires_at) < new Date()) {
-            return res.json({ valid: false, error: 'Gallery has expired' });
-          }
-        } catch (galleryLookupErr) {
-          // events table missing in this context — same fallback as
-          // admin path; trust the token rather than fail-closed.
-        }
+        const access = require('../services/galleryAccessService');
+        const event = await db('events').where({ id: decoded.eventId }).first();
+        if (!event) return res.json({ valid: false, error: 'Gallery no longer available' });
+        await access.authorize(event, access.grant(event, 'gallery', decoded));
+      } else {
+        return res.status(403).json({ valid: false, error: 'Invalid token type' });
       }
 
       // Calculate remaining time
@@ -1145,6 +1098,10 @@ router.get('/admin/sso/callback', async (req, res) => {
     await logActivity('admin_sso_login', { provider: 'oidc' }, null, {
       type: 'admin', id: admin.id, name: admin.username,
     });
+    // Only a successful ADMIN SSO callback sets this opt-in capability marker.
+    // No token, claim, address, or account identifier reaches product usage.
+    require('../services/productUsageService').markUsed(['oauth'])
+      .catch(() => logger.warn('Product usage marker could not be recorded'));
 
     return res.redirect(`${frontendBase}/admin/dashboard`);
   } catch (error) {

@@ -5,6 +5,280 @@ All notable changes to PicPeak will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.131.7-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.6-beta.0...v3.131.7-beta.0) (2026-09-11)
+
+
+### Bug Fixes
+
+* **admin:** keep header-style tiles from overflowing their cards ([#1422](https://github.com/PicPeak/picpeak/issues/1422)) ([7cd7654](https://github.com/PicPeak/picpeak/commit/7cd7654f99967080724d7498b72bea4986ae825d))
+
+## [3.131.6-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.5-beta.0...v3.131.6-beta.0) (2026-09-11)
+
+
+### Bug Fixes
+
+* **gallery:** cap how many cached zips rebuild at once in the background ([#1418](https://github.com/PicPeak/picpeak/issues/1418)) ([98d2560](https://github.com/PicPeak/picpeak/commit/98d25601b465ecc44d0875b52891073720fabbbc))
+
+## [3.131.5-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.4-beta.0...v3.131.5-beta.0) (2026-09-11)
+
+
+### Bug Fixes
+
+* **gallery:** stop the pre-zip build leaking storage reads ([#1402](https://github.com/PicPeak/picpeak/issues/1402)) ([f094cc0](https://github.com/PicPeak/picpeak/commit/f094cc06a78e776795e60cb3b11e8653681a2f31))
+
+## [3.131.4-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.3-beta.0...v3.131.4-beta.0) (2026-09-11)
+
+
+### Bug Fixes
+
+* **backend:** bump sharp, nodemailer, multer, js-yaml, joi for security fixes ([#1374](https://github.com/PicPeak/picpeak/issues/1374)) ([f6b81fa](https://github.com/PicPeak/picpeak/commit/f6b81fabf05ab0bbce48e63bbdf3812b30aa10de))
+* **backend:** contain and sanitize the SQLite restore source path ([#1384](https://github.com/PicPeak/picpeak/issues/1384)) ([316bcbd](https://github.com/PicPeak/picpeak/commit/316bcbd67965ddec74801308a722b506bb8da265))
+* **backend:** enforce event ownership on short URL deletion ([#1379](https://github.com/PicPeak/picpeak/issues/1379)) ([e290207](https://github.com/PicPeak/picpeak/commit/e290207934708f8bf41676aec39a43474f0f6172))
+* **backend:** reject a replayed TOTP code within its validity window ([#1389](https://github.com/PicPeak/picpeak/issues/1389)) ([cdde937](https://github.com/PicPeak/picpeak/commit/cdde937d7fce130d67e331bd968cb2c4734902d4))
+* **backend:** require actor to hold every permission of a role they grant ([#1378](https://github.com/PicPeak/picpeak/issues/1378)) ([59ea83c](https://github.com/PicPeak/picpeak/commit/59ea83c84efdcf6d488853a25ba05f1d15ef1150))
+* **backend:** shorten payment-check token TTL and notify admin on use ([#1385](https://github.com/PicPeak/picpeak/issues/1385)) ([e324791](https://github.com/PicPeak/picpeak/commit/e3247911a071b5277d877a1fa0a39c544d3a03e8))
+* **backend:** use the strong password generator for resets and enforce must_change_password ([#1387](https://github.com/PicPeak/picpeak/issues/1387)) ([b798d8e](https://github.com/PicPeak/picpeak/commit/b798d8e4c19541da6ee1f58c2756182817b6c716))
+* **backend:** validate business-profile logo uploads by content, not filename ([#1381](https://github.com/PicPeak/picpeak/issues/1381)) ([abc9601](https://github.com/PicPeak/picpeak/commit/abc960170b1eac0fa1f3110015e8fce671d428ab))
+* **backend:** validate event id before using it in the logo storage filename ([#1382](https://github.com/PicPeak/picpeak/issues/1382)) ([38b0e1d](https://github.com/PicPeak/picpeak/commit/38b0e1d5842217030e7dd48247e523ded4b19c58))
+* **backend:** validate the S3 endpoint host before the restore download ([#1383](https://github.com/PicPeak/picpeak/issues/1383)) ([ec03089](https://github.com/PicPeak/picpeak/commit/ec03089d57c88ff0f7c21b6a4947ffb9ef9771f9))
+* **gallery:** bound and reclaim storage reads in the remaining zip builders ([#1410](https://github.com/PicPeak/picpeak/issues/1410)) ([70f5a8c](https://github.com/PicPeak/picpeak/commit/70f5a8c54e096f70c030d63414d5954190cb68a8))
+* **gallery:** keep an admin draft preview out of the guest share-login flow ([f92d4bb](https://github.com/PicPeak/picpeak/commit/f92d4bb2d9c2ea84f59dd4cfaa3a4272f1eec56b))
+* **gallery:** keep videos playable under enhanced and maximum protection ([#1404](https://github.com/PicPeak/picpeak/issues/1404)) ([1080388](https://github.com/PicPeak/picpeak/commit/1080388f28b846553cd670c66e9632275eb9c994))
+* **gallery:** let an admin preview a draft through its short share URL ([f92d4bb](https://github.com/PicPeak/picpeak/commit/f92d4bb2d9c2ea84f59dd4cfaa3a4272f1eec56b))
+* **gallery:** let an admin preview a draft through its short share URL ([#1405](https://github.com/PicPeak/picpeak/issues/1405)) ([f92d4bb](https://github.com/PicPeak/picpeak/commit/f92d4bb2d9c2ea84f59dd4cfaa3a4272f1eec56b))
+* **upload:** let the csrf gate pass application/octet-stream chunks ([#1401](https://github.com/PicPeak/picpeak/issues/1401)) ([7c0c5c1](https://github.com/PicPeak/picpeak/commit/7c0c5c1cda3921cbd9404dd77d64bdec7a9ae2aa))
+* **upload:** stop buffering a chunk body before anything checks its size ([#1406](https://github.com/PicPeak/picpeak/issues/1406)) ([4622478](https://github.com/PicPeak/picpeak/commit/4622478e44d5e63da031a2f27c5a5c335282eacb))
+
+## [3.131.3-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.2-beta.0...v3.131.3-beta.0) (2026-09-10)
+
+
+### Bug Fixes
+
+* **video:** try metadata extraction and thumbnail generation independently ([#1371](https://github.com/PicPeak/picpeak/issues/1371)) ([a2bf1f6](https://github.com/PicPeak/picpeak/commit/a2bf1f644c78734fc9a86a24d441b7a70bdb38fb))
+
+## [3.131.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.1-beta.0...v3.131.2-beta.0) (2026-09-09)
+
+
+### Bug Fixes
+
+* **backup:** honor the configured database-backup destination path ([#1366](https://github.com/PicPeak/picpeak/issues/1366)) ([15cd5ed](https://github.com/PicPeak/picpeak/commit/15cd5ede82171f5869342de869903f55c73f3871))
+
+## [3.131.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.0-beta.0...v3.131.1-beta.0) (2026-09-08)
+
+
+### Bug Fixes
+
+* **usage:** explain and de-emphasize the pending-packet button lock ([#1363](https://github.com/PicPeak/picpeak/issues/1363)) ([9f4b9ba](https://github.com/PicPeak/picpeak/commit/9f4b9bab46264d83dcdf698ce5bc318703eb10ee))
+
+## [3.131.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.130.2-beta.0...v3.131.0-beta.0) (2026-09-08)
+
+
+### Features
+
+* **setup:** add anonymous usage-reporting opt-in to the first-run wizard ([8d0c329](https://github.com/PicPeak/picpeak/commit/8d0c32902dd78324286a7585188d0c292692c8ec))
+* **setup:** add product usage consent to the first-run wizard ([539f5db](https://github.com/PicPeak/picpeak/commit/539f5db2b5e28dc42742fbbbe082fc3c23a7263e))
+* **usage:** prompt existing admins once for usage reporting after an update ([59ef2ee](https://github.com/PicPeak/picpeak/commit/59ef2ee9af74e97e042934e6ea5fab3b0b687617))
+* **usage:** prompt existing admins once for usage reporting after an update ([d20f801](https://github.com/PicPeak/picpeak/commit/d20f80112f95c7d718f936ea14aadf7eb0accdea))
+
+
+### Bug Fixes
+
+* complete graceful shutdown and revoke tokens without expiry ([411d459](https://github.com/PicPeak/picpeak/commit/411d459338289cae7dce8cddbe7c78dae3d4f449))
+* interrupt idle worker waits during shutdown ([a31a2e2](https://github.com/PicPeak/picpeak/commit/a31a2e25e2666989ee226c0d7884e23f50fe58da))
+* retain revocations for tokens without expiry ([662516a](https://github.com/PicPeak/picpeak/commit/662516a5ad2a0aadd87dfff3fba4f2456e88a69d))
+* **setup:** refresh usage state after accepting consent ([a5f7b38](https://github.com/PicPeak/picpeak/commit/a5f7b38e02f20e66047431c5cb04e6f34c60c689))
+* **setup:** require the full usage reporting disclosure ([9168bdd](https://github.com/PicPeak/picpeak/commit/9168bdd5048b4419db7b0f4444375f54c06f5bbb))
+* **usage:** cap the update-prompt modal height so it scrolls on short viewports ([c61a6b0](https://github.com/PicPeak/picpeak/commit/c61a6b089e56beec1de5c106440764518f507012))
+* **usage:** classify prompt acknowledgement in privacy coverage ([fb2f833](https://github.com/PicPeak/picpeak/commit/fb2f8333dca79b9cada9f349671920e34db38d5d))
+* **usage:** preserve consent choices and make the prompt accessible ([9a437ee](https://github.com/PicPeak/picpeak/commit/9a437ee9e19f6ecb8bff8747de71d3a9527d9512))
+* **usage:** synchronize setup consent and dismissal state ([77b4aab](https://github.com/PicPeak/picpeak/commit/77b4aab61a54d92b46fdc93fce5a075e3dc1d794))
+
+## [3.130.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.130.1-beta.0...v3.130.2-beta.0) (2026-09-08)
+
+
+### Bug Fixes
+
+* enforce gallery access and consolidate gallery workflows ([#1357](https://github.com/PicPeak/picpeak/issues/1357)) ([f0e6d2d](https://github.com/PicPeak/picpeak/commit/f0e6d2dfb12460cb1d003802f346e2026fa1c016))
+
+## [3.130.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.130.0-beta.0...v3.130.1-beta.0) (2026-09-08)
+
+
+### Bug Fixes
+
+* **images:** probe and clean up preview tiers under the extension the encoder actually wrote ([#1355](https://github.com/PicPeak/picpeak/issues/1355)) ([acb25a9](https://github.com/PicPeak/picpeak/commit/acb25a9a1ce9887e51ff769d98f65379a5a1b803))
+* **images:** single-flight lazy rendition generation and keep the old rendition during replacement ([#1350](https://github.com/PicPeak/picpeak/issues/1350)) ([c97341e](https://github.com/PicPeak/picpeak/commit/c97341e4547257aab57fb746bad4203a1adaf560))
+
+
+### Documentation
+
+* define security support across stable and main ([#1351](https://github.com/PicPeak/picpeak/issues/1351)) ([0e459b3](https://github.com/PicPeak/picpeak/commit/0e459b3293ce9132ee8bb8324c6e76692e580cc5))
+* refresh repository support and community links ([#1349](https://github.com/PicPeak/picpeak/issues/1349)) ([f83cbe9](https://github.com/PicPeak/picpeak/commit/f83cbe9109c5c7b25a0b50e0f0e3244d32421e7e))
+
+## [3.130.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.129.0-beta.0...v3.130.0-beta.0) (2026-09-07)
+
+
+### Features
+
+* **external-media:** watch reference folders and import new files automatically ([#1345](https://github.com/PicPeak/picpeak/issues/1345)) ([8cc7d7d](https://github.com/PicPeak/picpeak/commit/8cc7d7d14a93c5d4c397eaf928361c70810b7e0a))
+
+
+### Bug Fixes
+
+* **events:** drop non-canonical keys from the event update before any check runs ([#1346](https://github.com/PicPeak/picpeak/issues/1346)) ([810801a](https://github.com/PicPeak/picpeak/commit/810801a9ab5df49cf47cd7bf9446fe6a54e6808d))
+
+## [3.129.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.128.0-beta.0...v3.129.0-beta.0) (2026-09-07)
+
+
+### Features
+
+* **cms:** keep the editor toolbar in reach on long pages ([#1335](https://github.com/PicPeak/picpeak/issues/1335)) ([d6a0c4a](https://github.com/PicPeak/picpeak/commit/d6a0c4aff52bab268799e9f7c2c5b62f2410c958))
+* **security:** opt-in recoverable gallery passwords ([#1341](https://github.com/PicPeak/picpeak/issues/1341)) ([fb9da72](https://github.com/PicPeak/picpeak/commit/fb9da72f1402aa8aee7ce0e575907789ed9faf33))
+
+## [3.128.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.127.2-beta.0...v3.128.0-beta.0) (2026-09-07)
+
+
+### Features
+
+* **settings:** expose the API rate limiter in the Security tab ([#1338](https://github.com/PicPeak/picpeak/issues/1338)) ([8017370](https://github.com/PicPeak/picpeak/commit/80173702712ffd2a8150d2f8326e1455fce1036a))
+* **usage:** distinguish real edits and template delivery with v5 consent ([#1339](https://github.com/PicPeak/picpeak/issues/1339)) ([5c1e38d](https://github.com/PicPeak/picpeak/commit/5c1e38d921f7973633d6f9d12fde4c7588214d31))
+
+
+### Bug Fixes
+
+* **email:** scrub gallery passwords from the sent-mail archive ([#1340](https://github.com/PicPeak/picpeak/issues/1340)) ([69754f8](https://github.com/PicPeak/picpeak/commit/69754f8a2cc99eec318a310a60609894d757f515))
+
+## [3.127.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.127.1-beta.0...v3.127.2-beta.0) (2026-09-07)
+
+
+### Documentation
+
+* **security:** correct the rate limiter defaults and how they are set ([#1336](https://github.com/PicPeak/picpeak/issues/1336)) ([9bbdca9](https://github.com/PicPeak/picpeak/commit/9bbdca9fc5db1b3610b92f395f30e5545fc42995))
+
+## [3.127.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.127.0-beta.0...v3.127.1-beta.0) (2026-09-07)
+
+
+### Bug Fixes
+
+* **usage:** stop WebKit collapsing the consent dialog to its header and footer ([79eb6d7](https://github.com/PicPeak/picpeak/commit/79eb6d72eb170ab4e7f4bf33d7cf2d97cd5fbaa8))
+* **usage:** stop WebKit collapsing the consent dialog to its header and footer ([9d18868](https://github.com/PicPeak/picpeak/commit/9d18868a072094ac393651abe767bc190f0b140f))
+
+## [3.127.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.126.3-beta.0...v3.127.0-beta.0) (2026-09-07)
+
+
+### Features
+
+* **usage:** open the portal signed in, and rewrite the German copy ([a02fa08](https://github.com/PicPeak/picpeak/commit/a02fa08f696f8476c07df0acc329633e489fcd30))
+* **usage:** open the portal signed in, with the credential never in a served URL ([f114f3e](https://github.com/PicPeak/picpeak/commit/f114f3e876f81a06b9ea28598f326bcbbc5901af))
+* **usage:** plain link to the public usage portal, German opt-in copy ([a16ff85](https://github.com/PicPeak/picpeak/commit/a16ff855dd4bdcefcac5b29b31a8c596df46957e))
+* **usage:** plain link to the public usage portal, German opt-in copy ([7e40579](https://github.com/PicPeak/picpeak/commit/7e4057921721919c27c40c6e46c755c5e03d6d86))
+
+
+### Bug Fixes
+
+* **analytics:** send Umami page views through track(), not the removed trackView() ([5b8c13f](https://github.com/PicPeak/picpeak/commit/5b8c13feb635ffaf8cb6c2a20d78f4972d304539))
+* **gallery:** honor canvas settings in the Premium lightbox ([fde0558](https://github.com/PicPeak/picpeak/commit/fde055881145c937092bfa4dd7f4c0e1b19fb538))
+* **gallery:** honor canvas settings in the Premium lightbox ([9edce85](https://github.com/PicPeak/picpeak/commit/9edce856ff59802b727e2ae610d3783efea006eb))
+* **gallery:** keep canvas rendering in the lightbox, render tiles as &lt;img&gt; ([0986f7f](https://github.com/PicPeak/picpeak/commit/0986f7f7ac0e53b759928872cd5ffccb1b28f27d))
+* **i18n:** rewrite the German product-usage copy ([35cbcef](https://github.com/PicPeak/picpeak/commit/35cbcefed20f7d8aaf6724fce261266ef20838a4))
+* **security:** bump sanitize-html to 2.17.7 ([7c968e7](https://github.com/PicPeak/picpeak/commit/7c968e74bb339c2953ae98984e46c3d848be39cf))
+* **security:** bump sanitize-html to 2.17.7 ([6583178](https://github.com/PicPeak/picpeak/commit/65831785a2f1a52b0d3045b4a0b34fbfb37e94ca))
+* **security:** stop a gallery viewer's own image fetches spending the anonymous budget ([ac24319](https://github.com/PicPeak/picpeak/commit/ac243191351b12ab4046cf35a9caa5317f993d3d))
+* **security:** stop a gallery viewer's own image fetches spending the anonymous budget ([7b2dd3f](https://github.com/PicPeak/picpeak/commit/7b2dd3fab1b03966ca3ca1e13d0ce75b17c4bae8))
+* **setup:** require Node 22.12 for sanitize-html ([e06d0b4](https://github.com/PicPeak/picpeak/commit/e06d0b45138688d49037c65e45a1916252da9feb))
+
+## [3.126.3-beta.0](https://github.com/PicPeak/picpeak/compare/v3.126.2-beta.0...v3.126.3-beta.0) (2026-09-06)
+
+
+### Bug Fixes
+
+* **usage:** introduce consented v4 download restriction reporting ([5306fe3](https://github.com/PicPeak/picpeak/commit/5306fe378c8d7787d50ba926ad80f9ca6a85d136))
+* **usage:** introduce consented v4 without changing historical reports ([ef8a52f](https://github.com/PicPeak/picpeak/commit/ef8a52f02c4afa10dbc5fccafb6030b1aedc936c))
+
+## [3.126.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.126.1-beta.0...v3.126.2-beta.0) (2026-09-06)
+
+
+### Bug Fixes
+
+* **gallery:** release grid tiles once they are far enough out of view ([b3937d0](https://github.com/PicPeak/picpeak/commit/b3937d0b8c54c8ddf8a428be88aa444ab2b4f2d2))
+* **gallery:** retry a failed image fetch once the tile is back on screen ([c4b03a8](https://github.com/PicPeak/picpeak/commit/c4b03a831f843ec447a54d712aefa89c9761e8e8))
+* **gallery:** retry a failed image fetch once the tile is back on screen ([77ae94e](https://github.com/PicPeak/picpeak/commit/77ae94e649f367bb0a44166d3215ce1884c660d2))
+
+## [3.126.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.126.0-beta.0...v3.126.1-beta.0) (2026-09-06)
+
+
+### Bug Fixes
+
+* **usage:** preserve compatibility with old and partial reports ([b801f3a](https://github.com/PicPeak/picpeak/commit/b801f3a6b8d74ece0e6d6be136a43bc58f458e47))
+* **usage:** preserve report contracts with compatible receiver validation ([7ca783f](https://github.com/PicPeak/picpeak/commit/7ca783f89b8ed735ec3e69306a837c0f40e0670b))
+
+## [3.126.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.125.0-beta.0...v3.126.0-beta.0) (2026-09-06)
+
+
+### Features
+
+* **usage:** add beta capabilities and gallery/photo totals with explicit consent ([b0bb65d](https://github.com/PicPeak/picpeak/commit/b0bb65d0d28124548c2b746f4c52c79f1b1f7542))
+
+## [3.125.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.124.1-beta.0...v3.125.0-beta.0) (2026-09-06)
+
+
+### Features
+
+* add opt-in product usage and feedback ([#1110](https://github.com/PicPeak/picpeak/issues/1110)) ([35b42bb](https://github.com/PicPeak/picpeak/commit/35b42bba9d57e89599f8efaeb1c89a778e96d8da))
+* expand opt-in capability coverage with versioned consent ([a738259](https://github.com/PicPeak/picpeak/commit/a7382591bfd73c841ea91fe821e2ab739c2990d0))
+
+
+### Bug Fixes
+
+* **usage:** close the QA findings on opt-in product usage ([1e8b6f1](https://github.com/PicPeak/picpeak/commit/1e8b6f1b0f98f7242de132abceae62afdb592f65))
+* **usage:** let an operator clear a participation the collector never accepted ([e40bc47](https://github.com/PicPeak/picpeak/commit/e40bc474bc65f1a167fc4012b28ce0ce65ea9575))
+
+
+### Documentation
+
+* **usage:** state in the consent dialog that the connection only runs outwards ([c741dc2](https://github.com/PicPeak/picpeak/commit/c741dc22c579e495b4c0514e4c222f06279aaf7d))
+
+## [3.124.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.124.0-beta.0...v3.124.1-beta.0) (2026-09-05)
+
+
+### Bug Fixes
+
+* remove the fragmentation handling stranded by [#1303](https://github.com/PicPeak/picpeak/issues/1303) ([5dda14f](https://github.com/PicPeak/picpeak/commit/5dda14f7271265506a17acec5d253d9912784692))
+
+## [3.124.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.123.0-beta.0...v3.124.0-beta.0) (2026-09-05)
+
+
+### Features
+
+* **newsletters:** warn about deliverability before a large send ([0536c86](https://github.com/PicPeak/picpeak/commit/0536c86ec9014bf3b64c6590841e863525d90326))
+* **newsletters:** warn about deliverability before a large send ([49197be](https://github.com/PicPeak/picpeak/commit/49197be3293bac4c312352b3915d9d7fd9973c29))
+
+
+### Bug Fixes
+
+* **gallery:** give the Grid layout a lazy-loading pre-load band ([#1287](https://github.com/PicPeak/picpeak/issues/1287)) ([b1e5287](https://github.com/PicPeak/picpeak/commit/b1e5287351b43a347957e0b7a32d4c81d00ba11b))
+* **gallery:** image-loading follow-ups — pre-load band, decode release, sanitizer dedup ([905fc59](https://github.com/PicPeak/picpeak/commit/905fc595e3c15d55e00347807047acbe58c9b5bc))
+* **gallery:** release the canvas decode when it is drawn, not at unmount ([fbe9757](https://github.com/PicPeak/picpeak/commit/fbe9757a53b1cbe460837534cc3319d990180b61)), closes [#1287](https://github.com/PicPeak/picpeak/issues/1287)
+* **gallery:** release the canvas-mode decode, and drop a now-duplicate sanitizer ([be8d79e](https://github.com/PicPeak/picpeak/commit/be8d79e9c4b6148a0b3f8a1f81f05fbf5fbf6880))
+* **gallery:** remove the inert image-protection prop surface from AuthenticatedImage ([1f316ef](https://github.com/PicPeak/picpeak/commit/1f316ef91cd2f74ac7ae68751fc00b9a3ccff410))
+* **gallery:** remove the inert image-protection prop surface from AuthenticatedImage ([e734e41](https://github.com/PicPeak/picpeak/commit/e734e41c412cede1be5efbe27aab617d59faee9d)), closes [#1297](https://github.com/PicPeak/picpeak/issues/1297)
+* **newsletters:** make the warning's duration and queue claim honest ([7b4a65e](https://github.com/PicPeak/picpeak/commit/7b4a65ecc79d93715c52d82e9d7adb2665540536))
+* remove the image-fragmentation surface ([ae23b1a](https://github.com/PicPeak/picpeak/commit/ae23b1adea03fb6b46aac0079f6e523b97e3594e))
+* remove the image-fragmentation surface ([967224c](https://github.com/PicPeak/picpeak/commit/967224c030b9cd721fb0217d0763e1ec1978c51e))
+* **security:** apply image-security defaults on every creation path ([ab6c33d](https://github.com/PicPeak/picpeak/commit/ab6c33d9eb485cc3ed05187a98a22f51926cc125)), closes [#1296](https://github.com/PicPeak/picpeak/issues/1296)
+* **security:** apply the Image-security defaults instead of storing them ([#1296](https://github.com/PicPeak/picpeak/issues/1296)) ([2e9bd54](https://github.com/PicPeak/picpeak/commit/2e9bd540c97001d274c6288800a86a164174ae9c))
+* **security:** apply the Image-security defaults instead of storing them ([#1296](https://github.com/PicPeak/picpeak/issues/1296)) ([8ca3610](https://github.com/PicPeak/picpeak/commit/8ca3610514dc9e16c1c14c82fce529042b728e47))
+* **security:** check for an escaped identifier before consuming the escape ([b6dc099](https://github.com/PicPeak/picpeak/commit/b6dc0991ce04b574a03aff9cd579f0333b11048e)), closes [#1264](https://github.com/PicPeak/picpeak/issues/1264)
+* **security:** close the remaining image-security default gaps ([19c518a](https://github.com/PicPeak/picpeak/commit/19c518aaa50f1bd8fb7cef260a55bf3d5f3eb7f3)), closes [#1296](https://github.com/PicPeak/picpeak/issues/1296)
+* **security:** close two CSS url() bypasses the sanitizer dedup exposed ([1cf8274](https://github.com/PicPeak/picpeak/commit/1cf82746b72c2639547871e4e479d390760b7c1d))
+* **security:** decode settings at the API boundary and honour the transaction ([0e560eb](https://github.com/PicPeak/picpeak/commit/0e560ebb193d8243ed4de059ea150f3f64fa1409)), closes [#1296](https://github.com/PicPeak/picpeak/issues/1296)
+* **security:** one settings decoder, and the last creation path ([0deef25](https://github.com/PicPeak/picpeak/commit/0deef2584f4a6287bb947bdc545f585ae30aab67)), closes [#1296](https://github.com/PicPeak/picpeak/issues/1296)
+* **security:** re-check inline CSS after template substitution ([027afb6](https://github.com/PicPeak/picpeak/commit/027afb608667ae072465fdf173751fa79f75110d)), closes [#1264](https://github.com/PicPeak/picpeak/issues/1264)
+* **security:** reject array values for every field on the event update ([933f2d8](https://github.com/PicPeak/picpeak/commit/933f2d8e0ee0685128f2e8f8bed5169a06b4116c)), closes [#1296](https://github.com/PicPeak/picpeak/issues/1296)
+* **security:** reject array values on the event update route too ([8f3436f](https://github.com/PicPeak/picpeak/commit/8f3436f17d6390a776c4258c53475d4c6038a63e)), closes [#1296](https://github.com/PicPeak/picpeak/issues/1296)
+* **security:** strip control characters before scanning CSS for url() ([99f54a3](https://github.com/PicPeak/picpeak/commit/99f54a39546591d21df5ca11149770a161c447d9)), closes [#1264](https://github.com/PicPeak/picpeak/issues/1264)
+* **security:** use CSS whitespace, not JavaScript's, in the url() reader ([4196e83](https://github.com/PicPeak/picpeak/commit/4196e83a5f0427984fc16538783a1f7418a10837)), closes [#1264](https://github.com/PicPeak/picpeak/issues/1264)
+* **security:** validate CSS urls last, after every pass that moves text ([1151e96](https://github.com/PicPeak/picpeak/commit/1151e96144a9ada7170461e829d2f3d5dcc8edb2)), closes [#1264](https://github.com/PicPeak/picpeak/issues/1264)
+
 ## [3.123.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.122.7-beta.0...v3.123.0-beta.0) (2026-09-04)
 
 

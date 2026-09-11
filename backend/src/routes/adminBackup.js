@@ -202,7 +202,11 @@ const picpeakUpload = multer({
     destination: (req, file, cb) => cb(null, os.tmpdir()),
     filename: (req, file, cb) => cb(null, `picpeak-upload-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.picpeak`),
   }),
-  limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5 GB — .picpeak with photos can be large
+  // CVE-2026-82333: this route only ever consumes a single unnamed file
+  // field (`backup`) — no legitimate bracket-indexed field name (e.g.
+  // `a[0]`) exists in its form. fieldArrayIndexLimit: 0 rejects any field
+  // name using array-index syntax at all, closing multer's field-parser DoS.
+  limits: { fileSize: 5 * 1024 * 1024 * 1024, fieldArrayIndexLimit: 0 }, // 5 GB — .picpeak with photos can be large
 });
 
 // Upload + restore a .picpeak onto THIS instance. DESTRUCTIVE: full override of
@@ -795,6 +799,8 @@ router.post('/s3/test-upload', adminAuth, requirePermission('backup.create'), as
     
     // Test deletion
     await s3Adapter.delete(testKey);
+
+    if (contentMatch) require('../usage/capabilityEvidence').capabilityEvidence(res, 's3_storage', 's3_backups');
     
     res.json({
       success: true,

@@ -1,3 +1,4 @@
+const { secretValues, redactEmailData, redactRenderedHtml, replaceMaskedSecrets, isSecretKey } = require('../utils/emailSecretRedaction');
 const nodemailer = require('nodemailer');
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
@@ -755,8 +756,13 @@ async function processTemplate(template, variables, language = 'en') {
     es: 'La contraseña que estableciste al crear la galería',
   };
 
-  if (processedVariables.gallery_password === '{{password_security_message}}') {
-    processedVariables.gallery_password = passwordSecurityI18n[language] || passwordSecurityI18n.en;
+  // Every secret variable, not only gallery_password: a resent copy of an
+  // archived mail carries the sentinel in client_password or new_password
+  // too (see emailSecretRedaction.replaceMaskedSecrets).
+  for (const [key, value] of Object.entries(processedVariables)) {
+    if (value === '{{password_security_message}}' && isSecretKey(key)) {
+      processedVariables[key] = passwordSecurityI18n[language] || passwordSecurityI18n.en;
+    }
   }
 
   if (processedVariables.gallery_password === 'No password required') {
@@ -900,7 +906,7 @@ async function buildSignatureTextFor(language) {
   }
 }
 
-async function sendTemplateEmail(to, templateKey, variables) {
+async function sendTemplateEmail(to, templateKey, variables, { usageEligible = true } = {}) {
   try {
     // Webhook transport (#1225) replaces SMTP entirely when configured, so an
     // instance using it has no SMTP settings to initialise and must not be
@@ -980,6 +986,17 @@ async function sendTemplateEmail(to, templateKey, variables) {
     const info = viaWebhook
       ? await emailWebhookTransport.send(mail)
       : await transporter.sendMail(mail);
+
+    // Transport acceptance is the measured event, not rendering or inbox
+    // delivery. The service accepts only the fixed bit under confirmed v5
+    // consent; marker failure must never retry an already-sent message.
+    if (usageEligible && (viaWebhook || info.accepted?.length > 0)) {
+      try {
+        await require('./productUsageService').markUsed(['email_template_delivery']);
+      } catch {
+        logger.warn('Product usage mail marker could not be recorded');
+      }
+    }
 
     logger.info(`Email sent successfully: ${info.messageId} (${language})`);
     // Return the rendered HTML so the queue processor can persist the ACTUAL
@@ -1091,7 +1108,7 @@ async function sendRawEmail({ to, cc, subject, html, text, attachments, accountK
     ? await emailWebhookTransport.send(mail)
     : await tx.sendMail(mail);
   logger.info(`Manual email sent: ${info.messageId}`);
-  return { messageId: info.messageId, html };
+  return { messageId: info.messageId, html, transport: viaWebhook ? 'webhook' : 'smtp' };
 }
 
 /**
@@ -1219,10 +1236,17 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
     result.processed = pendingEmails.length;
 
     for (const email of pendingEmails) {
+      // Declared outside the try: the failure branch redacts the variables
+      // once the row is out of retries, so it needs them too.
+      let emailData = {};
       try {
-        const emailData = typeof email.email_data === 'string'
+        emailData = typeof email.email_data === 'string'
           ? JSON.parse(email.email_data || '{}')
           : email.email_data || {};
+        // A re-queued row (Messages resend / retry / send now) may carry the
+        // archive mask where its passwords used to be; the sentinel makes
+        // the template say "not shown" instead of mailing the mask.
+        emailData = replaceMaskedSecrets(emailData);
 
         // Language is resolved from emailData.eventId (event.language is the top
         // priority). queueEmail injects it, but direct email_queue inserts (e.g.
@@ -1262,7 +1286,8 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
           sendResult = await sendTemplateEmail(
             email.recipient_email,
             email.email_type,
-            emailData
+            emailData,
+            { usageEligible: emailData.__usageEligible !== false }
           );
         }
 
@@ -1270,9 +1295,15 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
         // Overview email preview (guarded — older installs without migration
         // 119 just skip it).
         const sentUpdate = { status: 'sent', sent_at: new Date().toISOString() };
+        // The mail is out: this is the last moment the variables were needed
+        // in the clear. Gallery passwords and client PINs are bcrypt-hashed
+        // everywhere else; without this the archive kept them readable for
+        // the life of the event, and the Messages pane served them back.
+        const secrets = secretValues(emailData);
+        sentUpdate.email_data = JSON.stringify(redactEmailData(emailData));
         try {
           if (sendResult && sendResult.html && await hasColumnCached('email_queue', 'rendered_html')) {
-            sentUpdate.rendered_html = sendResult.html;
+            sentUpdate.rendered_html = redactRenderedHtml(sendResult.html, secrets);
           }
         } catch (_) { /* best-effort — never block the send on the preview */ }
         await db('email_queue')
@@ -1295,7 +1326,10 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
         logger.info(`Email ${email.id} sent successfully`);
       } catch (error) {
         result.failed += 1;
-        // Increment retry count
+        // Increment retry count. The variables stay in the clear on
+        // failure: a row past the cap can still be re-queued (Messages
+        // "retry" resets retry_count, ignoreSchedule skips the cap) and a
+        // masked password would then be mailed out as the real one.
         try {
           await db('email_queue')
             .where('id', email.id)
@@ -1414,6 +1448,9 @@ async function queueEmail(eventId, recipientEmail, emailType, emailData, options
   try {
     // Add eventId to emailData for language detection
     emailData.eventId = eventId;
+    // An explicit test message (dev tools' send-test-email) must not count as
+    // template delivery when the queue processor sends it later.
+    if (options.usageEligible === false) emailData.__usageEligible = false;
     const row = {
       event_id: eventId,
       recipient_email: recipientEmail,
@@ -1477,39 +1514,13 @@ async function testEmailConnection() {
   }
 }
 
-// Start email queue processor
-let emailQueueInterval = null;
-
+const emailTask = require('./scheduledTask').scheduledTask(processEmailQueue, { interval: 60000, initialDelay: 0 });
 function startEmailQueueProcessor() {
-  logger.info('Email queue processor: Attempting to start...');
-  
-  if (!emailQueueInterval) {
-    // Process immediately on start
-    processEmailQueue().catch(err => {
-      logger.error('Email queue processor: Initial processing failed:', err);
-    });
-    
-    // Then process every minute
-    emailQueueInterval = setInterval(() => {
-      processEmailQueue().catch(err => {
-        logger.error('Email queue processor: Periodic processing failed:', err);
-      });
-    }, 60000);
-    
-    processorStatus.started = true;
-    logger.info('Email queue processor started successfully');
-  } else {
-    logger.info('Email queue processor: Already running');
-  }
+  emailTask.start(); processorStatus.started = true;
 }
-
-function stopEmailQueueProcessor() {
-  if (emailQueueInterval) {
-    clearInterval(emailQueueInterval);
-    emailQueueInterval = null;
-    processorStatus.started = false;
-    logger.info('Email queue processor stopped');
-  }
+async function stopEmailQueueProcessor() {
+  await emailTask.stop(); processorStatus.started = false;
+  transporter?.close?.(); transporter = null;
 }
 
 // Initialize on module load - DISABLED for production startup

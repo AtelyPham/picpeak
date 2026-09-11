@@ -1,10 +1,10 @@
 {
   "name": "picpeak-backend",
-  "version": "3.123.0-beta.0",
+  "version": "3.131.7-beta.0",
   "description": "Backend for PicPeak event photo sharing platform",
   "main": "server.js",
   "engines": {
-    "node": "^20.19.0 || >=22"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "start": "node server.js",
@@ -21,6 +21,7 @@
     "@aws-sdk/client-s3": "^3.850.0",
     "@aws-sdk/lib-storage": "^3.850.0",
     "@aws-sdk/s3-request-presigner": "^3.850.0",
+    "ajv": "^8.20.0",
     "archiver": "^5.3.1",
     "axios": "1.18.1",
     "bcrypt": "6.0.0",
@@ -48,7 +49,7 @@
     "knex": "^2.4.2",
     "mailparser": "^3.9.9",
     "mime-types": "^3.0.1",
-    "multer": "2.2.0",
+    "multer": "2.3.0",
     "node-cron": "^3.0.2",
     "node-stream-zip": "^1.15.0",
     "nodemailer": "^9.0.1",
@@ -61,8 +62,8 @@
     "postcss": "8.5.23",
     "qrcode": "^1.5.4",
     "react-i18next": "^15.6.0",
-    "sanitize-html": "2.17.5",
-    "sharp": "0.35.3",
+    "sanitize-html": "2.17.7",
+    "sharp": "0.35.4",
     "sqlite3": "^5.1.6",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",

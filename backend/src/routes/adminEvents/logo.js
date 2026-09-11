@@ -1,3 +1,4 @@
+const { capabilityEvidence } = require('../../usage/capabilityEvidence');
 // Extracted verbatim from the original routes/adminEvents.js (see ./index.js).
 // Exports a register function; ./index.js calls the sub-routers in the original
 // registration order so Express route matching is unchanged.
@@ -23,14 +24,20 @@ const eventLogoStorage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
+    const eventId = Number(req.params.id);
+    if (!Number.isInteger(eventId) || eventId <= 0) {
+      return cb(new Error('Invalid event id'));
+    }
     const ext = path.extname(file.originalname);
-    cb(null, `event-${req.params.id}-logo-${Date.now()}${ext}`);
+    cb(null, `event-${eventId}-logo-${Date.now()}${ext}`);
   }
 });
 
 const eventLogoUpload = multer({
   storage: eventLogoStorage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  // CVE-2026-82333: single unnamed `logo` field only — no legitimate
+  // array-indexed field names, so reject any bracket-index field name.
+  limits: { fileSize: 5 * 1024 * 1024, fieldArrayIndexLimit: 0 }, // 5MB
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/svg+xml'];
     if (validateFileType(file.originalname, file.mimetype, allowedMimeTypes)) {
@@ -89,6 +96,7 @@ module.exports = (router) => {
         { type: 'admin', id: req.admin.id, name: req.admin.username }
       );
 
+      capabilityEvidence(res, 'branding_editing');
       res.json({
         message: 'Event logo uploaded successfully',
         hero_logo_url: logoUrl
@@ -135,6 +143,7 @@ module.exports = (router) => {
         { type: 'admin', id: req.admin.id, name: req.admin.username }
       );
 
+      if (event.hero_logo_url || event.hero_logo_path) capabilityEvidence(res, 'branding_editing');
       res.json({ message: 'Event logo removed successfully' });
     } catch (error) {
       errorResponse(res, error, 500, 'Failed to delete event logo');

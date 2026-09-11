@@ -19,6 +19,7 @@
  */
 
 const express = require('express');
+const { capabilityEvidence } = require('../usage/capabilityEvidence');
 const { body, param, query } = require('express-validator');
 const multer = require('multer');
 const path = require('path');
@@ -71,7 +72,9 @@ const importedInvoiceStorage = multer.diskStorage({
 });
 const importedInvoiceUpload = multer({
   storage: importedInvoiceStorage,
-  limits: { fileSize: 10 * 1024 * 1024 },
+  // CVE-2026-82333: single unnamed `pdf` field only — no legitimate
+  // array-indexed field names, so reject any bracket-index field name.
+  limits: { fileSize: 10 * 1024 * 1024, fieldArrayIndexLimit: 0 },
   fileFilter: (_req, file, cb) => {
     if (file.mimetype === 'application/pdf') cb(null, true);
     else cb(new Error('Only PDF files are allowed for imported invoices'));
@@ -563,6 +566,7 @@ router.post(
 
     const inserted = await db('invoices').insert(row).returning('id');
     const invoiceId = typeof inserted[0] === 'object' ? inserted[0].id : inserted[0];
+    capabilityEvidence(res, 'crm_invoice_import');
 
     return successResponse(res, {
       invoice: transformInvoice(await db('invoices').where({ id: invoiceId }).first()),

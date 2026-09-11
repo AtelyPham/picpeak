@@ -27,6 +27,7 @@ import type { AdminPhoto } from '../../../services/photos.service';
 import type { FeedbackSettings as FeedbackSettingsType } from '../../../services/feedback.service';
 import { ExternalFolderPicker } from './ExternalFolderPicker';
 import { safeParseDate } from './utils';
+import { usePermission } from '../../../hooks/usePermission';
 import type { EditFormState } from './types';
 
 interface EventInformationCardProps {
@@ -64,6 +65,11 @@ export const EventInformationCard: React.FC<EventInformationCardProps> = ({
   onRevealNow
 }) => {
   const { t } = useTranslation();
+  // Enabling the watcher makes the server import on the admin's behalf, which
+  // the backend gates on photos.upload like the Import button. Mirror that
+  // here rather than letting the save bounce with a 403.
+  const canEnableWatch = usePermission('photos.upload');
+  
   const { format } = useLocalizedDate();
   const queryClient = useQueryClient();
   const [logoUploading, setLogoUploading] = useState(false);
@@ -356,6 +362,28 @@ export const EventInformationCard: React.FC<EventInformationCardProps> = ({
               <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
                 {t('events.externalFolderHint', 'These folders come from the /external-media mount inside the container. Ensure it is accessible to the backend process.')}
               </p>
+              <label className={`flex items-start gap-2 mt-3 ${canEnableWatch || editForm.external_watch ? 'cursor-pointer' : 'opacity-60 cursor-not-allowed'}`}>
+                <input
+                  type="checkbox"
+                  className="mt-0.5 rounded border-neutral-300 dark:border-neutral-600 text-accent focus:ring-primary-500"
+                  checked={editForm.external_watch === true}
+                  disabled={!canEnableWatch && !editForm.external_watch}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, external_watch: e.target.checked }))}
+                />
+                <span className="text-sm">
+                  <span className="font-medium text-neutral-900 dark:text-neutral-100">
+                    {t('events.externalWatch', 'Watch folder for new files')}
+                  </span>
+                  <span className="block text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
+                    {t('events.externalWatchHint', 'New images copied into this folder are imported automatically, the same way the Import button does it. Files removed from the folder are never deleted from the gallery.')}
+                  </span>
+                  {!canEnableWatch && !editForm.external_watch && (
+                    <span className="block text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
+                      {t('events.externalWatchNoPermission', 'Requires the permission to upload photos.')}
+                    </span>
+                  )}
+                </span>
+              </label>
             </div>
           )}
 
@@ -619,10 +647,6 @@ export const EventInformationCard: React.FC<EventInformationCardProps> = ({
                   onChange={(e) => setEditForm(prev => ({
                     ...prev,
                     watermark_downloads: e.target.checked,
-                    // Watermarking and presigned URLs are mutually
-                    // exclusive — presigned URLs serve raw bytes from
-                    // S3 without going through the watermark pipeline.
-                    allow_presigned_download: e.target.checked ? false : prev.allow_presigned_download,
                   }))}
                   className="w-4 h-4 text-accent border-neutral-300 dark:border-neutral-600 rounded focus:ring-primary-500"
                 />
@@ -630,25 +654,7 @@ export const EventInformationCard: React.FC<EventInformationCardProps> = ({
                 <span className="text-sm text-neutral-700 dark:text-neutral-300">{t('events.watermarkDownloads', 'Add watermark to downloads')}</span>
               </label>
 
-              <label
-                className={`flex items-center ${editForm.watermark_downloads ? 'opacity-50 cursor-not-allowed' : ''}`}
-                title={editForm.watermark_downloads
-                  ? 'Disabled while watermarks are on — presigned URLs bypass the watermark pipeline.'
-                  : 'When the backend uses STORAGE_BACKEND=s3, "Download All" returns a 5-minute presigned S3 URL instead of streaming through the backend. Saves bandwidth on huge galleries; bypasses watermarking.'
-                }
-              >
-                <input
-                  type="checkbox"
-                  checked={!!editForm.allow_presigned_download}
-                  disabled={editForm.watermark_downloads}
-                  onChange={(e) => setEditForm(prev => ({ ...prev, allow_presigned_download: e.target.checked }))}
-                  className="w-4 h-4 text-accent border-neutral-300 dark:border-neutral-600 rounded focus:ring-primary-500"
-                />
-                <Download className="w-4 h-4 ml-2 mr-1 text-neutral-500 dark:text-neutral-400" />
-                <span className="text-sm text-neutral-700 dark:text-neutral-300">
-                  {t('events.allowPresignedDownload', 'Allow direct S3 download (no watermark, S3 mode only)')}
-                </span>
-              </label>
+
 
               <label className="flex items-center">
                 <input
@@ -669,7 +675,7 @@ export const EventInformationCard: React.FC<EventInformationCardProps> = ({
                   className="w-4 h-4 text-accent border-neutral-300 dark:border-neutral-600 rounded focus:ring-primary-500"
                 />
                 <Image className="w-4 h-4 ml-2 mr-1 text-neutral-500 dark:text-neutral-400" />
-                <span className="text-sm text-neutral-700 dark:text-neutral-300">{t('events.useCanvasRendering', 'Canvas rendering (advanced protection)')}</span>
+                <span className="text-sm text-neutral-700 dark:text-neutral-300">{t('events.useCanvasRendering', 'Canvas rendering in the lightbox (advanced protection)')}</span>
               </label>
 
               <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-2">
@@ -849,6 +855,11 @@ export const EventInformationCard: React.FC<EventInformationCardProps> = ({
               {event.source_mode === 'reference' ? t('events.sourceModeReference', 'Reference external folder') : t('events.sourceModeManaged', 'Managed (upload to PicPeak)')}
               {event.source_mode === 'reference' && event.external_path ? (
                 <span className="text-neutral-500 dark:text-neutral-400 ml-2">/external-media/{event.external_path}</span>
+              ) : null}
+              {event.source_mode === 'reference' && event.external_watch ? (
+                <span className="block text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                  {t('events.externalWatchActive', 'Folder is watched — new files are imported automatically.')}
+                </span>
               ) : null}
             </dd>
           </div>

@@ -33,6 +33,7 @@ import { toast } from 'react-toastify';
 
 import './GalleryPremiumLayout.css';
 import { lightboxImageUrl } from '../imageTiers';
+import { renderPremiumLightboxImage } from './PremiumLightboxImage';
 
 interface PhotoCardProps {
   photo: Photo;
@@ -46,9 +47,7 @@ interface PhotoCardProps {
   isLiked: boolean;
   slug: string;
   allowDownloads?: boolean;
-  protectionLevel?: 'basic' | 'standard' | 'enhanced' | 'maximum';
   useEnhancedProtection?: boolean;
-  useCanvasRendering?: boolean;
   feedbackEnabled?: boolean;
   // #506: track the per-event "allow likes" toggle so the per-photo
   // Like button respects it. `feedbackEnabled` alone isn't enough —
@@ -68,10 +67,6 @@ const PhotoCard: React.FC<PhotoCardProps> = ({
   isSelectionMode,
   isLiked,
   slug,
-  allowDownloads = true,
-  protectionLevel = 'standard',
-  useEnhancedProtection = false,
-  useCanvasRendering = false,
   feedbackEnabled = false,
   allowLikes = false,
   index
@@ -124,13 +119,6 @@ const PhotoCard: React.FC<PhotoCardProps> = ({
         loading="lazy"
         isGallery={true}
         slug={slug}
-        photoId={photo.id}
-        requiresToken={photo.requires_token}
-        secureUrlTemplate={photo.secure_url_template}
-        protectFromDownload={!allowDownloads || useEnhancedProtection}
-        protectionLevel={protectionLevel}
-        useEnhancedProtection={useEnhancedProtection}
-        useCanvasRendering={useCanvasRendering || protectionLevel === 'maximum'}
       />
 
       {/* Colour label (#1044) — same badge every layout uses. */}
@@ -232,6 +220,17 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
   const { t } = useTranslation();
   const downloadPhotoMutation = useDownloadPhoto();
   const [lightboxIndex, setLightboxIndex] = useState(-1);
+  // The delivered preview can be smaller than the original. Keep Zoom's
+  // pixel limit/aspect ratio tied to the loaded rendition, as its default
+  // image renderer does internally.
+  const [imageDimensions, setImageDimensions] = useState<Record<string, { width: number; height: number }>>({});
+  const handleLightboxImageLoad = useCallback((src: string, dimensions: { width: number; height: number }) => {
+    setImageDimensions((previous) => (
+      previous[src]?.width === dimensions.width && previous[src]?.height === dimensions.height
+        ? previous
+        : { ...previous, [src]: dimensions }
+    ));
+  }, []);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [likedPhotoIds, setLikedPhotoIds] = useState<Set<number>>(new Set());
   // Seed from server is_liked on first non-empty payload (#590 follow-up).
@@ -339,14 +338,15 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
       // nothing and Download would silently do nothing (#1166 review).
       photoId: photo.id,
       alt: photo.filename,
-      width: photo.width || 1200,
-      height: photo.height || 800,
+      width: imageDimensions[lightboxImageUrl(photo)]?.width || photo.width || 1200,
+      height: imageDimensions[lightboxImageUrl(photo)]?.height || photo.height || 800,
+      thumbnail: photo.thumbnail_url || undefined,
       download: allowDownloads ? photo.url : undefined,
       title: showOriginalFilename
         ? (photo.original_filename || photo.filename)
         : undefined,
     }));
-  }, [filteredPhotos, allowDownloads, showOriginalFilename]);
+  }, [filteredPhotos, allowDownloads, showOriginalFilename, imageDimensions]);
 
   const handleLike = useCallback(async (photo: Photo, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -637,9 +637,7 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
                   isLiked={likedPhotoIds.has(originalPhoto.id)}
                   slug={slug}
                   allowDownloads={allowDownloads}
-                  protectionLevel={protectionLevel}
                   useEnhancedProtection={useEnhancedProtection}
-                  useCanvasRendering={useCanvasRendering}
                   feedbackEnabled={feedbackEnabled}
                   allowLikes={!!feedbackOptions?.allowLikes}
                   index={photoIndex}
@@ -672,6 +670,9 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
         // slide change — same semantics as PhotoLightbox's beacon.
         on={{
           view: ({ index }) => {
+            // Keep the controlled index in sync when loaded dimensions update
+            // the slides array; otherwise YARL jumps back to the opening photo.
+            setLightboxIndex(index);
             const photo = filteredPhotos[index];
             if (photo) galleryService.trackPhotoView(slug, photo.id);
           },
@@ -689,6 +690,9 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
           thumbnail: { border: 'none' }
         }}
         render={{
+          slide: (props) => renderPremiumLightboxImage({
+            ...props, slug, useCanvasRendering, protectionLevel, onImageLoad: handleLightboxImageLoad,
+          }),
           buttonPrev: slides.length <= 1 ? () => null : undefined,
           buttonNext: slides.length <= 1 ? () => null : undefined,
         }}

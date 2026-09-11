@@ -39,6 +39,8 @@ export interface Event {
   unique_visitors?: number;
   source_mode?: 'managed' | 'reference' | string;
   external_path?: string | null;
+  // Folder watcher opt-in (issue 1187). SQLite hands back 0/1, Postgres a boolean.
+  external_watch?: boolean | number | null;
   // Download protection fields
   allow_downloads?: boolean;
   protection_level?: 'basic' | 'standard' | 'enhanced' | 'maximum';
@@ -261,6 +263,7 @@ export interface PhotoCategory {
 }
 
 export interface GalleryData {
+  pagination?: { page: number; limit: number; total: number; has_more: boolean };
   event: {
     id: number;
     event_name: string;
@@ -290,7 +293,6 @@ export interface GalleryData {
     image_quality?: number;
     use_canvas_rendering?: boolean;
     enable_devtools_protection?: boolean;
-    fragmentation_level?: number;
     overlay_protection?: boolean;
     // Hero logo customization fields
     hero_logo_visible?: boolean | null;

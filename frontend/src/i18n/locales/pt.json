@@ -344,7 +344,9 @@
     "backToGallery": "Todas as fotos",
     "downloadFolder": "Baixar pasta ({{count}})",
     "downloadFolderCapped": "Baixar as primeiras {{limit}} de {{total}}",
-    "downloadEverything": "Baixar todas as fotos"
+    "downloadEverything": "Baixar todas as fotos",
+    "videoFormatUnsupported": "Este formato de vídeo não pode ser reproduzido neste navegador. Baixe o arquivo para assistir.",
+    "videoLoadFailed": "Não foi possível carregar este vídeo."
   },
   "categories": {
     "title": "Categorias de Fotos",
@@ -924,7 +926,6 @@
       "defaultProtectionHelp": "Aplicado a novos eventos por padrão. Podem ser substituídas individualmente.",
       "protectionLevel": "Nível de Proteção Padrão",
       "imageQuality": "Qualidade de Imagem Padrão",
-      "fragmentationLevel": "Nível de Fragmentação",
       "enableDevtools": "Ativar detecção de DevTools por padrão",
       "enableCanvas": "Ativar renderização em Canvas por padrão",
       "rateLimiting": "Limite de Requisições",

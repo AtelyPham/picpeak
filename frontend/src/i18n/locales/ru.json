@@ -352,7 +352,9 @@
     "backToGallery": "Все фото",
     "downloadFolder": "Скачать папку ({{count}})",
     "downloadFolderCapped": "Скачать первые {{limit}} из {{total}}",
-    "downloadEverything": "Скачать все фото"
+    "downloadEverything": "Скачать все фото",
+    "videoFormatUnsupported": "Этот формат видео не воспроизводится в этом браузере. Скачайте файл, чтобы посмотреть его.",
+    "videoLoadFailed": "Не удалось загрузить это видео."
   },
   "categories": {
     "title": "Категории фото",
@@ -930,7 +932,6 @@
       "defaultProtectionHelp": "Эти настройки применяются ко всем новым событиям. Отдельные события могут их переопределить.",
       "protectionLevel": "Уровень защиты по умолчанию",
       "imageQuality": "Качество изображений по умолчанию",
-      "fragmentationLevel": "Уровень фрагментации",
       "enableDevtools": "Включить обнаружение DevTools по умолчанию",
       "enableCanvas": "Включить рендеринг Canvas по умолчанию (расширенная защита)",
       "rateLimiting": "Ограничение скорости",

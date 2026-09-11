@@ -9,6 +9,25 @@ class SecureImageService {
     this.tokenCache = new Map();
     this.sessionTokens = new Map();
     this.rateLimitCache = new Map();
+    this.cleanupTimer = null;
+  }
+
+  start() {
+    if (this.cleanupTimer) return;
+    this.cleanupTimer = setInterval(() => this.cleanup(), 60_000);
+    this.cleanupTimer.unref();
+  }
+
+  stop() {
+    clearInterval(this.cleanupTimer);
+    this.cleanupTimer = null;
+  }
+
+  dispose() {
+    this.stop();
+    this.tokenCache.clear();
+    this.sessionTokens.clear();
+    this.rateLimitCache.clear();
   }
 
   /**
@@ -27,8 +46,13 @@ class SecureImageService {
       // Whether the minter was a PIN-client — lets the serve route keep
       // delivering a photo hidden AFTER minting (TOCTOU). A guest's token
       // carries false, so it stops the moment the photo is hidden.
-      clientBypass = false
+      clientBypass = false,
+      galleryAccess = null
     } = options;
+
+    if (!Number.isFinite(Number(expiresIn)) || Number(expiresIn) <= 0 || Number(expiresIn) > 3600) {
+      throw new (require('../utils/errors').ValidationError)('Invalid image token lifetime');
+    }
 
     const tokenData = {
       photoId: parseInt(photoId),
@@ -40,6 +64,7 @@ class SecureImageService {
       protectionLevel,
       revealBypass,
       clientBypass,
+      galleryAccess,
       createdAt: Date.now()
     };
 
@@ -56,10 +81,8 @@ class SecureImageService {
     // Cache token with metadata
     this.tokenCache.set(token, tokenData);
     
-    // Set cleanup timer
-    setTimeout(() => {
-      this.tokenCache.delete(token);
-    }, expiresIn * 1000 + 60000); // Add 1 minute buffer
+    // One owned timer per service, not one live handle per issued token.
+    this.start();
 
     return token;
   }
@@ -175,8 +198,7 @@ class SecureImageService {
       quality = 85,
       maxWidth = 1920,
       maxHeight = 1080,
-      addFingerprint = true,
-      fragmentImage = false
+      addFingerprint = true
     } = options;
 
     try {
@@ -187,7 +209,7 @@ class SecureImageService {
 
       // For standard protection without fingerprinting, return original file
       // This avoids unnecessary recompression when no protection features are needed
-      if (protectionLevel === 'standard' && !addFingerprint && !fragmentImage) {
+      if (protectionLevel === 'standard' && !addFingerprint) {
         return await fs.readFile(imagePath);
       }
 
@@ -218,9 +240,7 @@ class SecureImageService {
         }
 
         image = image.withMetadata({
-          exif: {
-            [sharp.EXIF.IFD0.ImageDescription]: `Protected:${fingerprint}`
-          }
+          exif: { IFD0: { ImageDescription: `Protected:${fingerprint}` } }
         });
 
         return await image.toBuffer();
@@ -262,70 +282,16 @@ class SecureImageService {
 
         // Embed fingerprint in metadata
         image = image.withMetadata({
-          exif: {
-            [sharp.EXIF.IFD0.ImageDescription]: `Protected:${fingerprint}`
-          }
+          exif: { IFD0: { ImageDescription: `Protected:${fingerprint}` } }
         });
       }
 
-      const buffer = await image.toBuffer();
-
-      // Fragment image if requested (for canvas reconstruction)
-      if (fragmentImage && protectionLevel === 'maximum') {
-        return await this.fragmentImageBuffer(buffer, metadata);
-      }
-
-      return buffer;
+      return await image.toBuffer();
     } catch (error) {
       logger.error('Error processing protected image:', error);
       // Return original on error
       return await fs.readFile(imagePath);
     }
-  }
-
-  /**
-   * Fragment image into multiple pieces for canvas reconstruction
-   */
-  async fragmentImageBuffer(buffer, metadata) {
-    const { width, height } = metadata;
-    const fragments = [];
-    
-    // Create 3x3 grid of fragments
-    const cols = 3;
-    const rows = 3;
-    const fragmentWidth = Math.floor(width / cols);
-    const fragmentHeight = Math.floor(height / rows);
-
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const left = col * fragmentWidth;
-        const top = row * fragmentHeight;
-        
-        const fragment = await sharp(buffer)
-          .extract({ 
-            left, 
-            top, 
-            width: fragmentWidth, 
-            height: fragmentHeight 
-          })
-          .toBuffer();
-          
-        fragments.push({
-          index: row * cols + col,
-          row,
-          col,
-          buffer: fragment,
-          position: { left, top, width: fragmentWidth, height: fragmentHeight }
-        });
-      }
-    }
-
-    return {
-      type: 'fragmented',
-      fragments,
-      originalDimensions: { width, height },
-      fragmentDimensions: { width: fragmentWidth, height: fragmentHeight, cols, rows }
-    };
   }
 
   /**
@@ -483,6 +449,9 @@ class SecureImageService {
   cleanup() {
     // Clear expired rate limit entries
     const now = Date.now();
+    for (const [token, data] of this.tokenCache) {
+      if (data.expiresAt <= now) this.tokenCache.delete(token);
+    }
     for (const [clientId, requests] of this.rateLimitCache.entries()) {
       const recent = requests.filter(timestamp => timestamp > now - 60000);
       if (recent.length === 0) {

@@ -30,13 +30,13 @@ const { requireEventOwnership, scopeEventsQuery } = require('../../middleware/ow
 // requirePermission gates supply the missing half; they key on req.admin.id,
 // which apiTokenAuth populates.
 const { requirePermission } = require('../../middleware/permissions');
-const { resolveEventFeedbackDefaults } = require('../../services/feedbackDefaults');
+
 const { buildShareLinkVariants } = require('../../services/shareLinkService');
 const { generateThumbnail } = require('../../services/imageProcessor');
 const logger = require('../../utils/logger');
-const { slugify } = require('../../utils/slug');
+
 const { formatBoolean } = require('../../utils/dbCompat');
-const { parseBooleanInput } = require('../../utils/parsers');
+
 const { isValidEventType } = require('../../services/eventTypeService');
 const { replacePhoto } = require('../../services/photoReplacementService');
 const { getMaxFileSizeBytes, DEFAULT_MAX_FILE_SIZE_MB } = require('../../services/uploadSettings');
@@ -69,7 +69,9 @@ const photoStorage = multer.diskStorage({
 });
 const buildPhotoUpload = (maxFileSizeBytes) => multer({
   storage: photoStorage,
-  limits: { fileSize: maxFileSizeBytes },
+  // CVE-2026-82333: single unnamed `photo` field only — no legitimate
+  // array-indexed field names, so reject any bracket-index field name.
+  limits: { fileSize: maxFileSizeBytes, fieldArrayIndexLimit: 0 },
   fileFilter: (_req, file, cb) => {
     if (/^image\//.test(file.mimetype)) cb(null, true);
     else cb(new Error('Only image uploads are accepted on this endpoint'));
@@ -134,6 +136,9 @@ const photoUpload = async (req, res, next) => {
  *               color_theme: { type: string, nullable: true, description: "Preset name (e.g. 'default') or JSON-encoded ThemeConfig. Persisted as-is on the event row." }
  *               feedback_enabled: { type: boolean, nullable: true, description: "Enable guest feedback for this gallery. When omitted, falls back to the global event_default_feedback_enabled setting." }
  *               enable_devtools_protection: { type: boolean, nullable: true, description: "Block right-click / devtools shortcuts in the gallery. When omitted, falls back to the global enable_devtools_protection setting." }
+ *               protection_level: { type: string, nullable: true, enum: [basic, standard, enhanced, maximum], description: "Image protection level. When omitted, falls back to the global default_protection_level setting." }
+ *               use_canvas_rendering: { type: boolean, nullable: true, description: "Render gallery images to a canvas instead of an img tag. When omitted, falls back to the global enable_canvas_rendering setting." }
+ *               image_quality: { type: integer, minimum: 1, maximum: 100, nullable: true, description: "Served image quality percentage. When omitted, falls back to the global default_image_quality setting." }
  *               hero_logo_visible: { type: boolean, nullable: true, description: "Show event logo in the hero block. When omitted, falls back to the global branding_logo_display_hero setting." }
  *               hero_logo_size: { type: string, nullable: true, enum: [small, medium, large, xlarge], description: "Hero logo size. When omitted, falls back to the global branding_logo_size setting." }
  *               hero_logo_position: { type: string, nullable: true, enum: [top, center, bottom], description: "Hero logo position. Defaults to 'top' (not settings-backed — see migration 084)." }
@@ -179,6 +184,9 @@ router.post(
     body('color_theme').optional({ nullable: true }).isString().trim(),
     body('feedback_enabled').optional().isBoolean(),
     body('enable_devtools_protection').optional().isBoolean(),
+    body('protection_level').optional().not().isArray().isIn(['basic', 'standard', 'enhanced', 'maximum']),
+    body('use_canvas_rendering').optional().not().isArray().isBoolean().toBoolean(),
+    body('image_quality').optional().not().isArray().isInt({ min: 1, max: 100 }).toInt(),
     body('hero_logo_visible').optional().isBoolean(),
     body('hero_logo_size').optional().isIn(['small', 'medium', 'large', 'xlarge']),
     body('hero_logo_position').optional().isIn(['top', 'center', 'bottom'])
@@ -187,247 +195,12 @@ router.post(
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(400).json({ errors: safeValidationErrors(errors) });
-      const {
-        event_name, event_type, event_date,
-        customer_name = null, customer_email = null, customer_phone = null,
-        admin_email = null,
-        require_password: requirePasswordInput,
-        password,
-        expires_at = null,
-        color_theme = null,
-        feedback_enabled: feedbackEnabledInput,
-        enable_devtools_protection: devtoolsInput,
-        hero_logo_visible: heroLogoVisibleInput,
-        hero_logo_size: heroLogoSizeInput,
-        hero_logo_position: heroLogoPositionInput
-      } = req.body;
-
-      // Issue #550 — mirror the admin POST path so API-created events
-      // pick up the global "Enable Guest Feedback by default" toggle
-      // (event_default_feedback_enabled). Without this, the UI reads
-      // a missing event_feedback_settings row as "feedback off"
-      // regardless of the admin's chosen default.
-      let feedbackEnabledFallback = false;
-      if (feedbackEnabledInput === undefined) {
-        const setting = await db('app_settings').where('setting_key', 'event_default_feedback_enabled').first();
-        if (setting) {
-          try {
-            const parsed = JSON.parse(setting.setting_value);
-            if (typeof parsed === 'boolean') feedbackEnabledFallback = parsed;
-          } catch { /* keep false */ }
-        }
-      }
-      const feedback_enabled = parseBooleanInput(feedbackEnabledInput, feedbackEnabledFallback);
-
-      // Issue #592 — same shape as the feedback fallback above. The
-      // events table column default is `true`, so without this an admin
-      // who disabled devtools detection globally still gets it ON for
-      // every API-created gallery. Mirrors adminEvents.js behaviour.
-      let devtoolsFallback = true;
-      if (devtoolsInput === undefined) {
-        const setting = await db('app_settings').where('setting_key', 'enable_devtools_protection').first();
-        if (setting) {
-          try {
-            const parsed = JSON.parse(setting.setting_value);
-            if (typeof parsed === 'boolean') devtoolsFallback = parsed;
-          } catch { /* keep true */ }
-        }
-      }
-      const enable_devtools_protection = parseBooleanInput(devtoolsInput, devtoolsFallback);
-
-      // Same shape as the feedback / devtools fallbacks: honour the global
-      // event_default_require_password toggle (#317). Without this an admin
-      // who disabled "require password by default" globally still got
-      // password-required galleries through the API.
-      let requirePasswordFallback = true;
-      if (requirePasswordInput === undefined) {
-        const setting = await db('app_settings').where('setting_key', 'event_default_require_password').first();
-        if (setting) {
-          try {
-            const parsed = JSON.parse(setting.setting_value);
-            if (typeof parsed === 'boolean') requirePasswordFallback = parsed;
-          } catch { /* keep true */ }
-        }
-      }
-      const require_password = parseBooleanInput(requirePasswordInput, requirePasswordFallback);
-
-      // Branding inheritance (Feature 7) — mirror adminEvents.js
-      // getBrandingDefaults so API-created events inherit the global
-      // hero logo visibility + size. hero_logo_position is intentionally
-      // NOT settings-backed (see migration 084 / #357 — branding_logo_position
-      // is the *header bar*, a different concept than the hero block).
-      let heroLogoVisibleFallback = true;
-      let heroLogoSizeFallback = 'medium';
-      const brandingRows = await db('app_settings')
-        .whereIn('setting_key', ['branding_logo_display_hero', 'branding_logo_size'])
-        .select('setting_key', 'setting_value');
-      for (const row of brandingRows) {
-        let value = row.setting_value;
-        if (typeof value === 'string') {
-          try { value = JSON.parse(value); } catch { /* keep raw */ }
-        }
-        if (row.setting_key === 'branding_logo_display_hero') heroLogoVisibleFallback = value !== false;
-        if (row.setting_key === 'branding_logo_size' && value) heroLogoSizeFallback = value;
-      }
-      const hero_logo_visible = heroLogoVisibleInput !== undefined ? heroLogoVisibleInput : heroLogoVisibleFallback;
-      const hero_logo_size = heroLogoSizeInput || heroLogoSizeFallback;
-      const hero_logo_position = heroLogoPositionInput || 'top';
-
-      if (require_password && (!password || password.length < 6)) {
-        return res.status(400).json({ error: 'Password is required when require_password is true (min 6 chars)' });
-      }
-
-      // Honour global phone-field toggle (#322).
-      let persistPhone = null;
-      if (customer_phone) {
-        const setting = await db('app_settings').where('setting_key', 'event_phone_field_enabled').first();
-        const enabled = setting ? JSON.parse(setting.setting_value) === true : false;
-        persistPhone = enabled ? customer_phone : null;
-      }
-
-      // Generate unique slug.
-      const baseSlug = `${event_type}-${slugify(event_name)}-${event_date || crypto.randomBytes(3).toString('hex')}`;
-      let slug = baseSlug;
-      let counter = 1;
-      while (await db('events').where({ slug }).first()) slug = `${baseSlug}-${counter++}`;
-
-      const shareToken = crypto.randomBytes(16).toString('hex');
-      const { shareUrl, shareLinkToStore } = await buildShareLinkVariants({ slug, shareToken });
-
-      // password_hash is NOT NULL; use a random placeholder when no
-      // password is required so the column constraint is satisfied.
-      const bcrypt = require('bcrypt');
-      const passwordHash = require_password
-        ? await bcrypt.hash(password, 10)
-        : await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
-
-      const insertResult = await db('events').insert({
-        slug,
-        event_type,
-        event_name,
-        event_date: event_date || null,
-        host_name: customer_name,
-        host_email: customer_email,
-        admin_email,
-        password_hash: passwordHash,
-        require_password,
-        share_link: shareLinkToStore,
-        share_token: shareToken,
-        expires_at: expires_at || null,
-        created_at: new Date().toISOString(),
-        created_by: req.admin.id,
-        is_draft: false,
-        // Issue #550 — without this, editing an API-created event in the
-        // admin UI snaps the theme picker to GALLERY_THEME_PRESETS.default
-        // and saving overwrites whatever theme was inherited visually.
-        color_theme,
-        // Issue #592 — write the resolved devtools setting (input value
-        // or global fallback) so the column default doesn't shadow it.
-        enable_devtools_protection: formatBoolean(enable_devtools_protection),
-        // Branding inheritance — resolved value from body or app_settings.
-        hero_logo_visible: formatBoolean(hero_logo_visible),
-        hero_logo_size,
-        hero_logo_position,
-        ...(customer_name ? { customer_name } : {}),
-        ...(customer_email ? { customer_email } : {}),
-        ...(persistPhone ? { customer_phone: persistPhone } : {})
-      }).returning('id');
-      const id = insertResult[0]?.id || insertResult[0];
-
-      // Issue #550 — mirror adminEvents.js: create event_feedback_settings
-      // row when feedback is enabled, so the gallery actually shows feedback
-      // UI. The sub-flags come from the shared global defaults (#1044) rather
-      // than a hard-coded list, which is how this path silently shipped
-      // without allow_reactions for two releases.
-      if (feedback_enabled) {
-        const feedbackDefaults = await resolveEventFeedbackDefaults();
-        await db('event_feedback_settings').insert({
-          event_id: id,
-          feedback_enabled: formatBoolean(true),
-          allow_ratings: formatBoolean(feedbackDefaults.allow_ratings),
-          allow_likes: formatBoolean(feedbackDefaults.allow_likes),
-          allow_comments: formatBoolean(feedbackDefaults.allow_comments),
-          allow_favorites: formatBoolean(feedbackDefaults.allow_favorites),
-          allow_reactions: formatBoolean(feedbackDefaults.allow_reactions),
-          allow_color_labels: formatBoolean(feedbackDefaults.allow_color_labels),
-          keybind_mode: feedbackDefaults.keybind_mode,
-          require_name_email: formatBoolean(false),
-          moderate_comments: formatBoolean(true),
-          show_feedback_to_guests: formatBoolean(true),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        });
-      }
-
-      await logActivity('event_created', { via: 'api_v1', event_type }, id, {
-        type: 'admin', id: req.admin.id, name: req.admin.username
+      const created = await require('../../services/eventCreationService').createEvent(req.body, {
+        actor: req.admin, source: 'v1',
       });
-
-      // Customer notifications (#647 follow-up). v1 events go live in the
-      // same call (not draft-aware), so the gallery_created email + WhatsApp
-      // fire here — mirroring the adminEvents.js create-and-publish path.
-      // Both are best-effort: a queue failure must not block the API response.
-      const expiryIso = expires_at ? new Date(expires_at).toISOString() : null;
-      if (customer_email) {
-        try {
-          const { queueEmail } = require('../../services/emailProcessor');
-          await queueEmail(id, customer_email, 'gallery_created', {
-            customer_name: customer_name || '',
-            customer_email,
-            host_name: customer_name || '',
-            event_name,
-            event_date: event_date || null,
-            gallery_link: shareUrl,
-            gallery_password: require_password ? password : 'No password required',
-            expiry_date: expiryIso,
-            welcome_message: ''
-          });
-        } catch (emailError) {
-          logger.warn('v1 POST /events: failed to queue gallery_created email', { error: emailError.message });
-        }
-      }
-      if (persistPhone) {
-        try {
-          const { queueWhatsapp, getWhatsAppConfig } = require('../../services/whatsappProcessor');
-          const waConfig = await getWhatsAppConfig();
-          if (waConfig && waConfig.enabled) {
-            await queueWhatsapp(id, persistPhone, 'gallery_created', {
-              customer_name: customer_name || '',
-              event_name,
-              gallery_link: shareUrl,
-              gallery_password: require_password ? password : '',
-              expiry_date: expiryIso,
-              language: null,
-            });
-          }
-        } catch (waError) {
-          logger.warn('v1 POST /events: failed to queue WhatsApp notification', { error: waError.message });
-        }
-      }
-
-      // Webhook lifecycle (#327). v1 events are not draft-aware, so they're
-      // both created AND published in the same call. Canonical event
-      // subject (#341) — customer contact + share_token always included.
-      try {
-        const webhookService = require('../../services/webhookService');
-        const eventSubject = webhookService.buildEventSubject({
-          id,
-          slug,
-          event_name,
-          event_type,
-          event_date,
-          share_url: shareUrl,
-          share_token: shareToken,
-          customer_name,
-          customer_email,
-          customer_phone,
-        });
-        await webhookService.fire('event.created', { event: eventSubject });
-        await webhookService.fire('event.published', { event: eventSubject });
-      } catch (e) { /* non-fatal */ }
-
-      res.status(201).json({ id, slug, share_url: shareUrl, share_token: shareToken });
+      res.status(201).json({ id: created.id, slug: created.slug, share_url: created.share_link, share_token: created.share_token });
     } catch (error) {
+      if (error.isOperational) return res.status(error.statusCode).json(error.responseBody || { error: error.message, code: error.code });
       logger.error('v1 POST /events failed', { error: error.message, stack: error.stack });
       res.status(500).json({ error: 'Failed to create event', detail: error.message });
     }
@@ -576,6 +349,9 @@ router.get('/events/:id', apiTokenAuth, requireApiScope('read'), requirePermissi
     if (!event) return res.status(404).json({ error: 'Event not found' });
     delete event.password_hash;
     delete event.client_password_hash;
+    // #1271 — the encrypted copies are server-only as well
+    delete event.password_recoverable;
+    delete event.client_password_recoverable;
     res.json(event);
   } catch (error) {
     logger.error('v1 GET /events/:id failed', { error: error.message });

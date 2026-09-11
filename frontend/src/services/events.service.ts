@@ -79,6 +79,7 @@ interface UpdateEventData {
   hero_photo_id?: number | null;
   source_mode?: 'managed' | 'reference';
   external_path?: string | null;
+  external_watch?: boolean;
   photo_cap?: number | null;
   default_photo_sort?: string;
   // Per-event opt-in for hero photo as social-share preview (#474).
@@ -265,6 +266,25 @@ export const eventsService = {
   // Resend creation email
   async resendCreationEmail(eventId: number): Promise<{ success: boolean; message: string }> {
     const response = await api.post(`/admin/events/${eventId}/resend-email`);
+    return response.data;
+  },
+
+  // Whether recoverable gallery passwords (#1271) are switched on. Answered
+  // per event so editors without settings access can ask too.
+  async getGalleryPasswordStatus(eventId: number): Promise<{ enabled: boolean }> {
+    const response = await api.get(`/admin/events/${eventId}/password-status`);
+    return response.data;
+  },
+
+  // Stored gallery password / client PIN (#1271). Only populated when the
+  // security setting "gallery_password_recoverable" is on; `enabled: false`
+  // means the feature is off and there is nothing to show.
+  async getGalleryPassword(eventId: number): Promise<{
+    enabled: boolean;
+    password: string | null;
+    client_password: string | null;
+  }> {
+    const response = await api.get(`/admin/events/${eventId}/password`);
     return response.data;
   },
 

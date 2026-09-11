@@ -40,9 +40,7 @@ interface JustifiedPhotoProps {
   animationType?: string;
   allowDownloads?: boolean;
   slug?: string;
-  protectionLevel?: 'basic' | 'standard' | 'enhanced' | 'maximum';
   useEnhancedProtection?: boolean;
-  useCanvasRendering?: boolean;
   feedbackEnabled?: boolean;
   feedbackOptions?: {
     allowLikes?: boolean;
@@ -69,9 +67,6 @@ const JustifiedPhoto: React.FC<JustifiedPhotoProps> = ({
   animationType = 'fade',
   allowDownloads = true,
   slug,
-  protectionLevel = 'standard',
-  useEnhancedProtection = false,
-  useCanvasRendering = false,
   feedbackEnabled = false,
   feedbackOptions,
   savedIdentity,
@@ -134,18 +129,6 @@ const JustifiedPhoto: React.FC<JustifiedPhotoProps> = ({
         loading: 'lazy',
         isGallery: true,
         slug,
-        photoId: photo.id,
-        requiresToken: photo.requires_token,
-        secureUrlTemplate: photo.secure_url_template,
-        protectFromDownload: !allowDownloads || useEnhancedProtection,
-        protectionLevel,
-        useEnhancedProtection,
-        useCanvasRendering: useCanvasRendering || protectionLevel === 'maximum',
-        fragmentGrid: protectionLevel === 'enhanced' || protectionLevel === 'maximum',
-        blockKeyboardShortcuts: useEnhancedProtection,
-        detectPrintScreen: useEnhancedProtection,
-        detectDevTools: protectionLevel === 'maximum',
-        watermarkText: useEnhancedProtection ? 'Protected' : undefined,
         onProtectionViolation: (violationType: string) => {
           console.warn(`Protection violation on justified photo ${photo.id}: ${violationType}`);
         },
@@ -226,9 +209,7 @@ export const JustifiedGalleryLayout: React.FC<JustifiedGalleryLayoutProps> = ({
   isSelectionMode = false,
   onPhotoSelect,
   allowDownloads = true,
-  protectionLevel = 'standard',
   useEnhancedProtection = false,
-  useCanvasRendering = false,
   feedbackEnabled = false,
   feedbackOptions,
   // Hero props
@@ -411,11 +392,6 @@ export const JustifiedGalleryLayout: React.FC<JustifiedGalleryLayoutProps> = ({
               className="w-full h-full object-cover"
               isGallery={true}
               slug={slug}
-              photoId={heroPhoto.id}
-              protectFromDownload={!allowDownloads || useEnhancedProtection}
-              protectionLevel={protectionLevel}
-              useEnhancedProtection={useEnhancedProtection}
-              useCanvasRendering={useCanvasRendering || protectionLevel === 'maximum'}
             />
 
             {/* Overlay */}
@@ -539,9 +515,7 @@ export const JustifiedGalleryLayout: React.FC<JustifiedGalleryLayoutProps> = ({
               animationType={animation}
               allowDownloads={allowDownloads}
               slug={slug}
-              protectionLevel={protectionLevel}
               useEnhancedProtection={useEnhancedProtection}
-              useCanvasRendering={useCanvasRendering}
               feedbackEnabled={feedbackEnabled}
               feedbackOptions={feedbackOptions}
               savedIdentity={savedIdentity}

@@ -3,10 +3,12 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 const { db, logActivity } = require('../database/db');
+const { RECOVERABLE_PASSWORD_COLUMNS } = require('./adminEvents/helpers');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
 const { ensureThumbnail } = require('../services/imageProcessor');
 const { isVideoMimeType } = require('../services/videoProcessor');
+const { acceptedUpload, capabilityEvidence } = require('../usage/capabilityEvidence');
 const { generatePhotoFilename, buildContentDisposition } = require('../utils/filenameSanitizer');
 const {
   getUseOriginalFilenames,
@@ -111,7 +113,12 @@ const createUpload = (maxFileSizeBytes) => multer({
     files: 2000, // Hard safety ceiling; actual limit enforced dynamically
     fieldSize: 10 * 1024 * 1024, // 10MB for non-file fields
     parts: 10000,
-    headerPairs: 2000
+    headerPairs: 2000,
+    // CVE-2026-82333: files arrive as repeated `photos` parts via
+    // multer's own .array('photos', N) — not bracket-indexed field names
+    // like `photos[0]` — so no legitimate field name uses array-index
+    // syntax at all. Reject any that do.
+    fieldArrayIndexLimit: 0
   },
   fileFilter: (req, file, cb) => {
     // req.allowedMimeTypes is populated by the middleware that runs before multer
@@ -358,6 +365,12 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
             event,
           });
           if (result.success) {
+            capabilityEvidence(res, 'photo_replacement');
+            acceptedUpload(res, {
+              video: isVideoMimeType(file.mimetype),
+              raw: path.extname(file.originalname).toLowerCase() === '.dng',
+              s3: process.env.STORAGE_BACKEND === 's3'
+            });
             replacedPhotos.push({
               id: result.photo.id,
               filename: result.photo.filename,
@@ -473,6 +486,8 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
           })
           .returning('id');
         const photoId = inserted[0]?.id || inserted[0];
+
+        acceptedUpload(res, { video: isVideo, raw: extension.toLowerCase() === '.dng', s3: process.env.STORAGE_BACKEND === 's3' });
 
         uploadedPhotos.push({
           id: photoId,
@@ -789,6 +804,9 @@ router.delete('/:eventId/photos/:photoId', adminAuth, requirePermission('photos.
       logger.warn(`deletePhoto: face purge failed for photo ${photoId}`, { error: err.message });
     }
 
+    // An external photo's file stays on the NAS; make sure the folder watcher
+    // (issue 1187) does not re-import it on its next pass.
+    await require('../services/externalImportService').recordExclusions(Number(eventId), [photo]);
     await db('photos').where({ id: photoId }).delete();
 
     // Log activity (event was fetched above for storage key resolution)
@@ -856,6 +874,7 @@ router.put('/:eventId/photos/:photoId/mark', adminAuth, requirePermission('photo
       parseInt(eventId, 10), photoId, req.admin.id, mark,
     );
 
+    capabilityEvidence(res, 'photo_admin_marks');
     res.json({ success: true, mark: result });
   } catch (error) {
     // Validation errors from the service are the caller's fault, not a 500.
@@ -1029,6 +1048,8 @@ router.post('/:eventId/photos/bulk-delete', adminAuth, requirePermission('photos
     }
 
     // Delete from database
+    // Same as the single delete: keep the watcher from bringing these back.
+    await require('../services/externalImportService').recordExclusions(Number(eventId), photos);
     await db('photos')
       .whereIn('id', photoIds)
       .where('event_id', eventId)
@@ -1598,9 +1619,16 @@ router.get('/:eventId/debug', adminAuth, requirePermission('photos.view'), requi
   try {
     const { eventId } = req.params;
     
-    const event = await db('events').where({ id: eventId }).first();
+    const eventRow = await db('events').where({ id: eventId }).first();
     const photoCount = await db('photos').where({ event_id: eventId }).count('id as count').first();
     const photos = await db('photos').where({ event_id: eventId }).limit(5);
+    // Never hand out the hashes or the recoverable copies (#1271) — this is
+    // a photos.view surface, not an events.edit one.
+    let event = eventRow;
+    if (eventRow) {
+      event = { ...eventRow };
+      for (const column of ['password_hash', 'client_password_hash', ...RECOVERABLE_PASSWORD_COLUMNS]) delete event[column];
+    }
     
     res.json({
       event: event || 'Not found',
@@ -1687,18 +1715,30 @@ router.post('/:eventId/chunked-upload/:uploadId/chunk/:chunkIndex', adminAuth, r
   try {
     const { uploadId, chunkIndex } = req.params;
 
-    // Get chunk data from request body
-    const chunks = [];
-    for await (const chunk of req) {
-      chunks.push(chunk);
-    }
-    const chunkData = Buffer.concat(chunks);
-
-    const result = await chunkedUpload.uploadChunk(uploadId, parseInt(chunkIndex), chunkData);
+    // The request stream is handed over unread (#1403). Every check — unknown
+    // upload id, bad index, the per-file cap against Content-Length — runs
+    // inside uploadChunk before a byte is consumed, and the body is then
+    // streamed to the chunk file under a hard cap rather than concatenated in
+    // memory. Buffering it first meant a rejected 300MB request still cost
+    // 300MB of heap.
+    const declaredBytes = Number(req.headers['content-length']);
+    const result = await chunkedUpload.uploadChunk(uploadId, parseInt(chunkIndex), req, {
+      declaredBytes: Number.isFinite(declaredBytes) ? declaredBytes : undefined,
+    });
 
     res.json(result);
   } catch (error) {
-    if (error.statusCode === 413 || error.statusCode === 400) {
+    // Client-caused states (unknown/finished/expired upload, bad index, too
+    // large) carry their own status. Only a genuinely unexpected error should
+    // reach the 500 below and the error log with it.
+    if (error.statusCode) {
+      // Refusing the body early is the point — but it leaves unread bytes in
+      // flight on a connection this response still advertises as keep-alive.
+      // Node does not drain them, so the NEXT request on that socket hangs
+      // until it times out. Retire the connection instead.
+      if (!req.readableEnded) {
+        res.set('Connection', 'close');
+      }
       return res.status(error.statusCode).json({ error: error.message });
     }
     logger.error('Error uploading chunk:', error);
@@ -1729,6 +1769,11 @@ router.post('/:eventId/chunked-upload/:uploadId/complete', adminAuth, requirePer
       'admin',
       category_id || null
     );
+    if (uploadedPhotos.length) acceptedUpload(res, {
+      video: isVideoMimeType(fileObj.mimetype),
+      raw: path.extname(fileObj.originalname).toLowerCase() === '.dng',
+      s3: process.env.STORAGE_BACKEND === 's3'
+    });
 
     // Clean up temp directory
     try {
@@ -1743,8 +1788,10 @@ router.post('/:eventId/chunked-upload/:uploadId/complete', adminAuth, requirePer
       photos: uploadedPhotos
     });
   } catch (error) {
-    if (error.statusCode === 413) {
-      return res.status(413).json({ error: error.message });
+    // Same rule as the chunk route: a tagged status is a client-caused state
+    // (unknown/expired upload, missing chunks), not a server fault.
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
     }
     logger.error('Error completing chunked upload:', error);
     res.status(500).json({ error: error.message || 'Failed to complete upload' });
