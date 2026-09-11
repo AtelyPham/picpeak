@@ -41,6 +41,9 @@ async function archiveEvent(event) {
           'photos.filename',
           'photos.original_filename',
           'photos.type',
+          // Not derivable from the extension for every format, and restore
+          // has to know a video from a photo to write the row back.
+          'photos.media_type',
           'photos.uploaded_at',
           'photo_categories.name as category_name',
         );
