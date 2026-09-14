@@ -820,7 +820,8 @@
     "replacedFiles_other": "{{count}} Fotos ersetzt",
     "uploadingChunks_one": "{{count}} Teil wird hochgeladen",
     "uploadingChunks_other": "{{count}} Teile werden hochgeladen",
-    "fileTooLarge": "Datei zu groß: {{name}} (max. {{limit}}MB)"
+    "fileTooLarge": "Datei zu groß: {{name}} (max. {{limit}}MB)",
+    "invalidFileType": "Nicht unterstützter Dateityp: {{names}}"
   },
   "navigation": {
     "dashboard": "Dashboard",

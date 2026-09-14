@@ -29,6 +29,7 @@ const {
   EXTENSION_TO_MIME
 } = require('../services/uploadSettings');
 const { resolvePhotoContentType } = require('../utils/photoContentType');
+const { originalNeedsPreview } = require('../utils/rawFormats');
 const { processUploadedPhotos } = require('../services/photoProcessor');
 const chunkedUpload = require('../services/chunkedUploadService');
 const watermarkGeneratorService = require('../services/watermarkGeneratorService');
@@ -93,7 +94,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const { validateFileType, createFileUploadValidator } = require('../utils/fileSecurityUtils');
+const { validateFileType, createFileUploadValidator, resolveUploadMimeType } = require('../utils/fileSecurityUtils');
 
 // Create a multer instance that uses dynamically resolved allowed MIME types.
 // The allowed types are fetched from the database once per request (before multer
@@ -477,7 +478,9 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
             size_bytes: tempStats.size,
             captured_at: null,
             media_type: isVideo ? 'video' : 'image',
-            mime_type: file.mimetype,
+            // Resolved, not claimed. A RAW arrives with an empty type from the
+            // browser, and storing that leaves the row with no type at all.
+            mime_type: resolveUploadMimeType(file.originalname, file.mimetype) || null,
             processing_status: 'pending',
             upload_id: uploadId,
           })
@@ -1389,8 +1392,14 @@ router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requ
         id: photo.id,
         filename: photo.filename,
         original_filename: photo.original_filename || null,
-        // Use the correct admin photos router base for serving images
-        url: `/admin/photos/${eventId}/photo/${photo.id}`,
+        // Use the correct admin photos router base for serving images.
+        // RAW and HEIC originals go to the generated JPEG preview instead:
+        // this URL is only ever an <img>/<video> src admin-side (downloads use
+        // the /download route), and a browser cannot decode the original, so
+        // the admin viewer showed nothing but a broken frame for those.
+        url: originalNeedsPreview(photo)
+          ? `/admin/photos/${eventId}/preview/${photo.id}`
+          : `/admin/photos/${eventId}/photo/${photo.id}`,
         // Always expose a thumbnail URL; backend will generate on demand if missing
         thumbnail_url: `/admin/photos/${eventId}/thumbnail/${photo.id}`,
         type: photo.type,

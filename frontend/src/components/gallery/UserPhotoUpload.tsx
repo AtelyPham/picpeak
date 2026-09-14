@@ -5,7 +5,7 @@ import { toast } from 'react-toastify';
 import { Button } from '../common';
 import { api } from '../../config/api';
 import { usePublicSettings } from '../../hooks/usePublicSettings';
-import { extensionsToMimeTypes, buildUploadAcceptString, extensionsToLabel } from '../../utils/fileTypes';
+import { extensionsToMimeTypes, buildUploadAcceptString, extensionsToLabel, isAllowedUploadFile } from '../../utils/fileTypes';
 
 interface UserPhotoUploadProps {
   eventId: number;
@@ -75,8 +75,10 @@ export const UserPhotoUpload: React.FC<UserPhotoUploadProps> = ({
   // Shared filter pipeline for both <input> change and drag-and-drop (#504).
   const addFiles = (incoming: File[]) => {
     const validFiles = incoming.filter((file) => {
-      if (!allowedMimeTypes.includes(file.type)) {
-        toast.error(`Invalid file type: ${file.name}`);
+      // Matches on the extension when the browser reports no type, which is
+      // what it does for camera RAW on macOS and Windows.
+      if (!isAllowedUploadFile(file, allowedMimeTypes)) {
+        toast.error(t('upload.invalidFileType', { names: file.name }));
         return false;
       }
       // Check file size against the configured per-file limit.
