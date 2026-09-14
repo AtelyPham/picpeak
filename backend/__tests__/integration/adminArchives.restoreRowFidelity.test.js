@@ -222,6 +222,26 @@ describe('archive restore rebuilds the photo row faithfully', () => {
       .toEqual({ 'c.jpg': 'collage', 'i.jpg': 'individual' });
   });
 
+  it('repairs a type the old restore already damaged, from the directory', async () => {
+    // An event restored by the old code holds 'jpg' in type. Archive it again
+    // and the manifest records 'jpg' faithfully, so trusting any manifest
+    // value would write the damage straight back.
+    const archiveRelPath = await writeArchive('typedamaged.zip', {
+      'collages/sheet.jpg': BYTES,
+      'individual/single.jpg': BYTES,
+      'photos_manifest.json': manifestOf([
+        { filename: 'sheet.jpg', original_filename: 'sheet.jpg', type: 'jpg' },
+        { filename: 'single.jpg', original_filename: 'single.jpg', type: 'jpg' },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, 'type-damaged-event');
+
+    await restore(eventId);
+
+    expect(await columnByFilename(eventId, 'type'))
+      .toEqual({ 'sheet.jpg': 'collage', 'single.jpg': 'individual' });
+  });
+
   it('keeps a restored video a video, and a restored photo a photo', async () => {
     const archiveRelPath = await writeArchive('mediatype.zip', {
       'individual/clip.mov': BYTES,
@@ -288,5 +308,30 @@ describe('archive restore rebuilds the photo row faithfully', () => {
     // Restoring used to reshuffle the gallery into restore order.
     const photo = await db('photos').where('event_id', eventId).first();
     expect(new Date(photo.uploaded_at).toISOString()).toBe(uploadedAt);
+  });
+
+  it('writes an epoch upload time from the manifest back as ISO', async () => {
+    // On SQLite a `new Date()` written through knex is stored as epoch
+    // milliseconds, and the manifest is JSON.stringify over the raw row, so
+    // that shape reaches restore. The old code always wrote an ISO string
+    // (the wrong one); keeping the value must not lose the shape.
+    const uploadedAt = '2026-06-27T10:30:00.000Z';
+    const archiveRelPath = await writeArchive('uploadedatepoch.zip', {
+      'individual/epoch.jpg': BYTES,
+      'photos_manifest.json': manifestOf([
+        {
+          filename: 'epoch.jpg',
+          original_filename: 'epoch.jpg',
+          type: 'individual',
+          uploaded_at: new Date(uploadedAt).getTime(),
+        },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, 'uploaded-at-epoch-event');
+
+    await restore(eventId);
+
+    const photo = await db('photos').where('event_id', eventId).first();
+    expect(photo.uploaded_at).toBe(uploadedAt);
   });
 });
