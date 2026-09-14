@@ -14,6 +14,7 @@ const logger = require('../utils/logger');
 const { sanitizeForZipEntry } = require('../utils/filenameSanitizer');
 const { getPagination } = require('../utils/routeHelpers');
 const { ALLOWED_MEDIA_TYPES, ALLOWED_VIDEO_TYPES } = require('../utils/fileSecurityUtils');
+const { toIso } = require('../utils/dateNormalize');
 const router = express.Router();
 
 /**
@@ -516,7 +517,7 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
               if (manifestEntry) {
                 categoryId = await resolveCategoryId(manifestEntry.category_name);
               } else if (dirPath && dirPath !== '.') {
-                categoryId = await resolveCategoryId(dirPath.split(path.sep)[0]);
+                categoryId = await resolveCategoryId(dirPath.split('/')[0]);
               }
 
               // Store relative path from storage root
@@ -536,11 +537,15 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
                 // Two values, 'individual' or 'collage', and the download zip
                 // groups its folders by them. Restore used to write the file
                 // extension here, which is neither, so every restored photo
-                // filed itself under "Collages". The archive layout is
-                // `individual/` / `collages/`, so the directory is a faithful
-                // fallback for archives with no manifest.
-                type: manifestEntry?.type
-                  || (dirPath.split(path.sep)[0] === 'collages' ? 'collage' : 'individual'),
+                // filed itself under "Collages". An event restored by that
+                // code and archived again carries the extension in its
+                // manifest, so only the two real values are trusted. The
+                // archive layout is `individual/` / `collages/`, so the
+                // directory is a faithful fallback for the rest, manifest
+                // or not. Zip entry names always use '/'.
+                type: (manifestEntry?.type === 'individual' || manifestEntry?.type === 'collage')
+                  ? manifestEntry.type
+                  : (dirPath.split('/')[0] === 'collages' ? 'collage' : 'individual'),
                 // Omitted entirely before, and the column defaults to 'image',
                 // so restoring an event turned its videos into photos the
                 // player would not play. Any video signal wins over a manifest
@@ -555,8 +560,11 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
                 size_bytes: stats.size,
                 category_id: categoryId,
                 // Restore order is not upload order; stamping the clock here
-                // reshuffled the whole gallery.
-                uploaded_at: manifestEntry?.uploaded_at || new Date().toISOString()
+                // reshuffled the whole gallery. The manifest holds whatever
+                // shape the row had, and on SQLite a `new Date()` written
+                // through knex is epoch milliseconds, so normalise to ISO
+                // rather than write the number back.
+                uploaded_at: toIso(manifestEntry?.uploaded_at) || new Date().toISOString()
               });
             }
           } catch (statError) {
