@@ -9,6 +9,9 @@
  *   3. Pre-event customer reminders (migration 143) — sends a nudge
  *      N days before `event_date`. Idempotent via
  *      `events.event_reminder_sent_at`.
+ *   4. Two-stage delivery reminders to the studio (issue 1562) —
+ *      `deliveryService.runDeliveryReminderPass()`, idempotent via
+ *      `events.delivery_reminder_sent_at` / `delivery_overdue_notified_at`.
  *
  * Jobs 1+2 delegate to `invoiceService.runScheduledTasks()`; job 3
  * to `eventReminderService.runEventReminderPass()`. The two service
@@ -42,6 +45,13 @@ async function runTick() {
     await eventReminderService.runEventReminderPass();
   } catch (err) {
     logger.error('Event reminder pass failed', { err: err.message });
+  }
+  try {
+    // Two-stage delivery (issue 1562): remind the studio before a promised
+    // completion date, once more when it has passed.
+    await require('./deliveryService').runDeliveryReminderPass();
+  } catch (err) {
+    logger.error('Delivery reminder pass failed', { err: err.message });
   }
   try {
     // Fire workflow events for quote responses whose 15-min toggle window has

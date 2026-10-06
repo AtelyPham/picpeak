@@ -21,7 +21,7 @@ import { billsService } from '../../../services/bills.service';
 import { quotesService } from '../../../services/quotes.service';
 import SignaturePad from 'signature_pad';
 import {
-  ArrowLeft, Edit2, Send, X, FileDown, Upload, CheckSquare, ScrollText,
+  Edit2, Send, X, FileDown, Upload, CheckSquare, ScrollText,
   ArrowRightCircle, Receipt, RotateCcw, MailCheck,
   ShieldCheck, CheckCircle2, XCircle,
 } from 'lucide-react';
@@ -29,17 +29,35 @@ import { Button, Card, Loading } from '../../../components/common';
 import { DocumentLineageCard } from '../../../components/admin/DocumentLineageCard';
 import {
   contractsService,
+  type ContractIntegrityCheck,
   type ContractStatus,
 } from '../../../services/contracts.service';
 import { useLocalizedDate } from '../../../hooks/useLocalizedDate';
 import { useMutationWithToast } from '../../../hooks';
+import { formatAttachmentSize } from '../../../services/documentAttachments.service';
+import { PermissionGate } from '../../../components/admin/PermissionGate';
+import { SignaturePadField, type SignaturePadHandle } from '../../../components/contracts/SignaturePadField';
+import { SigningOverviewCard } from './SigningOverviewCard';
+import { PaperSignatureUploadDialog } from './PaperSignatureUploadDialog';
+import { SendReviewModal } from './SendReviewModal';
+import { contractStatusLabel, type SignerProgress } from '../../../utils/contractStatus';
+
+/** How far the customer signers have got, from the signing overview (#1446). */
+function signerProgressOf(signers: { role: string; status: string }[] | undefined): SignerProgress | null {
+  const customers = (signers || []).filter((s) => s.role === 'customer');
+  if (!customers.length) return null;
+  return { signed: customers.filter((s) => s.status === 'signed').length, total: customers.length };
+}
 
 function statusBadgeClass(status: ContractStatus): string {
   return status === 'fully_signed'         ? 'bg-green-100 text-green-800'
     : status === 'signed_by_customer'      ? 'bg-blue-100 text-blue-800'
     : status === 'signed_by_admin'         ? 'bg-blue-100 text-blue-800'
     : status === 'sent'                    ? 'bg-amber-100 text-amber-800'
+    : status === 'declined'                ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200'
     : status === 'cancelled'               ? 'bg-neutral-200 text-neutral-600'
+    : status === 'expired'                 ? 'bg-neutral-200 text-neutral-600'
+    : status === 'awaiting_data'           ? 'bg-amber-100 text-amber-800'
     :                                        'bg-neutral-100 text-neutral-700';
 }
 
@@ -58,17 +76,27 @@ export const ContractDetailPage: React.FC = () => {
   const formatDate = (v: string | null | undefined) => v ? format(v) : '—';
   const formatDateTime = (v: string | null | undefined) => v ? fmtDateTime(v) : '—';
   const numericId = id ? parseInt(id, 10) : null;
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const countersignCanvasRef = useRef<HTMLCanvasElement>(null);
-  const countersignPadRef = useRef<SignaturePad | null>(null);
+  const countersignPadRef = useRef<SignaturePadHandle>(null);
 
   const [countersignName, setCountersignName] = useState('');
+  // Signatures v2: counter-sign with a drawn signature or the typed name.
+  const [countersignMode, setCountersignMode] = useState<'drawn' | 'typed'>('drawn');
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ['contract', numericId],
     queryFn: () => contractsService.get(numericId as number),
     enabled: numericId !== null,
   });
+
+  // Shares its key with the documents card below, so this costs no extra
+  // request — it only decides whether the certificate button is offered.
+  const { data: documentsData } = useQuery({
+    queryKey: ['contract-documents', numericId],
+    queryFn: () => contractsService.documents(numericId as number),
+    enabled: numericId !== null,
+  });
+  const hasCertificate = (documentsData?.documents || []).some((d) => d.kind === 'audit');
 
   // Lineage: pull the source quote's number AND every invoice whose
   // source_contract_id matches this contract. Both queries are gated
@@ -91,17 +119,55 @@ export const ContractDetailPage: React.FC = () => {
     select: (res) => res?.invoices?.filter((i) => i.sourceContractId === numericId) || [],
   });
 
+  // Signers and the signing log (#1446). `version` tells a signatures-v2
+  // contract (one link per signer, signing log) from one sent before, whose
+  // cards stay as they were. Until it's known, neither set shows.
+  const signersQuery = useQuery({
+    queryKey: ['contract-signers', numericId],
+    queryFn: () => contractsService.signers(numericId as number),
+    enabled: numericId !== null,
+  });
+  const isV2 = signersQuery.data?.version === 2;
+  const legacySigning = signersQuery.isSuccess ? !isV2 : signersQuery.isError;
+
+  // Send goes through the review (#1445): it opens here and sends from there.
+  // Collect-then-freeze (#1446) is chosen in the review, offered when the
+  // customer's address would print empty.
+  const [reviewing, setReviewing] = useState(false);
   const sendMutation = useMutationWithToast({
-    mutationFn: () => contractsService.send(numericId as number),
-    successMessage: t('contracts.detail.sentToast', 'Contract sent.') as string,
-    invalidateKeys: [['contract', numericId]],
-    errorMessage: t('contracts.detail.sendError', 'Send failed') as string,
+    mutationFn: ({ reviewToken, askForDetails }: { reviewToken?: string; askForDetails?: boolean }) =>
+      contractsService.send(numericId as number, { reviewToken, collectData: askForDetails === true }),
+    onSuccess: (data) => {
+      setReviewing(false);
+      // Sent, but the invitation mail failed: a warning, not an error — the
+      // send went through, and a second one would go out again.
+      if (data?.invitationFailed) {
+        toast.warn(t('contracts.detail.sentInvitationFailedToast',
+          'Sent, but the email to the signer couldn\'t go out. It is retried automatically within the hour, so don\'t send again.'));
+      } else {
+        toast.success(t('contracts.detail.sentToast', 'Contract sent.'));
+      }
+    },
+    invalidateKeys: [['contract', numericId], ['contract-signers', numericId]],
+    errorMessage: (err: unknown) => {
+      const data = (err as { response?: { data?: { code?: string; error?: string } } })?.response?.data;
+      if (data?.code === 'CONTRACT_REVIEW_STALE') {
+        return t('contracts.detail.review.stale', 'The contract changed since this review. Check the updated review, then send.') as string;
+      }
+      return data?.error || (t('contracts.detail.sendError', 'Send failed') as string);
+    },
+    onError: (err: unknown) => {
+      // Changed elsewhere: show the review of what would go out now.
+      if ((err as { response?: { data?: { code?: string } } })?.response?.data?.code === 'CONTRACT_REVIEW_STALE') {
+        void queryClient.invalidateQueries({ queryKey: ['contract-send-preview', numericId] });
+      }
+    },
   });
 
   const cancelMutation = useMutationWithToast({
     mutationFn: () => contractsService.cancel(numericId as number),
     successMessage: t('contracts.detail.cancelledToast', 'Contract cancelled.') as string,
-    invalidateKeys: [['contract', numericId]],
+    invalidateKeys: [['contract', numericId], ['contract-signers', numericId]],
     errorMessage: t('contracts.detail.cancelError', 'Cancel failed') as string,
   });
 
@@ -109,16 +175,42 @@ export const ContractDetailPage: React.FC = () => {
     mutationFn: () => {
       // Capture the canvas signature (if drawn) at submit time so we
       // send a fresh data URL, not a stale one from an earlier mount.
-      const pad = countersignPadRef.current;
-      const signatureDataUrl = pad && !pad.isEmpty() ? pad.toDataURL('image/png') : null;
+      const signatureDataUrl = countersignPadRef.current?.toDataUrl() ?? null;
+      if (isV2) {
+        if (countersignMode === 'drawn' && !signatureDataUrl) {
+          throw new Error(t('contracts.detail.countersignDrawRequired', 'Draw your signature, or switch to typing your name.') as string);
+        }
+        return contractsService.countersign(numericId as number, countersignMode === 'drawn'
+          ? { name: countersignName, signatureDataUrl, mode: 'drawn' }
+          : { name: countersignName, mode: 'typed' });
+      }
       return contractsService.countersign(numericId as number, {
         name: countersignName,
         signatureDataUrl,
       });
     },
     successMessage: t('contracts.detail.countersignedToast', 'Counter-signed.') as string,
-    invalidateKeys: [['contract', numericId]],
-    errorMessage: t('contracts.detail.countersignError', 'Counter-sign failed') as string,
+    invalidateKeys: [['contract', numericId], ['contract-signers', numericId]],
+    errorMessage: (err: any) => {
+      if (err?.response?.data?.code === 'CUSTOMERS_PENDING') {
+        return t('contracts.detail.countersignCustomersPending', 'Every customer has to sign before you counter-sign.') as string;
+      }
+      // No HTTP status at all — the connection dropped. The counter-signature
+      // may still have been recorded, so don't tell the admin to simply try
+      // again on a legally meaningful step (#1446). The refetch below shows
+      // where the contract actually stands.
+      if (!err?.response) {
+        return t('contracts.detail.countersignUncertain',
+          'We couldn\'t reach the server, so we can\'t say whether the counter-signature was recorded. The contract has been reloaded — check its status before signing again.') as string;
+      }
+      return err?.response?.data?.error || err?.message || t('contracts.detail.countersignError', 'Counter-sign failed') as string;
+    },
+    onError: (err: any) => {
+      if (!err?.response && numericId) {
+        queryClient.invalidateQueries({ queryKey: ['contract', numericId] });
+        queryClient.invalidateQueries({ queryKey: ['contract-signers', numericId] });
+      }
+    },
     onSuccess: () => {
       setCountersignName('');
       countersignPadRef.current?.clear();
@@ -126,10 +218,19 @@ export const ContractDetailPage: React.FC = () => {
   });
 
   const uploadMutation = useMutationWithToast({
-    mutationFn: (file: File) => contractsService.uploadSignedPdf(numericId as number, file),
+    mutationFn: ({ file, coversSignerIds }: { file: File; coversSignerIds: number[] }) => (
+      contractsService.uploadSignedPdf(numericId as number, file, coversSignerIds)
+    ),
     successMessage: t('contracts.detail.uploadedToast', 'Signed PDF uploaded.') as string,
-    invalidateKeys: [['contract', numericId]],
-    errorMessage: t('contracts.detail.uploadError', 'Upload failed') as string,
+    invalidateKeys: [['contract', numericId], ['contract-signers', numericId], ['contract-paper-coverage', numericId]],
+    errorMessage: (err: any) => (err?.response?.data?.code === 'SIGNERS_NOT_COVERED'
+      ? t('contracts.paperUpload.notCovered',
+        'Confirm every signer the paper copy is signed by — the upload completes the contract for all of them.') as string
+      : err?.response?.data?.code === 'ELECTRONIC_SIGNATURE_PRESENT'
+        ? t('contracts.paperUpload.refusedBody',
+          'At least one signer has already signed this contract in the browser. A paper copy can\'t replace a signature given in the browser, so the upload isn\'t available. Let the remaining signers sign in the browser, then counter-sign on this page.') as string
+        : err?.response?.data?.error || t('contracts.detail.uploadError', 'Upload failed') as string),
+    onSuccess: () => setUploadOpen(false),
   });
 
   const resendSignedMutation = useMutationWithToast({
@@ -203,6 +304,22 @@ export const ContractDetailPage: React.FC = () => {
     }
   }
 
+  async function handleCertificateDownload() {
+    if (!numericId) return;
+    const previewWindow = window.open('about:blank', '_blank');
+    if (!previewWindow) {
+      toast.error(t('contracts.detail.popupBlocked', 'Allow pop-ups for this site to preview the PDF.') as string);
+      return;
+    }
+    try {
+      previewWindow.location.href = await contractsService.certificateUrl(numericId);
+    } catch (err: any) {
+      previewWindow.close();
+      toast.error(err?.response?.data?.error
+        || t('contracts.detail.certificateUnavailable', 'Signing certificate unavailable') as string);
+    }
+  }
+
   async function handleSignedPdfDownload() {
     if (!numericId) return;
     const previewWindow = window.open('about:blank', '_blank');
@@ -222,20 +339,18 @@ export const ContractDetailPage: React.FC = () => {
   return (
     <div>
       <div className="mb-4 flex items-center gap-3 flex-wrap">
-        <Link
-          to="/admin/clients/contracts"
-          className="inline-flex items-center gap-1 text-sm text-neutral-600 dark:text-neutral-400 hover:text-accent-dark"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          {t('contracts.detail.back', 'Back to list')}
-        </Link>
         <h1 className="text-2xl font-bold flex items-center gap-2 flex-1">
           <ScrollText className="w-6 h-6" />
           <span className="font-mono text-base">{c.contractNumber}</span>
-          {c.title && <span className="text-base text-neutral-600 dark:text-neutral-400">— {c.title}</span>}
+          {c.title && <span className="text-base text-soft">— {c.title}</span>}
+          {c.templateName && (
+            <span className="text-xs font-normal text-soft">
+              {t('contracts.detail.fromTemplate', 'Template: {{name}} · v{{version}}', { name: c.templateName, version: c.templateVersion ?? '' })}
+            </span>
+          )}
         </h1>
         <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${statusBadgeClass(c.status)}`}>
-          {t(`contracts.status.${c.status}`, c.status)}
+          {contractStatusLabel(t, c.status, signerProgressOf(signersQuery.data?.signers))}
         </span>
       </div>
 
@@ -251,13 +366,23 @@ export const ContractDetailPage: React.FC = () => {
               <FileDown className="w-4 h-4 mr-1" />
               {t('contracts.detail.previewPdf', 'Preview PDF')}
             </Button>
-            <Button onClick={() => sendMutation.mutate()} disabled={sendMutation.isPending}>
+            <Button onClick={() => setReviewing(true)} disabled={sendMutation.isPending}>
               <Send className="w-4 h-4 mr-1" />
               {t('contracts.detail.send', 'Send to customer')}
             </Button>
           </>
         )}
-        {(c.status === 'draft' || c.status === 'sent') && (
+        {c.status === 'awaiting_data' && (c.dataCollectedAt ? (
+          <Button onClick={() => sendMutation.mutate({})} disabled={sendMutation.isPending}>
+            <Send className="w-4 h-4 mr-1" />
+            {t('contracts.detail.finishSending', 'Finish sending with the customer\'s details')}
+          </Button>
+        ) : (
+          <span className="self-center text-sm text-soft">
+            {t('contracts.detail.waitingForDetails', 'Waiting for the customer to complete their details. The contract is prepared and sent to the other signers once they have.')}
+          </span>
+        ))}
+        {(c.status === 'draft' || c.status === 'sent' || c.status === 'awaiting_data') && (
           <Button
             variant="outline"
             onClick={() => {
@@ -283,6 +408,15 @@ export const ContractDetailPage: React.FC = () => {
             {t('contracts.detail.downloadSignedPdf', 'Download signed PDF')}
           </Button>
         )}
+        {/* The signing certificate (#1446) — the evidence record issued at
+            completion. It used to leave the server only as an email
+            attachment, so a lost email was a lost certificate. */}
+        {hasCertificate && (
+          <Button variant="outline" onClick={handleCertificateDownload}>
+            <FileDown className="w-4 h-4 mr-1" />
+            {t('contracts.detail.downloadCertificate', 'Download signing certificate')}
+          </Button>
+        )}
         {/* Recovery action — on fully-signed contracts, lets the admin
             re-render the signed PDF (if a previous render failed) and
             resend the confirmation email to both parties. Also useful
@@ -303,27 +437,17 @@ export const ContractDetailPage: React.FC = () => {
           </Button>
         )}
         {(c.status === 'sent' || c.status === 'signed_by_customer') && (
-          <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) uploadMutation.mutate(f);
-                if (e.target) e.target.value = '';
-              }}
-            />
-            <Button
-              variant="outline"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadMutation.isPending}
-            >
-              <Upload className="w-4 h-4 mr-1" />
-              {t('contracts.detail.uploadSigned', 'Upload signed PDF')}
-            </Button>
-          </>
+          // The upload completes the contract for every signer, so it goes
+          // through a dialog that has the admin confirm whose signatures the
+          // paper copy carries (#1446).
+          <Button
+            variant="outline"
+            onClick={() => setUploadOpen(true)}
+            disabled={uploadMutation.isPending}
+          >
+            <Upload className="w-4 h-4 mr-1" />
+            {t('contracts.detail.uploadSigned', 'Upload signed PDF')}
+          </Button>
         )}
 
         {/* Forward conversions — only available once both parties have
@@ -423,7 +547,7 @@ export const ContractDetailPage: React.FC = () => {
         <h2 className="font-semibold mb-2">{t('contracts.detail.parties', 'Parties')}</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
           <div>
-            <p className="text-xs uppercase text-neutral-500 dark:text-neutral-400 tracking-wide">
+            <p className="text-xs uppercase text-muted tracking-wide">
               {t('contracts.detail.customer', 'Customer')}
             </p>
             <p className="font-medium">
@@ -432,25 +556,25 @@ export const ContractDetailPage: React.FC = () => {
                 || c.customer.displayName
                 || c.customer.email}
             </p>
-            <p className="text-xs text-neutral-600 dark:text-neutral-300">{c.customer.email}</p>
+            <p className="text-xs text-body">{c.customer.email}</p>
           </div>
           <div>
-            <p className="text-xs uppercase text-neutral-500 dark:text-neutral-400 tracking-wide">
+            <p className="text-xs uppercase text-muted tracking-wide">
               {t('contracts.detail.dates', 'Dates')}
             </p>
             <p className="text-xs">
-              <span className="text-neutral-600 dark:text-neutral-300">{t('contracts.detail.issued', 'Issued')}: </span>
+              <span className="text-body">{t('contracts.detail.issued', 'Issued')}: </span>
               {formatDate(c.issueDate)}
             </p>
             {c.validUntil && (
               <p className="text-xs">
-                <span className="text-neutral-600 dark:text-neutral-300">{t('contracts.detail.signBy', 'Sign by')}: </span>
+                <span className="text-body">{t('contracts.detail.signBy', 'Sign by')}: </span>
                 {formatDate(c.validUntil)}
               </p>
             )}
             {c.sentAt && (
               <p className="text-xs">
-                <span className="text-neutral-600 dark:text-neutral-300">{t('contracts.detail.sentAt', 'Sent at')}: </span>
+                <span className="text-body">{t('contracts.detail.sentAt', 'Sent at')}: </span>
                 {formatDateTime(c.sentAt)}
               </p>
             )}
@@ -463,7 +587,7 @@ export const ContractDetailPage: React.FC = () => {
                 surfaces without scrolling. */}
             {sourceQuoteId && (
               <p className="text-xs">
-                <span className="text-neutral-600 dark:text-neutral-300">{t('contracts.detail.fromQuote', 'From quote')}: </span>
+                <span className="text-body">{t('contracts.detail.fromQuote', 'From quote')}: </span>
                 <Link
                   to={`/admin/clients/quotes/${sourceQuoteId}`}
                   className="text-accent-dark hover:underline font-mono"
@@ -474,7 +598,7 @@ export const ContractDetailPage: React.FC = () => {
             )}
             {linkedInvoices && linkedInvoices.length > 0 && (
               <p className="text-xs">
-                <span className="text-neutral-600 dark:text-neutral-300">{t('contracts.detail.linkedInvoice', 'Invoice')}: </span>
+                <span className="text-body">{t('contracts.detail.linkedInvoice', 'Invoice')}: </span>
                 <Link
                   to={`/admin/clients/bills/${linkedInvoices[0].id}`}
                   className="text-accent-dark hover:underline font-mono"
@@ -482,7 +606,7 @@ export const ContractDetailPage: React.FC = () => {
                   {linkedInvoices[0].invoiceNumber}
                 </Link>
                 {linkedInvoices.length > 1 && (
-                  <span className="text-neutral-600 dark:text-neutral-300"> (+{linkedInvoices.length - 1})</span>
+                  <span className="text-body"> (+{linkedInvoices.length - 1})</span>
                 )}
               </p>
             )}
@@ -490,19 +614,25 @@ export const ContractDetailPage: React.FC = () => {
         </div>
       </Card>
 
-      {/* Signature evidence */}
-      {(c.signedByCustomerAt || c.signedByAdminAt) && (
+      {/* Signatures v2: every signer, the signing log, the evidence. */}
+      {isV2 && signersQuery.data && numericId !== null && (
+        <SigningOverviewCard contractId={numericId} contractStatus={c.status} overview={signersQuery.data} />
+      )}
+
+      {/* Signature evidence — contracts sent before v2 (the Signers card
+          above covers v2). */}
+      {legacySigning && (c.signedByCustomerAt || c.signedByAdminAt) && (
         <Card padding="lg" className="mb-4">
           <h2 className="font-semibold mb-2">{t('contracts.detail.signatures', 'Signatures')}</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-            <div className="p-3 rounded border border-neutral-200 dark:border-neutral-700">
-              <p className="text-xs uppercase text-neutral-500 dark:text-neutral-400 tracking-wide">
+            <div className="p-3 rounded border border-line">
+              <p className="text-xs uppercase text-muted tracking-wide">
                 {t('contracts.detail.signedByCustomer', 'Signed by customer')}
               </p>
               {c.signedByCustomerAt ? (
                 <>
                   <p className="font-medium">{c.signedCustomerName}</p>
-                  <p className="text-xs text-neutral-600 dark:text-neutral-300">{formatDateTime(c.signedByCustomerAt)}</p>
+                  <p className="text-xs text-body">{formatDateTime(c.signedByCustomerAt)}</p>
                   {!c.signedCustomerSignaturePath && (
                     <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
                       {t('contracts.detail.noSignatureImage',
@@ -511,17 +641,17 @@ export const ContractDetailPage: React.FC = () => {
                   )}
                 </>
               ) : (
-                <p className="text-xs text-neutral-600 dark:text-neutral-300">—</p>
+                <p className="text-xs text-body">—</p>
               )}
             </div>
-            <div className="p-3 rounded border border-neutral-200 dark:border-neutral-700">
-              <p className="text-xs uppercase text-neutral-500 dark:text-neutral-400 tracking-wide">
+            <div className="p-3 rounded border border-line">
+              <p className="text-xs uppercase text-muted tracking-wide">
                 {t('contracts.detail.signedByAdmin', 'Counter-signed')}
               </p>
               {c.signedByAdminAt ? (
                 <>
                   <p className="font-medium">{c.signedAdminName}</p>
-                  <p className="text-xs text-neutral-600 dark:text-neutral-300">{formatDateTime(c.signedByAdminAt)}</p>
+                  <p className="text-xs text-body">{formatDateTime(c.signedByAdminAt)}</p>
                   {!c.signedAdminSignaturePath && (
                     <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
                       {t('contracts.detail.noSignatureImage',
@@ -530,7 +660,7 @@ export const ContractDetailPage: React.FC = () => {
                   )}
                 </>
               ) : (
-                <p className="text-xs text-neutral-600 dark:text-neutral-300">—</p>
+                <p className="text-xs text-body">—</p>
               )}
             </div>
           </div>
@@ -541,14 +671,16 @@ export const ContractDetailPage: React.FC = () => {
           drawn signature (signature_pad) so the rendered PDF carries
           both signatures, not just typed labels. */}
       {c.status === 'signed_by_customer' && !c.signedByAdminAt && (
-        <CountersignCard
-          name={countersignName}
-          setName={setCountersignName}
-          canvasRef={countersignCanvasRef}
-          padRef={countersignPadRef}
-          onSubmit={() => countersignMutation.mutate()}
-          pending={countersignMutation.isPending}
-        />
+        <PermissionGate permission="contracts.manage">
+          <CountersignCard
+            name={countersignName}
+            setName={setCountersignName}
+            padRef={countersignPadRef}
+            onSubmit={() => countersignMutation.mutate()}
+            pending={countersignMutation.isPending}
+            modeChoice={isV2 ? { mode: countersignMode, setMode: setCountersignMode } : null}
+          />
+        </PermissionGate>
       )}
 
       {/* Re-stamp signatures card. Available on any already-signed
@@ -557,7 +689,8 @@ export const ContractDetailPage: React.FC = () => {
           their behalf and re-render the PDF. Names + timestamps + IPs
           stay untouched — this is purely a "the canvas glitched, here
           is the image we should have captured" recovery. */}
-      {(c.status === 'signed_by_customer' || c.status === 'signed_by_admin' || c.status === 'fully_signed')
+      {legacySigning
+        && (c.status === 'signed_by_customer' || c.status === 'signed_by_admin' || c.status === 'fully_signed')
         && (!c.signedCustomerSignaturePath || !c.signedAdminSignaturePath) && (
         <RestampSignaturesCard
           contract={c}
@@ -577,7 +710,7 @@ export const ContractDetailPage: React.FC = () => {
       {c.convertedEventId && (
         <Card padding="md" className="mb-4">
           <p className="text-sm">
-            <span className="text-neutral-500 dark:text-neutral-400 mr-2">
+            <span className="text-muted mr-2">
               {t('contracts.detail.convertedToEvent', 'Converted to event')}:
             </span>
             <Link to={`/admin/events/${c.convertedEventId}`} className="font-medium text-primary-600 dark:text-primary-400 hover:underline">
@@ -608,30 +741,68 @@ export const ContractDetailPage: React.FC = () => {
         )}
       </Card>
 
+      {(c.attachments || []).length > 0 && (
+        <Card padding="lg" className="mt-4">
+          <h2 className="font-semibold mb-2">{t('contracts.attachments.heading', 'Attachments')}</h2>
+          <ul className="space-y-1 text-sm">
+            {(c.attachments || []).map((a) => (
+              <li key={a.attachmentId} className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-heading">{a.name}</span>
+                <span className="text-xs text-muted">
+                  {a.delivery === 'merged'
+                    ? t('contracts.attachments.merged', 'In the contract PDF')
+                    : t('contracts.attachments.separate', 'Separate file')}
+                  {' · '}{t('contracts.attachments.pages', '{{count}} pages', { count: a.pages })} · {formatAttachmentSize(a.bytes)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
       {/* Audit trail (issue #5 from the maintainer plan) — a
           chronological timeline of every event recorded on this
           contract, sourced from activity_logs. Shows up below the
           included blocks at the bottom of the page so it doesn't
           dominate the layout but is always reachable. */}
       {numericId && <IntegrityCheckCard contractId={numericId} />}
+      {numericId && <GeneratedDocumentsCard contractId={numericId} />}
       {numericId && <AuditTrailCard contractId={numericId} />}
+
+      {numericId && (
+        <PaperSignatureUploadDialog
+          contractId={numericId}
+          isOpen={uploadOpen}
+          onClose={() => setUploadOpen(false)}
+          onUpload={(file, coversSignerIds) => uploadMutation.mutate({ file, coversSignerIds })}
+          isUploading={uploadMutation.isPending}
+        />
+      )}
+      {numericId && reviewing && (
+        <SendReviewModal
+          contractId={numericId}
+          onClose={() => setReviewing(false)}
+          customerAddressMissing={!!c.customerAddressMissing}
+          onSend={(reviewToken, askForDetails) => sendMutation.mutate({ reviewToken, askForDetails })}
+          onPreviewPdf={handlePdfPreview}
+          sending={sendMutation.isPending}
+        />
+      )}
     </div>
   );
 };
 
 /**
- * Re-hashes the unsigned + signed PDFs on disk and compares each to
- * the SHA-256 column persisted at write time (migration 131). The
- * customer already has both expected hashes via the audit-certificate
- * attached to their signing emails; this card is the admin-side
- * equivalent so they don't have to drop to a shell to run
- * `shasum -a 256`.
+ * The integrity report (#1446): every artefact re-read and re-hashed — both
+ * PDFs, the certificate, each signature image, the frozen content, every
+ * attachment, the manifest, the signing log, and the completed document —
+ * each against the value recorded when it was made. Itemised, so the check
+ * that fails says which artefact changed; also downloadable as a PDF.
  *
- * The query is lazy: we don't auto-fire on mount because re-hashing
- * does file I/O on the server, and most page views don't need it.
- * Admin clicks "Verify" to trigger the check.
+ * The query is lazy: re-hashing does file I/O on the server, and most page
+ * views don't need it. The admin clicks "Verify".
  */
-const IntegrityCheckCard: React.FC<{ contractId: number }> = ({ contractId }) => {
+export const IntegrityCheckCard: React.FC<{ contractId: number }> = ({ contractId }) => {
   const { t } = useTranslation();
   const { data, isFetching, refetch, isSuccess, error } = useQuery({
     queryKey: ['contract-integrity', contractId],
@@ -641,66 +812,41 @@ const IntegrityCheckCard: React.FC<{ contractId: number }> = ({ contractId }) =>
     gcTime: 0,
   });
 
-  const renderLeg = (legKey: 'unsigned' | 'signed') => {
-    if (!data) return null;
-    const leg = data[legKey];
-    const titleKey = legKey === 'unsigned'
-      ? 'contracts.detail.integrity.unsignedTitle'
-      : 'contracts.detail.integrity.signedTitle';
-    const titleFallback = legKey === 'unsigned' ? 'Unsigned PDF' : 'Signed PDF';
-    let badge: React.ReactNode;
-    if (!leg.path) {
-      badge = (
-        <span className="inline-flex items-center gap-1 text-xs text-neutral-500">
-          {t('contracts.detail.integrity.notIssued', 'Not yet issued')}
-        </span>
-      );
-    } else if (!leg.present) {
-      badge = (
-        <span className="inline-flex items-center gap-1 text-xs text-red-700 dark:text-red-300">
-          <XCircle className="w-3.5 h-3.5" />
-          {t('contracts.detail.integrity.missing', 'File missing from disk')}
-        </span>
-      );
-    } else if (leg.match) {
-      badge = (
-        <span className="inline-flex items-center gap-1 text-xs text-green-700 dark:text-green-300">
-          <CheckCircle2 className="w-3.5 h-3.5" />
-          {t('contracts.detail.integrity.match', 'Hash matches')}
-        </span>
-      );
-    } else {
-      badge = (
-        <span className="inline-flex items-center gap-1 text-xs text-red-700 dark:text-red-300">
-          <XCircle className="w-3.5 h-3.5" />
-          {t('contracts.detail.integrity.mismatch', 'Hash mismatch — file altered')}
-        </span>
-      );
+  async function downloadPdf() {
+    const w = window.open('about:blank', '_blank');
+    if (!w) {
+      toast.error(t('contracts.detail.popupBlocked', 'Allow pop-ups for this site to preview the PDF.') as string);
+      return;
     }
-    return (
-      <div className="border border-neutral-200 dark:border-neutral-700 rounded p-3 space-y-1">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium">{t(titleKey, titleFallback)}</span>
-          {badge}
-        </div>
-        {leg.path && (
-          <p className="text-[11px] text-neutral-500 font-mono break-all" title={leg.path}>
-            {leg.path}
-          </p>
-        )}
-        {(leg.expected || leg.actual) && (
-          <dl className="grid grid-cols-[6rem_1fr] gap-x-2 gap-y-0.5 text-[11px] font-mono">
-            <dt className="text-neutral-500">{t('contracts.detail.integrity.expected', 'expected')}</dt>
-            <dd className="break-all">{leg.expected || '—'}</dd>
-            <dt className="text-neutral-500">{t('contracts.detail.integrity.actual', 'actual')}</dt>
-            <dd className={leg.match ? 'break-all' : 'break-all text-red-700 dark:text-red-300'}>
-              {leg.actual || '—'}
-            </dd>
-          </dl>
-        )}
-      </div>
-    );
-  };
+    try {
+      w.location.href = await contractsService.integrityReportUrl(contractId);
+    } catch {
+      w.close();
+      toast.error(t('contracts.detail.integrity.error', 'Integrity check failed.') as string);
+    }
+  }
+
+  // A failed check without both hashes is an artefact that is gone, not
+  // one that was altered.
+  const isMissing = (c: ContractIntegrityCheck) => c.ok === false && !(c.expected && c.actual);
+  const verdict = (c: ContractIntegrityCheck) => (c.ok === true ? (
+    <span className="inline-flex items-center gap-1 text-xs text-green-700 dark:text-green-300">
+      <CheckCircle2 className="w-3.5 h-3.5" />
+      {t('contracts.detail.integrity.match', 'Hash matches')}
+    </span>
+  ) : isMissing(c) ? (
+    <span className="inline-flex items-center gap-1 text-xs text-red-700 dark:text-red-300">
+      <XCircle className="w-3.5 h-3.5" />
+      {t('contracts.detail.integrity.missingArtefact', 'Missing — the file (or record) is gone')}
+    </span>
+  ) : c.ok === false ? (
+    <span className="inline-flex items-center gap-1 text-xs text-red-700 dark:text-red-300">
+      <XCircle className="w-3.5 h-3.5" />
+      {t('contracts.detail.integrity.mismatch', 'Hash mismatch — file altered')}
+    </span>
+  ) : (
+    <span className="text-xs text-neutral-500">{t('contracts.detail.integrity.notCheckable', 'Not checkable')}</span>
+  ));
 
   return (
     <Card padding="lg" className="mt-4">
@@ -709,32 +855,63 @@ const IntegrityCheckCard: React.FC<{ contractId: number }> = ({ contractId }) =>
           <ShieldCheck className="w-4 h-4" />
           {t('contracts.detail.integrity.title', 'PDF integrity check')}
         </h2>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          isLoading={isFetching}
-        >
-          {isSuccess
-            ? t('contracts.detail.integrity.reverify', 'Re-verify')
-            : t('contracts.detail.integrity.verify', 'Verify')}
-        </Button>
+        <div className="flex gap-2">
+          {data && (
+            <Button variant="outline" size="sm" onClick={downloadPdf}>
+              <FileDown className="w-4 h-4 mr-1" />
+              {t('contracts.detail.integrity.downloadPdf', 'Report as PDF')}
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            isLoading={isFetching}
+          >
+            {isSuccess
+              ? t('contracts.detail.integrity.reverify', 'Re-verify')
+              : t('contracts.detail.integrity.verify', 'Verify')}
+          </Button>
+        </div>
       </div>
       <p className="text-xs text-neutral-500 mb-3">
-        {t('contracts.detail.integrity.help',
-          'Re-hashes the unsigned + signed PDFs on disk and compares them to the SHA-256 stored when the document was issued. Catches backup corruption or manual edits since the customer received their copy.')}
+        {t('contracts.detail.integrity.helpReport',
+          'Re-reads every file of this contract — both PDFs, the signing certificate, each signature image and attachment — and re-checks the frozen content, the attachment list and the signing log against what was recorded when each was made. A mismatch names the item that changed.')}
       </p>
       {error && (
         <p className="text-sm text-red-700 dark:text-red-300">
           {t('contracts.detail.integrity.error', 'Integrity check failed.')}
         </p>
       )}
-      {data && (
-        <div className="space-y-2">
-          {renderLeg('unsigned')}
-          {renderLeg('signed')}
-        </div>
+      {data && data.checks && (
+        <>
+          <p className={`text-sm font-medium mb-2 ${data.ok ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}`}>
+            {data.ok
+              ? t('contracts.detail.integrity.allOk', 'Every check passed.')
+              : t('contracts.detail.integrity.someFailed', 'At least one check failed.')}
+          </p>
+          <ul className="space-y-2">
+            {data.checks.map((c, index) => (
+              <li key={`${c.check}-${index}`} className="border border-line rounded p-3 space-y-1">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-sm font-medium">
+                    {t(`contracts.detail.integrity.check.${c.check}`, c.check)}
+                    {c.subject && <span className="ml-1 font-normal text-neutral-500">· {c.subject}</span>}
+                  </span>
+                  {verdict(c)}
+                </div>
+                {c.note && c.note !== 'missing' && <p className="text-[11px] text-neutral-500">{c.note}</p>}
+                <dl className="grid grid-cols-[6rem_1fr] gap-x-2 gap-y-0.5 text-[11px] font-mono">
+                  <dt className="text-neutral-500">{t('contracts.detail.integrity.expected', 'expected')}</dt>
+                  <dd className="break-all">{c.expected || '—'}</dd>
+                  <dt className="text-neutral-500">{t('contracts.detail.integrity.actual', 'actual')}</dt>
+                  <dd className={c.ok === false ? 'break-all text-red-700 dark:text-red-300' : 'break-all'}>{c.actual || '—'}</dd>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </Card>
   );
@@ -746,6 +923,73 @@ const IntegrityCheckCard: React.FC<{ contractId: number }> = ({ contractId }) =>
  * actor + a human-readable label per activity_type. Hashes / token
  * fragments etc. are surfaced in monospace so they're auditor-friendly.
  */
+/**
+ * Every PDF generated for the contract (#1445) — sent for signature,
+ * signed, audit certificate — with its checksum, so a copy can be re-hashed
+ * and compared.
+ */
+const GeneratedDocumentsCard: React.FC<{ contractId: number }> = ({ contractId }) => {
+  const { t } = useTranslation();
+  const { formatDateTime: fmtDateTime } = useLocalizedDate();
+  const { data } = useQuery({
+    queryKey: ['contract-documents', contractId],
+    queryFn: () => contractsService.documents(contractId),
+  });
+  const documents = data?.documents || [];
+  return (
+    <Card padding="lg" className="mt-4">
+      <h3 className="text-lg font-semibold mb-1">{t('contracts.detail.documents', 'Generated documents')}</h3>
+      <p className="text-xs text-muted mb-3">
+        {t('contracts.detail.documentsHelp', 'Every PDF made for this contract, with its checksum. Re-hash a copy to confirm it matches.')}
+      </p>
+      {documents.length === 0 ? (
+        <p className="text-sm text-soft">{t('contracts.detail.documentsEmpty', 'No PDFs generated yet.')}</p>
+      ) : (
+        <ul className="divide-y divide-line text-sm">
+          {documents.map((d) => (
+            <li key={d.id} className="py-2 flex flex-wrap items-center gap-3">
+              <span className="font-medium text-heading">
+                {t(`contracts.detail.documentKind.${d.kind}`, d.kind)}
+              </span>
+              <span className="text-soft">{fmtDateTime(d.generatedAt)}</span>
+              {d.pages != null && (
+                <span className="text-soft">
+                  {t('contracts.detail.documentPages', 'Pages: {{count}}', { count: d.pages })}
+                </span>
+              )}
+              <span className="text-soft">{Math.max(1, Math.round(d.bytes / 1024))} KB</span>
+              <span className="font-mono text-xs text-muted break-all" title={d.sha256}>
+                {d.sha256.slice(0, 16)}…
+              </span>
+              {/* What the PDF was actually made of (#1445): which attachments
+                  went into it, in what order, and each one's own checksum —
+                  including the ones delivered as separate files, which are
+                  bound into nothing else. Recorded at send, but until now
+                  unreadable through any API. */}
+              {d.manifest?.attachments?.length ? (
+                <ul className="w-full mt-1 pl-4 space-y-1 text-xs text-soft">
+                  {d.manifest.attachments.map((a) => (
+                    <li key={a.attachmentId} className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-body">{a.name}</span>
+                      <span>
+                        {a.delivery === 'merged'
+                          ? t('contracts.detail.attachmentMerged', 'merged from page {{page}}', { page: a.firstPage ?? '—' })
+                          : t('contracts.detail.attachmentSeparate', 'sent as a separate file')}
+                      </span>
+                      <span>{t('contracts.detail.documentPages', 'Pages: {{count}}', { count: a.pages })}</span>
+                      <span className="font-mono break-all" title={a.sha256}>{a.sha256.slice(0, 12)}…</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+};
+
 const AuditTrailCard: React.FC<{ contractId: number }> = ({ contractId }) => {
   const { t } = useTranslation();
   // formatDateTime honors `general_date_format` + `general_time_format`
@@ -836,53 +1080,29 @@ const AuditTrailCard: React.FC<{ contractId: number }> = ({ contractId }) => {
 interface CountersignProps {
   name: string;
   setName: (v: string) => void;
-  canvasRef: React.RefObject<HTMLCanvasElement>;
-  padRef: React.MutableRefObject<SignaturePad | null>;
+  padRef: React.RefObject<SignaturePadHandle>;
   onSubmit: () => void;
   pending: boolean;
+  /** Signatures v2: a choice between a drawn signature and the typed name. */
+  modeChoice?: { mode: 'drawn' | 'typed'; setMode: (mode: 'drawn' | 'typed') => void } | null;
 }
 
 const CountersignCard: React.FC<CountersignProps> = ({
-  name, setName, canvasRef, padRef, onSubmit, pending,
+  name, setName, padRef, onSubmit, pending, modeChoice,
 }) => {
   const { t } = useTranslation();
-
-  // Initialise signature_pad once the canvas mounts. Same HiDPI
-  // resize-on-mount trick the public sign page uses so strokes are
-  // sharp on retina displays.
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const resize = () => {
-      const ratio = Math.max(window.devicePixelRatio || 1, 1);
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width * ratio;
-      canvas.height = rect.height * ratio;
-      const ctx = canvas.getContext('2d');
-      ctx?.scale(ratio, ratio);
-      padRef.current?.clear();
-    };
-    padRef.current = new SignaturePad(canvas, {
-      penColor: '#111',
-      backgroundColor: 'rgba(255, 255, 255, 0)',
-    });
-    resize();
-    window.addEventListener('resize', resize);
-    return () => {
-      window.removeEventListener('resize', resize);
-      padRef.current?.off();
-      padRef.current = null;
-    };
-  }, [canvasRef, padRef]);
+  const drawn = !modeChoice || modeChoice.mode === 'drawn';
 
   return (
     <Card padding="lg" className="mb-4">
       <h2 className="font-semibold mb-2">
         {t('contracts.detail.countersignTitle', 'Counter-sign to make it binding')}
       </h2>
-      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
-        {t('contracts.detail.countersignHelp',
-          'Type your name AND draw your signature below — both are stamped onto the re-rendered PDF. IP and timestamp are recorded for audit.')}
+      <p className="text-sm text-soft mb-3">
+        {modeChoice
+          ? t('contracts.detail.countersignHelpV2', 'Every customer has signed. Your signature goes into the issuer\'s field on the PDF, and the signing certificate is issued once you sign.')
+          : t('contracts.detail.countersignHelp',
+            'Type your name AND draw your signature below — both are stamped onto the re-rendered PDF. IP and timestamp are recorded for audit.')}
       </p>
       <div className="space-y-3">
         <input
@@ -890,27 +1110,40 @@ const CountersignCard: React.FC<CountersignProps> = ({
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder={t('contracts.detail.signedNamePlaceholder', 'Your full name') as string}
-          className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm"
+          className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm"
         />
-        <div>
-          <label className="block text-xs text-neutral-600 dark:text-neutral-400 mb-1">
-            {t('contracts.detail.countersignSignaturePrompt', 'Draw your signature')}
-          </label>
-          <canvas
-            ref={canvasRef}
-            className="w-full h-32 bg-white rounded border border-neutral-300 dark:border-neutral-600 touch-none"
-          />
-          <div className="mt-1 flex justify-end">
-            <button
-              type="button"
-              onClick={() => padRef.current?.clear()}
-              className="text-xs text-neutral-600 dark:text-neutral-400 hover:underline inline-flex items-center gap-1"
-            >
-              <RotateCcw className="w-3 h-3" />
-              {t('contracts.detail.clearSignature', 'Clear')}
-            </button>
+        {modeChoice && (
+          <div role="radiogroup" aria-label={t('contracts.detail.countersignModeLabel', 'How do you want to sign?') as string} className="flex gap-4 text-sm text-body">
+            {(['drawn', 'typed'] as const).map((value) => (
+              <label key={value} className="inline-flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="countersign-mode"
+                  checked={modeChoice.mode === value}
+                  onChange={() => modeChoice.setMode(value)}
+                />
+                {value === 'drawn'
+                  ? t('contracts.detail.countersignModeDrawn', 'Draw my signature')
+                  : t('contracts.detail.countersignModeTyped', 'Use my typed name')}
+              </label>
+            ))}
           </div>
-        </div>
+        )}
+        {drawn ? (
+          <div>
+            <label className="block text-xs text-soft mb-1">
+              {t('contracts.detail.countersignSignaturePrompt', 'Draw your signature')}
+            </label>
+            <SignaturePadField
+              ref={padRef}
+              label={t('contracts.detail.countersignSignaturePrompt', 'Draw your signature') as string}
+            />
+          </div>
+        ) : (
+          <p className="text-xs text-soft">
+            {t('contracts.detail.countersignTypedHint', 'Your name, as typed above, is placed in the signature field.')}
+          </p>
+        )}
         <div className="flex justify-end">
           <Button
             onClick={onSubmit}
@@ -1024,25 +1257,25 @@ const RestampSignaturesCard: React.FC<RestampCardProps> = ({ contract, onSuccess
       <h2 className="font-semibold mb-2">
         {t('contracts.detail.restampTitle', 'Re-stamp missing signatures')}
       </h2>
-      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
+      <p className="text-sm text-soft mb-3">
         {t('contracts.detail.restampHelp',
           'One or both signatures didn\'t capture an image. Draw the missing signature(s) here and we\'ll re-render the PDF. The typed names, timestamps, and IPs already on file stay untouched.')}
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {missingCustomer && (
           <div>
-            <label className="block text-xs text-neutral-600 dark:text-neutral-400 mb-1">
+            <label className="block text-xs text-soft mb-1">
               {t('contracts.detail.restampCustomer', 'Customer signature')}{' '}
               <span className="font-medium">({contract.signedCustomerName})</span>
             </label>
             <canvas
               ref={customerCanvasRef}
-              className="w-full h-24 bg-white rounded border border-neutral-300 dark:border-neutral-600 touch-none"
+              className="w-full h-24 bg-white rounded border border-line-strong touch-none"
             />
             <button
               type="button"
               onClick={() => customerPadRef.current?.clear()}
-              className="mt-1 text-xs text-neutral-600 dark:text-neutral-400 hover:underline inline-flex items-center gap-1"
+              className="mt-1 text-xs text-soft hover:underline inline-flex items-center gap-1"
             >
               <RotateCcw className="w-3 h-3" />
               {t('contracts.detail.clearSignature', 'Clear')}
@@ -1051,18 +1284,18 @@ const RestampSignaturesCard: React.FC<RestampCardProps> = ({ contract, onSuccess
         )}
         {missingAdmin && (
           <div>
-            <label className="block text-xs text-neutral-600 dark:text-neutral-400 mb-1">
+            <label className="block text-xs text-soft mb-1">
               {t('contracts.detail.restampAdmin', 'Admin signature')}{' '}
               <span className="font-medium">({contract.signedAdminName})</span>
             </label>
             <canvas
               ref={adminCanvasRef}
-              className="w-full h-24 bg-white rounded border border-neutral-300 dark:border-neutral-600 touch-none"
+              className="w-full h-24 bg-white rounded border border-line-strong touch-none"
             />
             <button
               type="button"
               onClick={() => adminPadRef.current?.clear()}
-              className="mt-1 text-xs text-neutral-600 dark:text-neutral-400 hover:underline inline-flex items-center gap-1"
+              className="mt-1 text-xs text-soft hover:underline inline-flex items-center gap-1"
             >
               <RotateCcw className="w-3 h-3" />
               {t('contracts.detail.clearSignature', 'Clear')}

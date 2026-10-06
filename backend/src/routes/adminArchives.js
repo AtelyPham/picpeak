@@ -1,13 +1,15 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
+const os = require('os');
 const { db } = require('../database/db');
+const { deleteWithAccountingHistory } = require('../services/accountingHistory');
 const { formatBoolean } = require('../utils/dbCompat');
 const { slugify } = require('../utils/slug');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
 const StreamZip = require('node-stream-zip');
-const { requireEventOwnership } = require('../middleware/ownership');
+const { requireEventOwnership, scopeEventsListQuery } = require('../middleware/ownership');
 const { assertZipEntriesWithin } = require('../utils/safePath');
 const { escapeLikePattern, likeWithEscape } = require('../utils/sqlSecurity');
 const logger = require('../utils/logger');
@@ -15,6 +17,11 @@ const { sanitizeForZipEntry } = require('../utils/filenameSanitizer');
 const { getPagination } = require('../utils/routeHelpers');
 const { ALLOWED_MEDIA_TYPES, ALLOWED_VIDEO_TYPES } = require('../utils/fileSecurityUtils');
 const { toIso } = require('../utils/dateNormalize');
+const { clearGuestCredits } = require('../services/photoCredit');
+const folderTree = require('../services/folderTreeService');
+const { parseBooleanInput } = require('../utils/parsers');
+const { getStorage } = require('../services/storage');
+const { pipeStreamToResponse } = require('../utils/streamResponse');
 const router = express.Router();
 
 /**
@@ -33,6 +40,13 @@ const flattenExtensions = (map) => new Set(
 const RESTORABLE_EXTENSIONS = flattenExtensions(ALLOWED_MEDIA_TYPES);
 const VIDEO_EXTENSIONS = flattenExtensions(ALLOWED_VIDEO_TYPES);
 
+/** A single path segment: no separator of either kind, not `.` or `..`. */
+const isBareFilename = (name) => typeof name === 'string'
+  && name.length > 0
+  && name !== '.'
+  && name !== '..'
+  && !/[\\/]/.test(name);
+
 // Get all archived events
 router.get('/', adminAuth, requirePermission('archives.view'), async (req, res) => {
   try {
@@ -47,12 +61,18 @@ router.get('/', adminAuth, requirePermission('archives.view'), async (req, res) 
     // literal % or _ typed into the search box has to match itself rather
     // than act as a wildcard: escapeLikePattern() backslash-escapes them and
     // likeWithEscape() names that backslash in an explicit ESCAPE clause,
-    // which matters because SQLite has no default escape character.
+    // which matters because SQLite has no default escape character. Case
+    // folding is likeWithEscape()'s job too (ILIKE on Postgres); LOWER() on
+    // both sides is not an option because SQLite's LOWER() is ASCII-only.
     const applyFilters = (query) => {
+      // Same visibility as the events list, so the rows, the total and the
+      // stat cards never describe another owner's archives to a role limited
+      // to its own events.
+      scopeEventsListQuery(query, req.admin, 'events.created_by');
       if (search) {
         query.whereRaw(
-          likeWithEscape('LOWER(events.event_name)'),
-          [`%${escapeLikePattern(search.toLowerCase())}%`]
+          likeWithEscape('events.event_name'),
+          [`%${escapeLikePattern(search)}%`]
         );
       }
       if (type && type !== 'all') {
@@ -167,20 +187,23 @@ router.get('/:id', adminAuth, requirePermission('archives.view'), requireEventOw
       .where('event_id', archive.id)
       .select('filename', 'type', 'size_bytes', 'uploaded_at');
 
-    // Check archive file
+    // The zip lives wherever archiveService put it, which is the storage
+    // backend, not necessarily the local STORAGE_PATH.
     let archiveFileInfo = null;
     if (archive.archive_path) {
       try {
-        const storagePath = process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
-        const fullArchivePath = path.join(storagePath, archive.archive_path);
-        const stats = await fs.stat(fullArchivePath);
-        archiveFileInfo = {
-          size: stats.size,
-          createdAt: stats.birthtime,
-          path: archive.archive_path
-        };
+        const stats = await getStorage().stat(archive.archive_path);
+        if (stats) {
+          archiveFileInfo = {
+            size: stats.size,
+            createdAt: stats.mtime,
+            path: archive.archive_path
+          };
+        } else {
+          logger.error(`Archive file not found in storage: ${archive.archive_path}`);
+        }
       } catch (error) {
-        logger.error('Archive file not found:', error);
+        logger.error('Archive file stat failed:', error);
       }
     }
 
@@ -223,46 +246,50 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
       return res.status(400).json({ error: 'No archive file found' });
     }
 
-    const storagePath = process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
-    const fullArchivePath = path.join(storagePath, archive.archive_path);
-
-    try {
-      await fs.access(fullArchivePath);
-    } catch (error) {
-      return res.status(404).json({ error: 'Archive file not found on disk' });
+    // archiveService wrote the zip with storage.putFromFile() and deleted the
+    // originals with storage.delete(), so the zip is wherever the storage
+    // backend keeps things. Looking for it under the local STORAGE_PATH
+    // answered 404 for every archive on an S3 deployment, and the extracted
+    // files landed on local disk where the gallery never looked for them.
+    const storage = getStorage();
+    if (!(await storage.exists(archive.archive_path))) {
+      return res.status(404).json({ error: 'Archive file not found in storage' });
     }
 
-    // Extract the archive
+    const eventPrefix = path.posix.join('events/active', archive.slug);
+    // Holds the zip when the backend is remote, plus one entry at a time on
+    // its way back into storage. Never the whole extracted event.
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'picpeak-restore-'));
+    let zip = null;
     try {
-      // node-stream-zip streams each entry to disk on extract — adm-zip used
-      // to load the whole archive into a Node Buffer up front, which capped
-      // restore at 2 GiB (ERR_FS_FILE_TOO_LARGE). Real-world wedding archives
+      // node-stream-zip reads by path. Local storage hands over its own file;
+      // anything else is fetched to tmp first.
+      let zipPath = storage.kind() === 'local' ? storage.resolveLocalPath(archive.archive_path) : null;
+      if (!zipPath) {
+        zipPath = path.join(tmpDir, 'archive.zip');
+        await storage.getToFile(archive.archive_path, zipPath);
+      }
+
+      // node-stream-zip streams each entry on extract. adm-zip used to load
+      // the whole archive into a Node Buffer up front, which capped restore
+      // at 2 GiB (ERR_FS_FILE_TOO_LARGE). Real-world wedding archives
       // routinely cross that line. Credit: 8digit/picpeak@69033c6.
-      const zip = new StreamZip.async({ file: fullArchivePath });
-      const eventsDir = path.join(storagePath, 'events/active');
-      const eventDir = path.join(eventsDir, archive.slug);
+      zip = new StreamZip.async({ file: zipPath });
 
-      // Create event directory if it doesn't exist
-      await fs.mkdir(eventDir, { recursive: true });
-
-      // Log ZIP contents for debugging
-      logger.info(`Extracting archive to: ${eventDir}`);
+      logger.info(`Restoring archive into: ${eventPrefix}`);
       const entries = Object.values(await zip.entries());
       logger.info(`Archive contains ${entries.length} entries`);
 
-      // Reject ZIP-slip entries before writing anything to disk — extract()
-      // does not neutralise `../` in entry names (GHSA-jfhw-fj23-fx6x).
+      // Reject ZIP-slip entries before writing anything. Every entry becomes
+      // a storage key under the event prefix, and both backends refuse a key
+      // that climbs out, but refusing the whole archive up front beats
+      // stopping halfway through (GHSA-jfhw-fj23-fx6x).
       try {
-        assertZipEntriesWithin(entries, eventDir);
+        assertZipEntriesWithin(entries, eventPrefix);
       } catch (slipErr) {
-        await zip.close();
         logger.warn(`Refusing archive restore — unsafe entry path: ${slipErr.message}`);
         return res.status(400).json({ error: 'Archive contains invalid entry paths' });
       }
-
-      // Stream-extract everything to disk
-      await zip.extract(null, eventDir);
-      await zip.close();
 
       // Load photos manifest if present. The gallery filenames are renamed on
       // upload, so `original_filename` (and category linkage) can't be derived
@@ -270,12 +297,19 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
       // manifest the archive process writes. Older archives have no manifest;
       // we fall back to filename for those.
       const manifestByFilename = new Map();
+      // Exact match on the entry name the writer emitted, for archives that
+      // record it. Unambiguous where the basename is not: two photos sharing
+      // an original are emitted as `X.jpg` and `X_1.jpg`, and an original can
+      // equal another row's internal name.
+      const manifestByZipPath = new Map();
       // Aliases that more than one manifest row claims — see the loop below.
       const ambiguousAliases = new Set();
       try {
-        const manifestRaw = await fs.readFile(
-          path.join(eventDir, 'photos_manifest.json'), 'utf8',
-        );
+        const manifestEntry = await zip.entry('photos_manifest.json');
+        // Same ENOENT the file read used to throw, so the catch below keeps
+        // telling an absent manifest from an unreadable one.
+        if (!manifestEntry) throw Object.assign(new Error('No photos manifest in archive'), { code: 'ENOENT' });
+        const manifestRaw = (await zip.entryData(manifestEntry)).toString('utf8');
         const parsed = JSON.parse(manifestRaw);
         if (Array.isArray(parsed)) {
           // Two passes, and the order is the point. Canonical photos.filename
@@ -284,7 +318,24 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
           // result depend on manifest iteration order — the query has no
           // ORDER BY — and could delete a canonical key because some OTHER
           // row's original_filename happened to collide with it.
-          const rows = parsed.filter((m) => m && m.filename);
+          // The internal filename becomes part of the storage key the file
+          // goes back under, and posix.join folds a `..` away before either
+          // backend could refuse it. Uploads only ever write a bare leaf
+          // there, so anything else is a tampered manifest: the row is
+          // dropped and its entry restores under the name the zip gave it.
+          const rows = parsed.filter((m) => m && isBareFilename(m.filename));
+          if (rows.length !== parsed.length) {
+            logger.warn(`Photos manifest: ${parsed.length - rows.length} row(s) without a plain filename ignored`);
+          }
+
+          const zipPathCounts = new Map();
+          for (const m of rows) {
+            if (typeof m.zip_path !== 'string' || !m.zip_path) continue;
+            zipPathCounts.set(m.zip_path, (zipPathCounts.get(m.zip_path) || 0) + 1);
+          }
+          for (const m of rows) {
+            if (zipPathCounts.get(m.zip_path) === 1) manifestByZipPath.set(m.zip_path, m);
+          }
 
           // photos.filename is not unique within an event: s3AutoImporter
           // takes path.basename(entry.key) and dedupes by path, so two
@@ -329,12 +380,12 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
             // with a slash or a control byte lands under a different name than
             // the manifest records. Index both, so either spelling resolves.
             //
-            // Still not total: uniquifyZipNames() appends `_1` when two photos
-            // in one event share an original name, and that suffix cannot be
-            // reconstructed from the manifest. Those few fall through to the
-            // directory, exactly as they did before this fix — no worse, just
-            // not better. Closing that needs the emitted name recorded at
-            // archive time, which is a writer change and a new archive format.
+            // Still not total for archives written before zip_path was
+            // recorded: uniquifyZipNames() appends `_1` when two photos in
+            // one event share an original name, and that suffix cannot be
+            // reconstructed from the name columns. Those few fall through to
+            // the directory. Newer archives match on zip_path first and never
+            // reach this lookup for them.
             for (const alias of [m.original_filename, sanitizeForZipEntry(m.original_filename)]) {
               if (!alias) continue;
               // An alias colliding with someone else's canonical name is
@@ -376,7 +427,9 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
             + 'photo; those fall back to the directory for their category.'
           );
         }
-        logger.info(`Loaded photos manifest: ${manifestByFilename.size} entries`);
+        logger.info(
+          `Loaded photos manifest: ${manifestByFilename.size} name entries, ${manifestByZipPath.size} zip paths`
+        );
       } catch (e) {
         if (e.code !== 'ENOENT') {
           logger.warn('Photos manifest present but unreadable; falling back to filenames', e.message);
@@ -387,6 +440,39 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
 
       // Get list of extracted files to update database
       const extractedPhotos = [];
+
+      // Photo credits (#1561). A guest erased while the event was archived
+      // had their name cleared from rows that no longer existed, so the
+      // manifest still holds it; only a guest still on the event keeps theirs.
+      const activeGuestIds = new Set((await db('gallery_guests')
+        .where({ event_id: archive.id, is_deleted: formatBoolean(false) })
+        .pluck('id')).map(Number));
+      const creditFieldsOf = (entry) => {
+        if (!entry) return {};
+        const fields = {};
+        if (entry.uploaded_by === 'admin' || entry.uploaded_by === 'guest') fields.uploaded_by = entry.uploaded_by;
+        const source = ['guest', 'exif', 'manual'].includes(entry.credit_source) ? entry.credit_source : null;
+        const guestId = Number(entry.uploader_guest_id);
+        const guestKept = Number.isInteger(guestId) && activeGuestIds.has(guestId);
+        if (source === 'guest' && !guestKept) return fields;
+        // An admin's name on an erased guest's upload is about that guest,
+        // and goes with them (photoCredit.clearGuestCredits). Kept `manual`.
+        if (source === 'manual' && guestId > 0 && !guestKept) {
+          return { ...fields, credit_source: 'manual', credit_name: null };
+        }
+        if (source) {
+          fields.credit_source = source;
+          fields.credit_name = typeof entry.credit_name === 'string' && entry.credit_name ? entry.credit_name : null;
+        }
+        // The guest's visibility snapshot; a manifest without one (or with
+        // anything but true) restores as not shown to other guests.
+        if (source === 'guest') {
+          fields.credit_visible_to_guests = entry.credit_visible_to_guests === true
+            || entry.credit_visible_to_guests === 1;
+        }
+        if (guestKept) fields.uploader_guest_id = guestId;
+        return fields;
+      };
 
       // Category name -> id, resolved once per name for the whole restore.
       const categoriesMap = new Map();
@@ -466,125 +552,206 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
         return categoriesMap.get(categoryName);
       };
 
+      // One entry at a time through tmp and back into storage. The archive
+      // is the storage tree minus the event prefix, so the entry name is the
+      // rest of the key and the file lands exactly where it was. Every
+      // entry goes back, metadata files included, as the whole-tree extract
+      // did. A failed put fails the restore: the event stays archived with
+      // its zip intact, and a retry puts the same keys again.
+      const stagingFile = path.join(tmpDir, 'entry');
+      // Resolve every entry's destination BEFORE writing any of them. For an
+      // archive without recorded zip paths the name lookup can send two
+      // entries to one key: with original-name downloads on, one row's
+      // original can equal another row's internal name, so `b.jpg` (really
+      // row A's bytes) keeps its name while `c.jpg` resolves to row B's
+      // internal `b.jpg`, and the second put would overwrite the first.
+      // Such a group goes back under the names the zip gave it, which is
+      // what every restore did before the rename, and the collision is
+      // logged; nothing is lost, the rows just resolve as they used to.
+      const planned = [];
+      const keyCounts = new Map();
       for (const entry of entries) {
         if (entry.isDirectory) continue;
-        const filename = path.basename(entry.name);
+        const entryName = path.basename(entry.name);
+        const dirPath = path.dirname(entry.name);
         // The manifest names every photo the event held, so an entry it claims
         // is a photo whatever its extension. The extension set only has to
         // carry pre-manifest archives, and it keeps the metadata files the
         // archive writer adds alongside the photos out of the photos table.
-        const manifestEntry = manifestByFilename.get(filename);
-        const extension = path.extname(filename).toLowerCase();
-        if (manifestEntry || RESTORABLE_EXTENSIONS.has(extension)) {
-          const dirPath = path.dirname(entry.name);
-          const actualFilePath = path.join(eventDir, entry.name);
-          
-          try {
-            // Check if file was extracted successfully
-            const stats = await fs.stat(actualFilePath);
-
-            // The manifest is the only faithful source for the category, and
-            // it is authoritative INCLUDING when it says "none". A manifest
-            // entry with a null category_name means the photo was genuinely
-            // uncategorized, so falling through to the directory would
-            // contradict the very record being restored from.
-            //
-            // That matters because the directory is not a category. Archive
-            // entry names are the storage key minus `events/active/{slug}`,
-            // and that layout is `individual/{filename}` / `collages/…` —
-            // categories have never been directories there. Reading the first
-            // path segment on a real archive therefore invents categories
-            // literally named "individual" and "collages".
-            //
-            // So the fallback is confined to photos with NO manifest entry at
-            // all: archives written before the manifest existed, where the
-            // directory is the only signal left and inventing those two names
-            // is still better than losing every category.
-            // Check if photo already exists in database
-            const existingPhoto = await db('photos')
-              .where('event_id', archive.id)
-              .where('filename', filename)
-              .first();
-
-            if (!existingPhoto) {
-              // Resolved HERE, not above: resolveCategoryId find-or-CREATES,
-              // and archiveEvent retains photo rows. Resolving before this
-              // check meant restoring an archive whose rows still exist
-              // created a category from the stale manifest name that nothing
-              // then used — so renaming a category while its event was
-              // archived left the old name behind as an empty duplicate.
-              let categoryId = null;
-              if (manifestEntry) {
-                categoryId = await resolveCategoryId(manifestEntry.category_name);
-              } else if (dirPath && dirPath !== '.') {
-                categoryId = await resolveCategoryId(dirPath.split('/')[0]);
-              }
-
-              // Store relative path from storage root
-              const relativePath = path.relative(storagePath, actualFilePath);
-              const isVideoEntry = manifestEntry?.media_type === 'video'
-                || String(manifestEntry?.mime_type || '').startsWith('video/')
-                || VIDEO_EXTENSIONS.has(extension);
-              extractedPhotos.push({
-                event_id: archive.id,
-                filename: filename,
-                // Recover original_filename from the manifest if present;
-                // legacy archives without a manifest lose nothing (filename
-                // is what they had before).
-                original_filename: manifestEntry?.original_filename || filename,
-                path: relativePath,
-                thumbnail_path: null, // Will be regenerated by thumbnail service
-                // Two values, 'individual' or 'collage', and the download zip
-                // groups its folders by them. Restore used to write the file
-                // extension here, which is neither, so every restored photo
-                // filed itself under "Collages". An event restored by that
-                // code and archived again carries the extension in its
-                // manifest, so only the two real values are trusted. The
-                // archive layout is `individual/` / `collages/`, so the
-                // directory is a faithful fallback for the rest, manifest
-                // or not. Zip entry names always use '/'.
-                type: (manifestEntry?.type === 'individual' || manifestEntry?.type === 'collage')
-                  ? manifestEntry.type
-                  : (dirPath.split('/')[0] === 'collages' ? 'collage' : 'individual'),
-                // Omitted entirely before, and the column defaults to 'image',
-                // so restoring an event turned its videos into photos the
-                // player would not play. Any video signal wins over a manifest
-                // 'image': fileWatcher never sets media_type, so its videos sit
-                // at the 'image' default with a video/* mime_type, and every
-                // reader recognises them through the mime alone.
-                media_type: isVideoEntry ? 'video' : 'image',
-                // The readers' second signal, and the only one a watcher video
-                // has. Legacy archives never carried it and still resolve
-                // through the extension.
-                mime_type: manifestEntry?.mime_type || null,
-                size_bytes: stats.size,
-                category_id: categoryId,
-                // Restore order is not upload order; stamping the clock here
-                // reshuffled the whole gallery. The manifest holds whatever
-                // shape the row had, and on SQLite a `new Date()` written
-                // through knex is epoch milliseconds, so normalise to ISO
-                // rather than write the number back.
-                uploaded_at: toIso(manifestEntry?.uploaded_at) || new Date().toISOString()
-              });
-            }
-          } catch (statError) {
-            logger.error(`Failed to stat file: ${actualFilePath}`);
-            logger.error(`Entry name was: ${entry.name}`);
-            logger.error('Error:', statError.message);
-            // Skip this file if we can't stat it
-            continue;
+        // The recorded zip path is exact; the name lookup carries archives
+        // written before it was recorded.
+        const manifestEntry = manifestByZipPath.get(entry.name) || manifestByFilename.get(entryName);
+        // With general_use_original_filenames_for_downloads on at archive
+        // time the entry is named after the ORIGINAL filename, while the
+        // photo row archiveEvent kept still names the internal file in its
+        // path. The manifest row is the bridge: its filename is the internal
+        // one, so the file goes back under that name and the retained row
+        // resolves again. Restoring under the zip's name left that row
+        // pointing at a deleted object and inserted a second row beside it.
+        const filename = manifestEntry?.filename || entryName;
+        const storageKey = path.posix.join(eventPrefix, dirPath, filename);
+        keyCounts.set(storageKey, (keyCounts.get(storageKey) || 0) + 1);
+        planned.push({ entry, entryName, dirPath, manifestEntry, filename, storageKey });
+      }
+      // A fallback name can itself be another entry's resolved key (an
+      // untracked b.jpg beside a row whose original is b.jpg), so repeat
+      // until every key is unique. Each pass moves at least one more entry
+      // onto its zip name, and zip names are unique, so this terminates.
+      for (;;) {
+        let moved = 0;
+        for (const item of planned) {
+          if (keyCounts.get(item.storageKey) > 1 && item.filename !== item.entryName) {
+            logger.warn(`Archive restore: ${item.storageKey} is the destination of more than one entry; restoring ${item.entry.name} under its own name`, { eventId: archive.id });
+            item.filename = item.entryName;
+            item.storageKey = path.posix.join(eventPrefix, item.dirPath, item.entryName);
+            moved += 1;
           }
         }
+        if (!moved) break;
+        keyCounts.clear();
+        for (const item of planned) keyCounts.set(item.storageKey, (keyCounts.get(item.storageKey) || 0) + 1);
       }
-      
+
+      for (const { entry, dirPath, manifestEntry, filename, storageKey } of planned) {
+        await zip.extract(entry, stagingFile);
+        await storage.putFromFile(storageKey, stagingFile);
+        await fs.rm(stagingFile, { force: true });
+
+        const extension = path.extname(filename).toLowerCase();
+        if (!manifestEntry && !RESTORABLE_EXTENSIONS.has(extension)) continue;
+
+        // The manifest is the only faithful source for the category, and
+        // it is authoritative INCLUDING when it says "none". A manifest
+        // entry with a null category_name means the photo was genuinely
+        // uncategorized, so falling through to the directory would
+        // contradict the very record being restored from.
+        //
+        // That matters because the directory is not a category. Archive
+        // entry names are the storage key minus `events/active/{slug}`,
+        // and that layout is `individual/{filename}` / `collages/...`, so
+        // categories have never been directories there. Reading the first
+        // path segment on a real archive therefore invents categories
+        // literally named "individual" and "collages".
+        //
+        // So the fallback is confined to photos with NO manifest entry at
+        // all: archives written before the manifest existed, where the
+        // directory is the only signal left and inventing those two names
+        // is still better than losing every category.
+        // Check if photo already exists in database
+        const existingPhoto = await db('photos')
+          .where('event_id', archive.id)
+          .where('filename', filename)
+          .first();
+        if (existingPhoto) continue;
+
+        // Resolved HERE, not above: resolveCategoryId find-or-CREATES,
+        // and archiveEvent retains photo rows. Resolving before this
+        // check meant restoring an archive whose rows still exist
+        // created a category from the stale manifest name that nothing
+        // then used, so renaming a category while its event was
+        // archived left the old name behind as an empty duplicate.
+        let categoryId = null;
+        if (manifestEntry) {
+          categoryId = await resolveCategoryId(manifestEntry.category_name);
+        } else if (dirPath && dirPath !== '.') {
+          categoryId = await resolveCategoryId(dirPath.split('/')[0]);
+        }
+
+        // Folder (issue 1786): rebuilt from the recorded path. A category name
+        // that resolves to a folder (an archive written before folder_id
+        // existed) lands in folder_id too, where that photo used to render.
+        let folderId = null;
+        if (manifestEntry?.folder_path) {
+          const segments = String(manifestEntry.folder_path).split('/').filter(Boolean);
+          ({ folderId } = await folderTree.ensurePath(archive.id, segments, { canCreate: true }));
+        }
+        if (categoryId) {
+          const resolved = await db('photo_categories').where('id', categoryId).first('is_folder');
+          if (resolved && parseBooleanInput(resolved.is_folder, false)) {
+            folderId = folderId || categoryId;
+            categoryId = null;
+          }
+        }
+
+        const isVideoEntry = manifestEntry?.media_type === 'video'
+          || String(manifestEntry?.mime_type || '').startsWith('video/')
+          || VIDEO_EXTENSIONS.has(extension);
+        extractedPhotos.push({
+          event_id: archive.id,
+          filename: filename,
+          // Recover original_filename from the manifest if present;
+          // legacy archives without a manifest lose nothing (filename
+          // is what they had before).
+          original_filename: manifestEntry?.original_filename || filename,
+          path: storageKey,
+          thumbnail_path: null, // Will be regenerated by thumbnail service
+          // Two values, 'individual' or 'collage', and the download zip
+          // groups its folders by them. Restore used to write the file
+          // extension here, which is neither, so every restored photo
+          // filed itself under "Collages". An event restored by that
+          // code and archived again carries the extension in its
+          // manifest, so only the two real values are trusted. The
+          // archive layout is `individual/` / `collages/`, so the
+          // directory is a faithful fallback for the rest, manifest
+          // or not. Zip entry names always use '/'.
+          type: (manifestEntry?.type === 'individual' || manifestEntry?.type === 'collage')
+            ? manifestEntry.type
+            : (dirPath.split('/')[0] === 'collages' ? 'collage' : 'individual'),
+          // Omitted entirely before, and the column defaults to 'image',
+          // so restoring an event turned its videos into photos the
+          // player would not play. Any video signal wins over a manifest
+          // 'image': fileWatcher never sets media_type, so its videos sit
+          // at the 'image' default with a video/* mime_type, and every
+          // reader recognises them through the mime alone.
+          media_type: isVideoEntry ? 'video' : 'image',
+          // The readers' second signal, and the only one a watcher video
+          // has. Legacy archives never carried it and still resolve
+          // through the extension.
+          mime_type: manifestEntry?.mime_type || null,
+          // Uncompressed size from the central directory, which is what
+          // was just written.
+          size_bytes: entry.size,
+          category_id: categoryId,
+          folder_id: folderId,
+          first_look: formatBoolean(parseBooleanInput(manifestEntry?.first_look, false)),
+          // Restore order is not upload order; stamping the clock here
+          // reshuffled the whole gallery. The manifest holds whatever
+          // shape the row had, and on SQLite a `new Date()` written
+          // through knex is epoch milliseconds, so normalise to ISO
+          // rather than write the number back.
+          uploaded_at: toIso(manifestEntry?.uploaded_at) || new Date().toISOString(),
+          // Always written: every row goes into one multi-row insert,
+          // which on SQLite writes a key another row lacks as NULL,
+          // not the column default — and this column is NOT NULL.
+          credit_visible_to_guests: false,
+          ...creditFieldsOf(manifestEntry),
+        });
+      }
+
       // Insert new photos if any
       if (extractedPhotos.length > 0) {
         await db('photos').insert(extractedPhotos);
+        // A guest erased while this restore ran was not in the rows the
+        // erasure cleared; now that they are in, clear them (#1561).
+        const restoredGuestIds = [...new Set(extractedPhotos
+          .map((p) => p.uploader_guest_id).filter((id) => id != null))];
+        if (restoredGuestIds.length > 0) {
+          const erased = await db('gallery_guests')
+            .whereIn('id', restoredGuestIds)
+            .where('is_deleted', formatBoolean(true))
+            .pluck('id');
+          if (erased.length > 0) await clearGuestCredits(erased);
+        }
       }
-      
     } catch (extractError) {
       logger.error('Archive extraction error:', extractError);
-      return res.status(500).json({ error: 'Failed to extract archive: ' + extractError.message });
+      // The full error is in the log line above; the message can carry a
+      // storage key or a backend's own text, neither of which belongs in the
+      // response.
+      return res.status(500).json({ error: 'Failed to extract archive' });
+    } finally {
+      if (zip) await zip.close().catch(() => {});
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
     
     // Update event status
@@ -594,8 +761,8 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
     await db('events')
       .where('id', req.params.id)
       .update({
-        is_archived: false,
-        is_active: true,
+        is_archived: formatBoolean(false),
+        is_active: formatBoolean(true),
         archive_path: null,
         // Cleared with the path it measures — a restored event has no zip, and
         // a stale size would be re-shown verbatim if it is archived again
@@ -604,6 +771,14 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
         archived_at: null,
         expires_at: thirtyDaysFromNow.toISOString() // Reset expiration - works on both DBs
       });
+
+    // Browser-playable copies (issue 1430): archiving dropped them and reset
+    // the rows (archiveService). With the setting on, the restored videos are
+    // queued again here; off, they wait for the next switch-on backfill.
+    const videoRendition = require('../services/videoRenditionService');
+    if (await videoRendition.isEnabled()) {
+      await videoRendition.backfillPending({ eventId: archive.id });
+    }
 
     // Log activity
     await db('activity_logs').insert({
@@ -638,23 +813,29 @@ router.get('/:id/download', adminAuth, requirePermission('archives.download'), r
       return res.status(404).json({ error: 'Archive file not found' });
     }
 
-    // Check if file exists
-    const storagePath = process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
-    const fullArchivePath = path.join(storagePath, archive.archive_path);
-    
-    try {
-      await fs.access(fullArchivePath);
-    } catch (error) {
-      return res.status(404).json({ error: 'Archive file not found on disk' });
+    // The zip is in the storage backend, not necessarily on local disk.
+    const storage = getStorage();
+    const stats = await storage.stat(archive.archive_path);
+    if (!stats) {
+      return res.status(404).json({ error: 'Archive file not found in storage' });
     }
+
+    // Open the body BEFORE the zip headers go on: on S3 `get` awaits the
+    // GetObject call and can reject after `stat` succeeded (the object was
+    // deleted in between, or a transient). With the headers already set, the
+    // route's catch would answer a JSON error under application/zip and a
+    // stale Content-Length, so the browser saves a broken "slug.zip".
+    const body = await storage.get(archive.archive_path);
 
     // Set headers for download
     res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Length', stats.size);
     res.setHeader('Content-Disposition', `attachment; filename="${archive.slug}.zip"`);
 
-    // Stream the file
-    const fileStream = require('fs').createReadStream(fullArchivePath);
-    fileStream.pipe(res);
+    // Stream the file. The helper owns the error path: a local read stream
+    // opens lazily and an S3 body can drop mid-transfer, and either error
+    // with no listener would take the process down.
+    pipeStreamToResponse(body, res, { context: 'archive' });
 
     // Log download
     await db('activity_logs').insert({
@@ -683,15 +864,13 @@ router.delete('/:id', adminAuth, requirePermission('archives.delete'), requireEv
       return res.status(404).json({ error: 'Archive not found' });
     }
 
-    // Delete archive file if exists
+    // Delete archive file if exists. Through the storage backend: on an S3
+    // deployment the local path never had it, so the zip outlived the event.
+    // Not caught: delete() already treats a missing object as done, so an
+    // error here is the backend refusing, and dropping the event row anyway
+    // would leave the zip in the bucket with nothing left to retry from.
     if (archive.archive_path) {
-      try {
-        const storagePath = process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
-        const fullArchivePath = path.join(storagePath, archive.archive_path);
-        await fs.unlink(fullArchivePath);
-      } catch (error) {
-        logger.error('Failed to delete archive file:', error);
-      }
+      await getStorage().delete(archive.archive_path);
     }
 
     // Delete thumbnails for this event
@@ -709,21 +888,44 @@ router.delete('/:id', adminAuth, requirePermission('archives.delete'), requireEv
       }
     }
 
-    // Face data (#1074, #1132). This route deletes the event row directly and
-    // relies on the FK cascade, but SQLite only honours ON DELETE CASCADE with
-    // `PRAGMA foreign_keys = ON`, which PicPeak does not set — and
-    // event_people_merge_dismissals has no event FK at all, on either engine.
-    // archiveEvent's purge step is deliberately nonfatal, so an event can
-    // still be carrying face data when it reaches this permanent delete.
-    // Delete explicitly, the same way deleteEventCascade does.
-    await db('photo_faces').where('event_id', req.params.id).del();
-    await db('event_people').where('event_id', req.params.id).del();
-    if (await db.schema.hasTable('event_people_merge_dismissals')) {
-      await db('event_people_merge_dismissals').where('event_id', req.params.id).del();
-    }
-
-    // Delete from database (cascade will delete photos and logs)
-    await db('events').where('id', req.params.id).delete();
+    // The child rows, explicitly, then the event. This used to delete the
+    // event row alone and rely on the FK cascade, but activity_logs,
+    // access_logs and email_queue reference events WITHOUT ON DELETE CASCADE
+    // (db.js), so on PostgreSQL the delete failed on the foreign key. SQLite
+    // never enforces the keys (PicPeak does not set `PRAGMA foreign_keys =
+    // ON`), which is why it went unnoticed there — and why the declared
+    // cascades on photo_faces, event_download_grants and feedback_rate_limits
+    // are inert there too. Same table list and order as deleteEventCascade
+    // (adminEvents/helpers.js), which carries the reasons for each one; not
+    // reused because it sweeps and audits as an event delete, and this is an
+    // archive delete.
+    const hasMergeDismissals = await db.schema.hasTable('event_people_merge_dismissals');
+    const hasDownloadGrants = await db.schema.hasTable('event_download_grants');
+    await db.transaction(async (trx) => {
+      // Event row first (issue 1560): the download-limit grants lock the
+      // event row and then grant/photo rows, so taking them here in the
+      // opposite order could deadlock on PostgreSQL.
+      if (trx.client.config.client === 'pg') {
+        await trx('events').where({ id: req.params.id }).forUpdate().first();
+      }
+      await trx('activity_logs').where('event_id', req.params.id).del();
+      await trx('access_logs').where('event_id', req.params.id).del();
+      await trx('email_queue').where('event_id', req.params.id).del();
+      // Face data (#1074, #1132): archiveEvent's purge step is deliberately
+      // nonfatal, so an event can still be carrying it here.
+      await trx('photo_faces').where('event_id', req.params.id).del();
+      await trx('event_people').where('event_id', req.params.id).del();
+      if (hasMergeDismissals) {
+        await trx('event_people_merge_dismissals').where('event_id', req.params.id).del();
+      }
+      if (hasDownloadGrants) {
+        await trx('event_download_grants').where('event_id', req.params.id).del();
+      }
+      await trx('feedback_rate_limits').where('event_id', req.params.id).del();
+      await trx('photos').where('event_id', req.params.id).del();
+      await deleteWithAccountingHistory(trx, 'events', { id: req.params.id },
+        { actor: req.admin.id, source: 'archive.delete' });
+    });
 
     // Log activity
     await db('activity_logs').insert({

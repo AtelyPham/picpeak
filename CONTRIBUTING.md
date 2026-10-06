@@ -55,6 +55,40 @@ Unsure where to begin? You can start by looking through these issues:
 
 > **📸 Screenshots are required for UI changes.** Any PR that changes a user-facing surface — a component, page, layout, style, or in-app copy — must include at least one screenshot of the result in the PR description, showing before/after where it helps reviewers see the difference. PRs that touch the UI without a screenshot will be asked to add one before review. Backend-only or otherwise non-visual changes don't need one.
 
+#### Where screenshots live
+
+- **Contributors working from a fork:** drag the image into the PR description or a comment. GitHub hosts it for you; there is nothing to push.
+- **Maintainers and anyone pushing to this repository:** commit screenshots to the `pr-assets` branch, never to a branch of their own. `pr-assets` is an orphan branch that holds only images, one folder per PR or issue:
+
+  ```
+  screenshots/<issue-or-pr>-<n>/<file>.png     # e.g. screenshots/1446-2/sign-step-dark.png
+  issue-assets/<topic>/<file>.png              # images for issue reports
+  ```
+
+  Link them through `raw.githubusercontent.com`:
+
+  ```markdown
+  <img width="420" alt="Sign step, dark" src="https://raw.githubusercontent.com/PicPeak/picpeak/pr-assets/screenshots/1446-2/sign-step-dark.png" />
+  ```
+
+  To add images, check the branch out in a separate worktree so your working branch stays untouched:
+
+  ```bash
+  git fetch origin pr-assets
+  git worktree add ../picpeak-pr-assets pr-assets
+  mkdir -p ../picpeak-pr-assets/screenshots/1446-2
+  cp ~/Desktop/sign-step-*.png ../picpeak-pr-assets/screenshots/1446-2/
+  git -C ../picpeak-pr-assets add screenshots/1446-2
+  git -C ../picpeak-pr-assets commit -m "chore: screenshots for 1446"
+  git -C ../picpeak-pr-assets push origin pr-assets
+  ```
+
+  Rules for `pr-assets`:
+  - Never delete it or force-push it. Every older PR and issue loads its images from it.
+  - Don't overwrite an existing file. Add a new name, such as `-v2.png`, because the raw CDN can keep serving the old image for a while.
+  - Images only (PNG/JPEG/WebP/GIF, short MP4/WebM). No code, no secrets, and nothing that shows real customer data.
+  - Don't create new `screenshots/*` branches; the old ones were folded into `pr-assets`.
+
 ## 💻 Development Setup
 
 ### Prerequisites
@@ -109,9 +143,38 @@ cd backend && npm test
 # Frontend tests
 cd frontend && npm test
 
-# E2E tests
-npm run test:e2e
+# E2E tests (needs Docker; see below)
+scripts/e2e.sh
 ```
+
+#### E2E suite
+
+`scripts/e2e.sh` runs the Playwright suite in `tests/e2e` against its own stack, `docker-compose.e2e.yml`. That stack uses compose project `picpeak-e2e` and ports 7200–7225, so it does not touch a dev stack you already have running. The script:
+
+1. builds the images from your checkout and starts the stack on an empty database
+2. waits for every service to be healthy
+3. seeds a known state: admin `admin@example.com` with a password generated for this run (saved with the other generated credentials in `.e2e/credentials.env`), no forced password change, auth rate limit raised, OIDC off
+4. runs Playwright, passing along any arguments you give it
+5. tears the stack down again
+
+```bash
+npx playwright install chromium                     # once
+scripts/e2e.sh                                      # every spec, both projects
+scripts/e2e.sh --project=chromium --grep @smoke     # the subset CI runs on PRs
+E2E_KEEP_STACK=1 scripts/e2e.sh tests/e2e/seo-settings.spec.ts   # keep the stack up afterwards
+E2E_NO_BUILD=1 scripts/e2e.sh                       # reuse the images from the last run
+```
+
+With the stack kept up you can also run `npx playwright test` on its own after loading the run's credentials: `set -a; . .e2e/credentials.env; set +a`. On failure, traces are in `test-results/` (`npx playwright show-trace <trace.zip>`) and the backend log is saved to `test-results/e2e-backend.log`.
+
+When writing a spec:
+
+- create the data it needs through the API, and don't depend on what other specs leave behind
+- restore any global setting it changes in a `finally` block or an `afterEach`, so a failed assertion doesn't leak into later specs
+- log in through `tests/e2e/_helpers/admin.ts`, and prefer role + exact name or `data-testid` locators over label regexes, which start matching a second element as soon as the UI grows one
+- tag it `@smoke` in the test title if it is fast and covers a core flow
+
+CI runs the `@smoke` subset on every pull request, and every spec on both projects nightly (`.github/workflows/e2e.yml`).
 
 ## 📝 Styleguides
 
@@ -144,6 +207,13 @@ npm run test:e2e
 * Use TypeScript for type safety
 * Follow the existing folder structure
 * Write tests for new components
+* Settings forms save through the shared `SettingsSaveBar` (`frontend/src/components/admin/SettingsSaveBar.tsx`): keep a snapshot of what the server sent, derive `isDirty` by comparing the draft to it, and render the bar as the last child of the page. No per-card Save buttons; instant-save switches stay instant.
+
+### Styling
+
+* Admin code styles through the UI tokens: `bg-panel`, `text-body`, `border-line`, ... (see `frontend/STYLING.md`). No `dark:` neutral pairs — the lint rule refuses them, `npm run codemod:ui-tokens` rewrites them.
+* Never read a theme token (`var(--color-*)`, `bg-surface`, `text-theme`) in admin code; those belong to the operator-themed gallery and portal.
+* A new shade is a new token in `frontend/src/styles/tokens.css`, not a raw palette class in a component.
 
 ## 📦 Project Structure
 
@@ -173,6 +243,8 @@ PicPeak runs on two long-lived branches:
 |---|---|---|
 | **`main`** | Active development. The next release is being assembled here. | Feature PRs. Most bugfix PRs. |
 | **`stable`** | Curated release channel. Production-recommended. | Security fixes and regular bugfix backports, kept small and free of unrelated features. |
+
+A third branch, `pr-assets`, only hosts PR and issue screenshots. It never holds code, and no PR targets it (see [Where screenshots live](#where-screenshots-live)).
 
 ### Which branch should my PR target?
 

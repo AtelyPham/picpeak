@@ -89,8 +89,66 @@ declare global {
   }
 }
 
+// The admin UI, including its login page. Matched the way the router matches
+// routes: case-insensitively, on the percent-decoded path, so `/ADMIN` or
+// `/%61dmin` counts too. A path that cannot be decoded counts as admin.
+// Pages whose URL carries a bearer secret, or whose session holds one:
+//   - the /s/ short links (the slug redeems to a gallery share URL);
+//   - the customer portal tree (/customer/*): login, invite/reset tokens and
+//     the cookie-authenticated portal pages behind them;
+//   - invitation, quote, contract, payment-check and transfer tokens.
+// A tracker that auto-collects page views would ship the token to the
+// analytics host, where anyone with access to the events could redeem it
+// first; and the tracker script (vendor code re-served through our origin, or
+// the admin-pasted custom head HTML) runs with whatever that page can do —
+// act as the signed-in customer. These pages get no tracker and no custom
+// head scripts, admin-style (Codex security audit 2026-09-30; customer tree
+// and short links added 2026-10-03). Gallery pages (/gallery/:slug/:token)
+// stay tracked by maintainer decision: their share token is redacted by
+// trackPageView and by the maskPatterns list in App.tsx (GHSA-7m6c), which is
+// also the second line of defence for a page view recorded just before a
+// client-side navigation onto one of the paths below.
+const CREDENTIAL_PATH_PREFIXES = [
+  '/s/', '/customer/', '/invite/', '/quote/', '/contract/', '/payment-check/',
+  '/transfer/', '/transfer-upload/',
+];
+const isCredentialPath = (pathname: string) => {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return true;
+  }
+  const lower = decoded.toLowerCase().replace(/\/{2,}/g, '/');
+  // `/customer` (the portal index) counts like `/customer/…`.
+  return CREDENTIAL_PATH_PREFIXES.some((prefix) => lower.startsWith(prefix) || lower === prefix.slice(0, -1));
+};
+
+/** No tracker and no third-party head scripts here. */
+const isUntrackedPath = (pathname: string) => isAdminPath(pathname) || isCredentialPath(pathname);
+
+const isAdminPath = (pathname: string) => {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return true;
+  }
+  const normalized = decoded.toLowerCase().replace(/\/{2,}/g, '/');
+  return normalized === '/admin' || normalized.startsWith('/admin/');
+};
+
 class AnalyticsService {
   private initialized = false;
+  private customHeadHtml = '';
+  private customHeadInjected = false;
+  // Umami/Rybbit script served through the same-origin tracker proxy. Like
+  // the custom head HTML it runs with the privileges of whoever is signed in
+  // on this origin, so it is kept out of the admin UI the same way.
+  private trackerScript: HTMLScriptElement | null = null;
+  private trackerScriptInjected = false;
+  // Overridable in tests: jsdom cannot reload.
+  reloadPage = () => { window.location.reload(); };
   private provider: TrackerProvider = 'none';
   private websiteId: string | null = null;
 
@@ -127,7 +185,8 @@ class AnalyticsService {
       if (config.autoTrack !== true) script.setAttribute('data-auto-track', 'false');
       if (config.doNotTrack !== false) script.setAttribute('data-do-not-track', 'true');
       if (config.domains?.length) script.setAttribute('data-domains', config.domains.join(','));
-      document.head.appendChild(script);
+      this.trackerScript = script;
+      if (!isUntrackedPath(window.location.pathname)) this.injectTrackerScript();
     } else if (config.provider === 'rybbit') {
       if (!config.websiteId || !config.hostUrl) {
         console.warn('Rybbit: missing websiteId or hostUrl');
@@ -152,32 +211,14 @@ class AnalyticsService {
       if (config.maskPatterns?.length) {
         script.setAttribute('data-mask-patterns', JSON.stringify(config.maskPatterns));
       }
-      document.head.appendChild(script);
+      this.trackerScript = script;
+      if (!isUntrackedPath(window.location.pathname)) this.injectTrackerScript();
     } else if (config.provider === 'custom') {
-      // The admin-pasted HTML is sanitised server-side (see
-      // backend `customScriptSanitiser.js`). We render it via a wrapper
-      // <div> and move each child node into <head> so <script> tags
-      // execute. Using innerHTML on a <head> directly is also fine
-      // here — the child nodes get parsed and inserted in order.
-      const html = (config.customHeadHtml || '').trim();
-      if (html) {
-        const container = document.createElement('div');
-        container.innerHTML = html;
-        // Re-create <script> elements so the browser actually evaluates
-        // them — assigning innerHTML to a parent inserts the nodes but
-        // doesn't trigger script execution per the HTML spec.
-        Array.from(container.childNodes).forEach((node) => {
-          if (node.nodeName === 'SCRIPT') {
-            const orig = node as HTMLScriptElement;
-            const fresh = document.createElement('script');
-            Array.from(orig.attributes).forEach((attr) => fresh.setAttribute(attr.name, attr.value));
-            if (orig.textContent) fresh.textContent = orig.textContent;
-            document.head.appendChild(fresh);
-          } else {
-            document.head.appendChild(node);
-          }
-        });
-      }
+      this.customHeadHtml = (config.customHeadHtml || '').trim();
+      // Scripts pasted here run with the privileges of whoever is signed in on
+      // this origin, so they are kept out of the admin UI. A visit that starts
+      // on an admin route defers them until a public route is shown.
+      if (!isUntrackedPath(window.location.pathname)) this.injectCustomHead();
     }
 
     this.provider = config.provider;
@@ -218,6 +259,62 @@ class AnalyticsService {
     }
   }
 
+  /**
+   * Keep the custom head HTML and the Umami/Rybbit tracker script out of the
+   * admin UI across in-app navigation:
+   * run it once a public route is shown, and reload into a clean document when
+   * the admin UI is entered after it already ran in this page.
+   */
+  handleRouteChange(pathname: string) {
+    if (this.provider === 'umami' || this.provider === 'rybbit') {
+      if (!this.trackerScript) return;
+      if (isUntrackedPath(pathname)) {
+        if (this.trackerScriptInjected) this.reloadPage();
+        return;
+      }
+      this.injectTrackerScript();
+      return;
+    }
+    if (this.provider !== 'custom' || !this.customHeadHtml) return;
+    if (isUntrackedPath(pathname)) {
+      if (this.customHeadInjected) this.reloadPage();
+      return;
+    }
+    this.injectCustomHead();
+  }
+
+  private injectTrackerScript() {
+    if (this.trackerScriptInjected || !this.trackerScript) return;
+    this.trackerScriptInjected = true;
+    document.head.appendChild(this.trackerScript);
+  }
+
+  private injectCustomHead() {
+    if (this.customHeadInjected || !this.customHeadHtml) return;
+    this.customHeadInjected = true;
+    // The admin-pasted HTML is sanitised server-side (see
+    // backend `customScriptSanitiser.js`). We render it via a wrapper
+    // <div> and move each child node into <head> so <script> tags
+    // execute. Using innerHTML on a <head> directly is also fine
+    // here — the child nodes get parsed and inserted in order.
+    const container = document.createElement('div');
+    container.innerHTML = this.customHeadHtml;
+    // Re-create <script> elements so the browser actually evaluates
+    // them — assigning innerHTML to a parent inserts the nodes but
+    // doesn't trigger script execution per the HTML spec.
+    Array.from(container.childNodes).forEach((node) => {
+      if (node.nodeName === 'SCRIPT') {
+        const orig = node as HTMLScriptElement;
+        const fresh = document.createElement('script');
+        Array.from(orig.attributes).forEach((attr) => fresh.setAttribute(attr.name, attr.value));
+        if (orig.textContent) fresh.textContent = orig.textContent;
+        document.head.appendChild(fresh);
+      } else {
+        document.head.appendChild(node);
+      }
+    });
+  }
+
   trackPageView(url?: string, referrer?: string) {
     if (!this.initialized) return;
     // Only Umami is manually tracked here: its auto-track is disabled (so the
@@ -226,11 +323,17 @@ class AnalyticsService {
     // data-mask-patterns doing the redaction, so a manual call would
     // double-count — skip it. 'none'/'custom' have no page-view API.
     if (this.provider !== 'umami' || typeof window === 'undefined') return;
+    const raw = url ?? window.location.pathname;
+    // Untracked pages record nothing, even while the tracker is still loaded:
+    // useAnalytics calls handleRouteChange (which schedules the reload that
+    // unloads it) and then trackPageView in the same effect, so without this
+    // the first view of a portal or token page would still reach the
+    // collector from the old document.
+    if (isUntrackedPath(raw.split('?')[0].split('#')[0])) return;
     // The script tag is injected async, so `window.umami` is absent until it
     // has loaded; a route change before that is simply not recorded.
     const umami = window.umami;
     if (!umami) return;
-    const raw = url ?? window.location.pathname;
     const safe = this.sanitizeTrackedUrl(raw);
     try {
       if (typeof umami.track === 'function') {
@@ -297,6 +400,7 @@ export const useAnalytics = () => {
   const location = useLocation();
 
   useEffect(() => {
+    analyticsService.handleRouteChange(location.pathname);
     // Track page views on route change
     analyticsService.trackPageView(location.pathname + location.search);
   }, [location]);

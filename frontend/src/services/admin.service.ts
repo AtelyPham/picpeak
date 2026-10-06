@@ -1,5 +1,6 @@
 import { api } from '../config/api';
 import i18n from '../i18n/config';
+import { mediaSplitLabel, splitMediaCount } from '../utils/mediaCounts';
 
 /**
  * Per-flag display labels for activity-log rendering. Values are
@@ -60,7 +61,9 @@ export function formatFeatureFlagsChanged(
 export interface DashboardStats {
   activeEvents: number;
   expiringEvents: number;
+  // Rows of either type; totalVideos is how many of them are videos.
   totalPhotos: number;
+  totalVideos?: number;
   // Real bytes under the storage root — thumbnails, previews, hero
   // renditions, download caches and any managed originals (#1164). Null when
   // the measurement failed, which the UI must show as unavailable rather than
@@ -208,6 +211,10 @@ export type ActivityType =
   | "webhook_deleted"
   | "api_token_created"
   | "api_token_revoked"
+  // v1 original downloads (issue 1473).
+  | "api_photo_downloaded"
+  | "api_photos_downloaded"
+  | "api_photos_zip_downloaded"
   | "event_type_created"
   | "event_type_updated"
   | "event_type_deleted"
@@ -464,7 +471,7 @@ export const adminService = {
     const md = activity.metadata || {};
     const messages: Record<string, string> = {
       'event_created': `New event created: ${activity.eventName || 'Unknown'}`,
-      'photos_uploaded': `${md.count || 0} photos uploaded to ${activity.eventName || 'Unknown'}`,
+      'photos_uploaded': `${md.videoCount > 0 ? mediaSplitLabel(i18n.t, splitMediaCount(md.count, md.videoCount)) : `${md.count || 0} photos`} uploaded to ${activity.eventName || 'Unknown'}`,
       'event_archived': `Event archived: ${activity.eventName || 'Unknown'}`,
       'event_published': `Event published: ${activity.eventName || md.event_name || 'Unknown'}`,
       'event_logo_uploaded': `Event logo uploaded for ${activity.eventName || 'Unknown'}`,
@@ -513,6 +520,9 @@ export const adminService = {
       'webhook_deleted': `Webhook deleted: ${md.name || ''}`,
       'api_token_created': `API token created: ${md.name || ''}`,
       'api_token_revoked': `API token revoked: ${md.name || ''}`,
+      'api_photo_downloaded': `Original downloaded from ${activity.eventName || 'Unknown'} with API token #${md.token_id ?? ''}`,
+      'api_photos_downloaded': `API token "${md.token_name || ''}" downloaded ${md.count || 0} originals from ${activity.eventName || 'Unknown'}`,
+      'api_photos_zip_downloaded': `API token "${md.token_name || ''}" downloaded a ZIP of ${md.photo_count || 0} originals from ${activity.eventName || 'Unknown'}`,
       'event_type_created': `Event type created: ${md.name || ''}`,
       'event_type_updated': `Event type updated: ${md.name || ''}`,
       'event_type_deleted': `Event type deleted: ${md.name || ''}`,

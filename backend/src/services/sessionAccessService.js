@@ -42,13 +42,25 @@ class SessionAccessService {
         .where({ 'admin_users.id': session.id, 'admin_users.is_active': formatBoolean(true) })
         .select('admin_users.id', 'admin_users.username', 'admin_users.email',
           'admin_users.password_changed_at', 'roles.id as role_id', 'roles.name as role_name',
-          ...(includeProfile ? ['admin_users.must_change_password', 'roles.display_name as role_display_name'] : []))
+          // Always projected, never behind includeProfile: it is a security
+          // flag, not profile decoration. Gating it meant a caller that forgot
+          // to ask silently read `undefined` and skipped the gate - which is
+          // exactly how the roles-join fallback and the gallery preview each
+          // ended up bypassing it. The column is self-healed at boot
+          // (database/db.js:384) and the backend refuses to serve a
+          // half-migrated schema, so it is always there to select.
+          'admin_users.must_change_password',
+          ...(includeProfile ? ['roles.display_name as role_display_name'] : []))
         .first();
     } catch (error) {
       if (!isMissingRolesSchema(error)) throw error;
+      // Same projection as the joined query for everything that is not a
+      // roles column: adminAuth reads must_change_password off this account to
+      // gate every request, so dropping it here turned the 403 into a silent
+      // pass on exactly the upgrade-window installs this fallback exists for.
       account = await db('admin_users')
         .where({ id: session.id, is_active: formatBoolean(true) })
-        .select('id', 'username', 'email', 'password_changed_at').first();
+        .select('id', 'username', 'email', 'password_changed_at', 'must_change_password').first();
       if (account) Object.assign(account, { role_id: null, role_name: 'super_admin' });
     }
     if (!account) throw new AppError('Invalid token', 401, 'ADMIN_NOT_FOUND');
@@ -60,6 +72,15 @@ class SessionAccessService {
     if (!derived) await this.assertActive(session, 'customer');
     if (!Number.isInteger(session.customerId)) {
       throw new AppError('Invalid customer session', 401, 'CUSTOMER_NOT_FOUND');
+    }
+    // A gallery token minted from the portal carries the portal session's
+    // identity, so logging out of the portal ends it too. Tokens minted before
+    // that claim existed carry none and run out on their own (24h at most).
+    if (derived && Number.isFinite(session.parentIat) && await isTokenRevoked({
+      type: 'customer', customerId: session.customerId, iat: session.parentIat,
+      ...(session.parentJti && { jti: session.parentJti }),
+    })) {
+      throw new AppError('Token has been revoked', 401, 'TOKEN_REVOKED');
     }
     const account = await db('customer_accounts')
       .where({ id: session.customerId, is_active: formatBoolean(true) })

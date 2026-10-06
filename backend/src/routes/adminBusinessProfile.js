@@ -25,6 +25,7 @@ const { getStoragePath } = require('../config/storage');
 const { uploadedPdfLogoPath } = require('../utils/safePath');
 const { validateFileType, validateFileContent, ALLOWED_MEDIA_TYPES } = require('../utils/fileSecurityUtils');
 const businessProfileService = require('../services/businessProfileService');
+const accountingHistory = require('../services/accountingHistory');
 const { db } = require('../database/db');
 const { validateIban } = require('../utils/iban');
 const { validationResult } = require('express-validator');
@@ -169,6 +170,8 @@ function transformProfile(p) {
     // null = no global default; the hours page then requires a per-
     // customer or per-entry rate.
     defaultHourlyRateMinor: p.default_hourly_rate_minor == null ? null : Number(p.default_hourly_rate_minor),
+    // Install-wide fallback day rate (migration 220), minor units.
+    defaultDayRateMinor: p.default_day_rate_minor == null ? null : Number(p.default_day_rate_minor),
     defaultCurrency: p.default_currency || 'CHF',
     defaultLocale: p.default_locale || 'de',
     defaultQrFormat: p.default_qr_format || 'none',
@@ -255,6 +258,17 @@ router.get(
   })
 );
 
+// ---- GET /history -----------------------------------------------------
+// Change history (migration 219) of the profile and its bank accounts,
+// oldest first. Same gate as the profile itself.
+router.get(
+  '/history',
+  requirePermission(['settings.view', 'settings.banking']),
+  handleAsync(async (_req, res) => successResponse(res, {
+    entries: await accountingHistory.listHistory('business_profile', 1),
+  }))
+);
+
 // ---- GET /logo-diagnostic ---------------------------------------------
 // Diagnostic for "logo doesn't appear on PDF" tickets. Returns the
 // configured logo sources (business_profile.logo_path,
@@ -283,8 +297,15 @@ router.get(
     // to answer "which candidate did/didn't exist", which relative paths answer
     // just as well without handing out the filesystem layout.
     const cwdStorage = path.join(process.cwd(), 'storage');
+    // Each root under its configured name and its real path: resolveLogoFile
+    // returns the real path it checked, which differs from the configured
+    // root whenever that root sits behind a symlink.
+    const realRoot = (root) => { try { return fs.realpathSync(root); } catch { return null; } };
+    const namedRoots = [['STORAGE', storageRoot], ['CWD_STORAGE', cwdStorage]]
+      .flatMap(([name, root]) => [[name, root], [name, realRoot(root)]])
+      .filter(([, root]) => root);
     const relativise = (p) => {
-      for (const [name, root] of [['STORAGE', storageRoot], ['CWD_STORAGE', cwdStorage]]) {
+      for (const [name, root] of namedRoots) {
         const rel = path.relative(root, p);
         if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
           return `<${name}>/${rel.split(path.sep).join('/')}`;
@@ -463,6 +484,7 @@ router.put(
     // legitimate 0 (which we treat as "explicitly free"), so use the
     // nullable form and let the service coerce.
     body('defaultHourlyRateMinor').optional({ nullable: true }).isInt({ min: 0 }),
+    body('defaultDayRateMinor').optional({ nullable: true }).isInt({ min: 0 }),
     body('defaultCurrency').optional({ values: 'falsy' }).isString().isLength({ min: 3, max: 3 }),
     body('defaultLocale').optional({ values: 'falsy' }).isString().isLength({ max: 8 }),
     body('defaultQrFormat').optional({ values: 'falsy' }).isIn(['swiss', 'epc', 'none']),
@@ -475,7 +497,9 @@ router.put(
     // cleanup path already trusts to name a file this route wrote.
     body('logoPath').optional({ values: 'falsy' }).isString().isLength({ max: 512 })
       .custom((value) => {
-        if (!uploadedPdfLogoPath(value, getStoragePath())) {
+        // Image extensions only: a pdf-logo-* file with any other extension
+        // can only predate the MIME-derived extension, and is not a logo.
+        if (!uploadedPdfLogoPath(value, getStoragePath(), { imageOnly: true })) {
           throw new Error('logoPath must be a path produced by the logo upload endpoint');
         }
         return true;
@@ -537,6 +561,7 @@ router.put(
       vatLabel: 'vat_label',
       vatRateDefault: 'vat_rate_default',
       defaultHourlyRateMinor: 'default_hourly_rate_minor',
+      defaultDayRateMinor: 'default_day_rate_minor',
       defaultCurrency: 'default_currency',
       defaultLocale: 'default_locale',
       defaultQrFormat: 'default_qr_format',

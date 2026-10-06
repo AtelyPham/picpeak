@@ -655,4 +655,146 @@ describe('newsletter campaigns', () => {
       expect(JSON.parse(log.metadata).source).toBe('portal');
     });
   });
+
+  // ---- customer groups as a segment (#1443) ---------------------------------
+
+  describe('groups', () => {
+    let groupSeq = 0;
+    async function seedGroup(overrides = {}) {
+      groupSeq += 1;
+      const name = `Segment ${groupSeq}`;
+      const [id] = await db('customer_groups').insert({
+        name, name_key: name.toLowerCase(), color: '#2563EB', sort_order: groupSeq, is_archived: false,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...overrides,
+      }).returning('id');
+      return typeof id === 'object' ? id.id : id;
+    }
+    const join = (groupId, customerId) => db('customer_group_members')
+      .insert({ group_id: groupId, customer_account_id: customerId });
+    const emails = async (campaign) => (await newsletterService.resolveRecipients(campaign))
+      .recipients.map((r) => r.email).sort();
+
+    beforeEach(async () => {
+      await db('customer_group_members').del();
+      await db('customer_groups').del();
+    });
+
+    it('sends to the members of any selected group, or only to those in all of them', async () => {
+      const a = await seedGroup();
+      const b = await seedGroup();
+      const both = await seedCustomer({ email: 'both@example.com' });
+      const onlyA = await seedCustomer({ email: 'only-a@example.com' });
+      await seedCustomer({ email: 'none@example.com' });
+      await join(a, both.id); await join(b, both.id); await join(a, onlyA.id);
+
+      const any = await seedCampaign({ recipientMode: 'groups', groupIds: [a, b] });
+      expect(any.recipient_mode).toBe('groups');
+      expect(await emails(any)).toEqual(['both@example.com', 'only-a@example.com']);
+      const all = await seedCampaign({ recipientMode: 'groups', groupIds: [a, b], groupMatch: 'all' });
+      expect(await emails(all)).toEqual(['both@example.com']);
+    });
+
+    it('leaves out deactivated and opted-out members exactly as all_active does', async () => {
+      const g = await seedGroup();
+      const inGroup = await seedCustomer({ email: 'in@example.com' });
+      const gone = await seedCustomer({ email: 'gone@example.com', is_active: 0 });
+      const out = await seedCustomer({ email: 'out@example.com', marketing_opt_out: 1 });
+      for (const c of [inGroup, gone, out]) await join(g, c.id);
+
+      const campaign = await seedCampaign({ recipientMode: 'groups', groupIds: [g] });
+      const { recipients, skippedOptOut } = await newsletterService.resolveRecipients(campaign);
+      expect(recipients.map((r) => r.email)).toEqual(['in@example.com']);
+      expect(skippedOptOut).toBe(1);
+    });
+
+    it('refuses to save a groups rule with no group, an unknown group or an archived one', async () => {
+      const archived = await seedGroup({ is_archived: true });
+      await expect(seedCampaign({ recipientMode: 'groups', groupIds: [] }))
+        .rejects.toMatchObject({ statusCode: 400 });
+      await expect(seedCampaign({ recipientMode: 'groups', groupIds: [999999] }))
+        .rejects.toMatchObject({ statusCode: 404, code: 'GROUP_NOT_FOUND' });
+      await expect(seedCampaign({ recipientMode: 'groups', groupIds: [archived] }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'GROUP_ARCHIVED' });
+
+      const live = await seedGroup();
+      const campaign = await seedCampaign({ recipientMode: 'groups', groupIds: [live] });
+      await expect(newsletterService.updateCampaign(campaign.id, { groupIds: [live, archived] }, adminId))
+        .rejects.toMatchObject({ statusCode: 400 });
+      await expect(newsletterService.updateCampaign(campaign.id, { groupMatch: 'some' }, adminId))
+        .rejects.toMatchObject({ statusCode: 400 });
+    });
+
+    it('keeps the manual selection and the groups rule side by side when the mode changes', async () => {
+      const g = await seedGroup();
+      const c = await seedCustomer({ email: 'kept@example.com' });
+      const campaign = await seedCampaign({ recipientMode: 'manual', customerIds: [c.id] });
+      const grouped = await newsletterService.updateCampaign(campaign.id, { recipientMode: 'groups', groupIds: [g], groupMatch: 'all' }, adminId);
+      expect(JSON.parse(grouped.recipient_filter)).toEqual({ customerIds: [c.id], groupIds: [g], match: 'all' });
+      const manual = await newsletterService.updateCampaign(campaign.id, { recipientMode: 'manual' }, adminId);
+      expect(await emails(manual)).toEqual(['kept@example.com']);
+    });
+
+    it('reads membership when the campaign is queued, and a group deleted since contributes nobody', async () => {
+      const kept = await seedGroup();
+      const dropped = await seedGroup();
+      const a = await seedCustomer({ email: 'a@example.com' });
+      const b = await seedCustomer({ email: 'b@example.com' });
+      await join(kept, a.id);
+      const campaign = await seedCampaign({ recipientMode: 'groups', groupIds: [kept, dropped] });
+
+      // After the draft was saved: b joins the kept group, the other group is deleted.
+      await join(kept, b.id);
+      await db('customer_groups').where({ id: dropped }).del();
+
+      await newsletterService.queueCampaign(campaign.id, adminId);
+      const sent = (await db('email_campaign_recipients').where({ campaign_id: campaign.id }).pluck('email')).sort();
+      expect(sent).toEqual(['a@example.com', 'b@example.com']);
+    });
+
+    it('lets a group archived after the draft was saved contribute nobody, with any and with all', async () => {
+      const kept = await seedGroup();
+      const retired = await seedGroup();
+      const both = await seedCustomer({ email: 'both@example.com' });
+      const onlyRetired = await seedCustomer({ email: 'only-retired@example.com' });
+      await join(kept, both.id); await join(retired, both.id); await join(retired, onlyRetired.id);
+      const any = await seedCampaign({ recipientMode: 'groups', groupIds: [kept, retired] });
+      const all = await seedCampaign({ recipientMode: 'groups', groupIds: [kept, retired], groupMatch: 'all' });
+      expect(await emails(all)).toEqual(['both@example.com']);
+
+      await db('customer_groups').where({ id: retired }).update({ is_archived: true });
+
+      // any: only the live group's members are left.
+      expect(await emails(any)).toEqual(['both@example.com']);
+      // all: nobody can be in a retired group any more, so nobody matches and
+      // the campaign refuses to queue rather than going out to a narrower set.
+      expect(await emails(all)).toEqual([]);
+      await expect(newsletterService.queueCampaign(all.id, adminId))
+        .rejects.toMatchObject({ statusCode: 400, message: 'Campaign has no recipients' });
+    });
+
+    it('refuses to queue when the groups have nobody left in them', async () => {
+      const g = await seedGroup();
+      const campaign = await seedCampaign({ recipientMode: 'groups', groupIds: [g] });
+      await expect(newsletterService.queueCampaign(campaign.id, adminId))
+        .rejects.toMatchObject({ statusCode: 400, message: 'Campaign has no recipients' });
+    });
+
+    it('does not change who a queued campaign went to when the group changes afterwards', async () => {
+      const g = await seedGroup();
+      const a = await seedCustomer({ email: 'a@example.com' });
+      const b = await seedCustomer({ email: 'b@example.com' });
+      await join(g, a.id);
+      const campaign = await seedCampaign({ recipientMode: 'groups', groupIds: [g] });
+      await newsletterService.queueCampaign(campaign.id, adminId);
+      const before = Array.from(await db('email_campaign_recipients').where({ campaign_id: campaign.id }).pluck('email'));
+
+      await db('customer_group_members').where({ group_id: g }).del();
+      await join(g, b.id);
+      await db('customer_groups').where({ id: g }).update({ name: 'Renamed', name_key: 'renamed' });
+
+      const after = Array.from(await db('email_campaign_recipients').where({ campaign_id: campaign.id }).pluck('email'));
+      expect(after).toEqual(before);
+      expect(after).toEqual(['a@example.com']);
+    });
+  });
 });

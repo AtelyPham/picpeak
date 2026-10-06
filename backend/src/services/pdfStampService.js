@@ -43,6 +43,7 @@ function pdfConsts() {
     // European DD.MM.YYYY shape (the operator's locale). Used for the
     // "Datum: ..." line under each signature stamp.
     formatDate: pdfService._internal && pdfService._internal.formatDate,
+    internal: pdfService._internal || {},
   };
 }
 const logger = require('../utils/logger');
@@ -330,8 +331,13 @@ async function renderAuditCertificate({ contract, customer, admin, locale = 'de'
  */
 async function stampSignatures(originalPdfBuffer, stamps) {
   let buffer = originalPdfBuffer;
+  // Roles whose stamp could not be applied, so a caller that must not treat
+  // the result as fully signed can refuse it.
+  const failed = [];
   for (const stamp of stamps) {
-    if (!stamp.signaturePngPath) continue;
+    // `unavailable`: the row names an image that is missing or was refused;
+    // that is a failed stamp, not an unsigned slot.
+    if (!stamp.signaturePngPath && !stamp.unavailable) continue;
     try {
       buffer = await stampSignature({
         pdfBuffer: buffer,
@@ -347,14 +353,136 @@ async function stampSignatures(originalPdfBuffer, stamps) {
       });
       // Skip the failed stamp but keep going — better to produce a
       // PDF missing one signature than to lose the whole document.
+      failed.push(stamp.role);
     }
   }
-  return { buffer, sha256: sha256OfBuffer(buffer) };
+  return { buffer, sha256: sha256OfBuffer(buffer), failed };
+}
+
+/**
+ * A transparent page the size of the target page, with the captions (and a
+ * typed signature, and the identifier band) drawn by PDFKit in the
+ * document's own font. Coordinates are PDFKit's, like the slot's.
+ */
+function renderOverlay({ pageWidth, pageHeight, slot = null, captions = [], typedName = null, band = null, fontOptions = {} }) {
+  const { registerThemeFonts } = pdfConsts().internal;
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFKit({ size: [pageWidth, pageHeight], margin: 0 });
+      const chunks = [];
+      doc.on('data', (c) => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const fonts = registerThemeFonts(doc, fontOptions.issuer || {}, fontOptions.theme || null);
+      const colors = (fontOptions.theme && fontOptions.theme.colors) || {};
+
+      if (slot) {
+        if (typedName) {
+          // A typed signature: the name in the italic face, as large as fits.
+          const inner = slot.width - 16;
+          let size = 22;
+          doc.font(fonts.italic);
+          while (size > 9 && doc.fontSize(size).widthOfString(typedName) > inner) size -= 1;
+          doc.fillColor(colors.text || '#000000').fontSize(size)
+            .text(typedName, slot.x + 8, slot.y + (slot.height - size) / 2 - 2, { width: inner, lineBreak: false, ellipsis: true });
+        }
+        if (captions.length) {
+          // Cover the unsigned page's empty caption rows, then fill them in.
+          doc.rect(slot.x, slot.captionY - 2, slot.width, captions.length * 12 + 4).fill('#ffffff');
+          doc.font(fonts.body).fontSize(9).fillColor(colors.text || '#000000');
+          captions.forEach((line, i) => {
+            doc.text(line, slot.x, slot.captionY + i * 12, { width: slot.width, lineBreak: false, ellipsis: true });
+          });
+        }
+      }
+      if (band) {
+        doc.font(fonts.body).fontSize(7).fillColor(colors.muted || '#666666')
+          .text(band.text, band.x, band.y, { width: band.width, lineBreak: true });
+      }
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function embedImage(pdfDoc, bytes) {
+  try {
+    return await pdfDoc.embedPng(bytes);
+  } catch (_) {
+    try {
+      return await pdfDoc.embedJpg(bytes);
+    } catch (__) {
+      throw new Error('stampSlot: the signature image is neither PNG nor JPEG');
+    }
+  }
+}
+
+function pageFor(pdfDoc, pageNumber) {
+  const index = Number(pageNumber) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= pdfDoc.getPageCount()) {
+    throw new Error(`stampSlot: page ${pageNumber} is not in the document`);
+  }
+  return pdfDoc.getPage(index);
+}
+
+/**
+ * Stamp one signer's slot (#1445, #1446) on the page the document's record
+ * names — no last-page assumption. A drawn signature goes into the box with
+ * pdf-lib; the captions and a typed signature are a PDFKit overlay in the
+ * document's font, placed with embedPdf/drawPage so they match the rest of
+ * the contract. Throws on any failure: a signed document is never written
+ * with a slot missing.
+ *
+ * `slot`: { page (1-based), x, y, width, height, captionY } in PDFKit space.
+ */
+async function stampSlot({ pdfBuffer, slot, imageBytes = null, typedName = null, captions = [], fontOptions = {} }) {
+  if (!Buffer.isBuffer(pdfBuffer)) throw new Error('stampSlot: pdfBuffer must be a Buffer');
+  for (const key of ['x', 'y', 'width', 'height', 'captionY']) {
+    if (!slot || !Number.isFinite(Number(slot[key]))) throw new Error(`stampSlot: slot.${key} is missing`);
+  }
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
+  const page = pageFor(pdfDoc, slot.page);
+  const { width: pageWidth, height: pageHeight } = page.getSize();
+
+  if (imageBytes) {
+    const image = await embedImage(pdfDoc, imageBytes);
+    const padding = 4;
+    const innerW = slot.width - 2 * padding;
+    const innerH = slot.height - 2 * padding;
+    const scale = Math.min(innerW / image.width, innerH / image.height);
+    const drawW = image.width * scale;
+    const drawH = image.height * scale;
+    page.drawImage(image, pdfkitToPdfLib(pageHeight,
+      slot.x + padding + (innerW - drawW) / 2, slot.y + padding + (innerH - drawH) / 2, drawW, drawH));
+  }
+
+  const overlay = await renderOverlay({ pageWidth, pageHeight, slot, captions, typedName, fontOptions });
+  const [embedded] = await pdfDoc.embedPdf(overlay, [0]);
+  page.drawPage(embedded, { x: 0, y: 0, width: pageWidth, height: pageHeight });
+  return Buffer.from(await pdfDoc.save());
+}
+
+/** The identifier band at the foot of the signature page, drawn when the contract is complete. */
+async function stampBand({ pdfBuffer, page: pageNumber, text, y, fontOptions = {} }) {
+  const { PAGE } = pdfConsts();
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
+  const page = pageFor(pdfDoc, pageNumber);
+  const { width: pageWidth, height: pageHeight } = page.getSize();
+  const overlay = await renderOverlay({
+    pageWidth, pageHeight, fontOptions,
+    band: { text, x: PAGE.marginLeft, y, width: PAGE.contentWidth },
+  });
+  const [embedded] = await pdfDoc.embedPdf(overlay, [0]);
+  page.drawPage(embedded, { x: 0, y: 0, width: pageWidth, height: pageHeight });
+  return Buffer.from(await pdfDoc.save());
 }
 
 module.exports = {
   stampSignature,
   stampSignatures,
+  stampSlot,
+  stampBand,
   renderAuditCertificate,
-  _internal: { pdfkitToPdfLib, sha256OfBuffer },
+  _internal: { pdfkitToPdfLib, sha256OfBuffer, renderOverlay },
 };

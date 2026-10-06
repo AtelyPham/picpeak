@@ -1,11 +1,18 @@
 import React, { useEffect, useRef } from 'react';
-import { X, Download, Filter, SortAsc, SortDesc, Search, Calendar, Type, HardDrive, Check, Star, Upload, Camera } from 'lucide-react';
+import { X, Download, Filter, FolderTree, SortAsc, SortDesc, Search, Calendar, Type, HardDrive, Check, Star, Upload, Camera, ClipboardList } from 'lucide-react';
 import { Button } from '../common';
-import { PhotoCategory } from '../../types';
+import { PhotoCategory, type Photo } from '../../types';
 import { useTranslation } from 'react-i18next';
 import { GalleryFilter, type FilterType, type FeedbackFilterType } from './GalleryFilter';
 import { ColorLabelFilterChips } from './ColorLabelFilterChips';
+import { MinRatingFilterChips } from './MinRatingFilterChips';
+import { CreditFilterChips } from './CreditFilterChips';
 import type { ColorLabel } from '../../services/feedback.service';
+import { useDownloadQuota } from '../../contexts/DownloadQuotaContext';
+import type { QuotaPhoto } from '../../utils/downloadLimit';
+import { selectLabel } from '../../utils/mediaCounts';
+import { DownloadQuotaNotice } from './DownloadQuotaNotice';
+import { GallerySidebarFolderTree, type SidebarFolderTreeProps } from './GallerySidebarFolderTree';
 
 interface GallerySidebarProps {
   isOpen: boolean;
@@ -22,7 +29,15 @@ interface GallerySidebarProps {
   onSortDescChange?: (desc: boolean) => void;
   isSelectionMode: boolean;
   onToggleSelectionMode: () => void;
+  // Whether a video is among the photos on screen: the Select control is
+  // worded for photos until one is (issue 1430, item 3).
+  hasVideos?: boolean;
   selectedCount: number;
+  // "Select all" over the photos currently on screen under the active filters
+  // (issue 1733, A3c), and its clear. `visibleCount` labels the button.
+  onSelectAll?: () => void;
+  onDeselectAll?: () => void;
+  visibleCount?: number;
   onDownloadAll: () => void;
   onDownloadSelected: () => void;
   isDownloading: boolean;
@@ -36,6 +51,10 @@ interface GallerySidebarProps {
    * disable it entirely on a folder-only root.
    */
   downloadAllTotal?: number;
+  // Download limit (issue 1560). The photos "Download all" would ship and the
+  // current selection, so both can be priced against what is left.
+  downloadAllPhotos?: QuotaPhoto[];
+  selectedPhotosForQuota?: QuotaPhoto[];
   isMobile: boolean;
   galleryLayout?: string;
   allowUploads?: boolean;
@@ -52,9 +71,29 @@ interface GallerySidebarProps {
   activeColorFilters?: ColorLabel[];
   onColorFilterChange?: (color: ColorLabel) => void;
   colorLabelCounts?: Partial<Record<ColorLabel, number>>;
+  // Minimum own-rating filter (issue 1733, A3c).
+  ratingsEnabled?: boolean;
+  minRating?: number | null;
+  onMinRatingChange?: (minRating: number | null) => void;
+  minRatingCounts?: Partial<Record<number, number>>;
   mediaFilter?: 'all' | 'photo' | 'video';
   onMediaFilterChange?: (filter: 'all' | 'photo' | 'video') => void;
   showMediaFilter?: boolean;
+  // "By" filter (#1561). Rendered only when creditPhotos is passed — the
+  // gallery passes it only while names are visible to this viewer.
+  creditPhotos?: Photo[];
+  selectedCreditKey?: string | null;
+  onCreditChange?: (key: string | null) => void;
+  // Copyable filename list (issue 1733, A3d). `copyFilenamesCount` is how many
+  // photos the dialog would list — the selection, or the viewer's favourites
+  // when nothing is selected; the control is hidden at zero.
+  onCopyFilenames?: () => void;
+  copyFilenamesCount?: number;
+  /**
+   * Folder navigation (issue 1786) as a collapsible tree. Absent for a gallery
+   * without folders, which keeps its sidebar exactly as before.
+   */
+  folderTree?: SidebarFolderTreeProps;
 }
 
 export const GallerySidebar: React.FC<GallerySidebarProps> = ({
@@ -71,7 +110,11 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
   onSortDescChange,
   isSelectionMode,
   onToggleSelectionMode,
+  hasVideos = false,
   selectedCount,
+  onSelectAll,
+  onDeselectAll,
+  visibleCount = 0,
   onDownloadAll,
   onDownloadSelected,
   isDownloading,
@@ -79,6 +122,8 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
   photoCounts = {},
   totalPhotos,
   downloadAllTotal,
+  downloadAllPhotos,
+  selectedPhotosForQuota,
   isMobile,
   galleryLayout,
   allowUploads,
@@ -93,11 +138,23 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
   activeColorFilters = [],
   onColorFilterChange,
   colorLabelCounts = {},
+  ratingsEnabled = false,
+  minRating = null,
+  onMinRatingChange,
+  minRatingCounts = {},
   mediaFilter = 'all',
   onMediaFilterChange,
-  showMediaFilter = false
+  showMediaFilter = false,
+  creditPhotos,
+  selectedCreditKey = null,
+  onCreditChange,
+  onCopyFilenames,
+  copyFilenamesCount = 0,
+  folderTree,
 }) => {
   const { t } = useTranslation();
+  const downloadQuota = useDownloadQuota();
+  const downloadAllOverQuota = !!downloadAllPhotos && !downloadQuota.allows(downloadAllPhotos);
   const sidebarRef = useRef<HTMLDivElement>(null);
 
   // Close sidebar when clicking outside on mobile
@@ -208,12 +265,16 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
               </h3>
 
               <div className="space-y-2">
+                <DownloadQuotaNotice />
                 <Button
                   variant="primary"
                   size="sm"
                   leftIcon={<Download className="w-4 h-4" />}
                   onClick={onDownloadAll}
-                  disabled={isDownloading || (downloadAllTotal ?? totalPhotos) === 0}
+                  disabled={isDownloading || (downloadAllTotal ?? totalPhotos) === 0 || downloadAllOverQuota}
+                  title={downloadAllOverQuota
+                    ? t('gallery.downloadLimit.downloadAllBlocked', 'This gallery holds more photos than your remaining downloads')
+                    : undefined}
                   className="gallery-btn gallery-btn-download w-full"
                 >
                   {t('gallery.downloadAll')} ({downloadAllTotal ?? totalPhotos})
@@ -225,8 +286,34 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
                   onClick={onToggleSelectionMode}
                   className="gallery-btn w-full"
                 >
-                  {isSelectionMode ? t('gallery.cancelSelection') : t('gallery.selectPhotos')}
+                  {isSelectionMode ? t('gallery.cancelSelection') : selectLabel(t, hasVideos)}
                 </Button>
+
+                {/* Select what the active filters leave on screen (issue 1733,
+                    A3c) — the inline grid toolbar has had this pair all along,
+                    the sidebar offered only tile-by-tile picking. */}
+                {isSelectionMode && onSelectAll && onDeselectAll && (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={onSelectAll}
+                      disabled={visibleCount === 0}
+                      className="gallery-btn flex-1"
+                    >
+                      {t('gallery.selectAll')} ({visibleCount})
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={onDeselectAll}
+                      disabled={selectedCount === 0}
+                      className="gallery-btn flex-1"
+                    >
+                      {t('gallery.deselectAll')}
+                    </Button>
+                  </div>
+                )}
 
                 {isSelectionMode && selectedCount > 0 && (
                   <Button
@@ -240,7 +327,30 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
                     {t('gallery.downloadSelected', { count: selectedCount })} ({selectedCount})
                   </Button>
                 )}
+                {isSelectionMode && selectedCount > 0 && selectedPhotosForQuota && (
+                  <DownloadQuotaNotice photos={selectedPhotosForQuota} />
+                )}
               </div>
+            </div>
+          )}
+
+          {/* Filename list (issue 1733, A3d). Its own section rather than part
+              of Download: a proofing gallery often has downloads off, and the
+              list is for the RAW editor, not for downloading. */}
+          {onCopyFilenames && copyFilenamesCount > 0 && (
+            <div className="gallery-sidebar-section gallery-sidebar-filenames p-4 border-b border-surface">
+              <Button
+                variant="outline"
+                size="sm"
+                leftIcon={<ClipboardList className="w-4 h-4" />}
+                onClick={() => {
+                  onCopyFilenames();
+                  if (isMobile) onClose();
+                }}
+                className="gallery-btn w-full"
+              >
+                {t('gallery.copyFilenames.button', 'Copy filenames')} ({copyFilenamesCount})
+              </Button>
             </div>
           )}
 
@@ -269,6 +379,52 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
                   counts={colorLabelCounts}
                 />
               )}
+              {/* Own-rating filter (issue 1733) */}
+              {ratingsEnabled && onMinRatingChange && (
+                <MinRatingFilterChips
+                  className="mt-3"
+                  minRating={minRating}
+                  onChange={onMinRatingChange}
+                  counts={minRatingCounts}
+                />
+              )}
+            </div>
+          )}
+
+          {/* "By" section (#1561) */}
+          {creditPhotos && onCreditChange && (
+            <CreditFilterChips
+              variant="list"
+              className="gallery-sidebar-section p-4 border-b border-surface"
+              photos={creditPhotos}
+              selectedKey={selectedCreditKey}
+              onChange={(key) => {
+                onCreditChange(key);
+                if (isMobile) onClose();
+              }}
+            />
+          )}
+
+          {/* Folders (issue 1786). Not hidden for the carousel like the
+              categories below: containment applies there too, so this is the
+              only way into a folder from the sidebar. */}
+          {folderTree && folderTree.nodes.length > 0 && (
+            <div className="gallery-sidebar-section gallery-sidebar-folders p-4 border-b border-surface">
+              <h3 className="gallery-sidebar-section-title text-sm font-semibold text-muted-theme mb-3 flex items-center gap-2">
+                <FolderTree className="w-4 h-4" />
+                {t('gallery.folders', 'Folders')}
+              </h3>
+              <GallerySidebarFolderTree
+                {...folderTree}
+                onOpenFolder={(key) => {
+                  folderTree.onOpenFolder(key);
+                  if (isMobile) onClose();
+                }}
+                onViewChange={(view) => {
+                  folderTree.onViewChange(view);
+                  if (isMobile) onClose();
+                }}
+              />
             </div>
           )}
 

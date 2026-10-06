@@ -32,7 +32,12 @@ const { body, param, query } = require('express-validator');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
 const { handleAsync, validateRequest, successResponse } = require('../utils/routeHelpers');
+const { renumberLineItemPositions } = require('../utils/lineItemPositions');
+const {
+  LINE_KINDS, UNITS, PRICE_MODES, BOUND_TO, RATE_SOURCES, lineItemFieldsFromApi, lineItemFieldsToApi,
+} = require('../utils/lineItemTotals');
 const quoteService = require('../services/quoteService');
+const accountingHistory = require('../services/accountingHistory');
 const { db } = require('../database/db');
 
 const router = express.Router();
@@ -57,6 +62,23 @@ router.use(requireQuotesFlag);
 // ---------------------------------------------------------------------
 // Transforms (snake_case DB → camelCase API)
 // ---------------------------------------------------------------------
+
+/** A JSON text column (a string on SQLite and Postgres), or null. */
+function parseJsonColumn(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return null; }
+}
+
+function parseSelectionChanges(raw) {
+  if (!raw) return [];
+  try {
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch (_) {
+    return [];
+  }
+}
 
 function transformQuote(q) {
   if (!q) return null;
@@ -111,6 +133,17 @@ function transformQuote(q) {
     acceptedAt: q.accepted_at,
     declinedAt: q.declined_at,
     declineReason: q.decline_reason ?? null,
+    // The add-on process (#1451): what the customer wrote, every later change,
+    // and whether the add-ons can still be changed here.
+    customerMessage: q.customer_message || null,
+    selectionChanges: parseSelectionChanges(q.selection_changes),
+    addOnsEditable: q.status === 'accepted' && !q.converted_event_id && !q.converted_contract_id
+      && !q.has_source_invoice,
+    // A reissue (#1451): the quote this one replaces, and the one that replaced it.
+    replacesQuoteId: q.replaces_quote_id ?? null,
+    replacesQuoteNumber: q.replaces_quote_number ?? null,
+    replacedByQuoteId: q.replaced_by_quote_id ?? null,
+    replacedByQuoteNumber: q.replaced_by_quote_number ?? null,
     convertedEventId: q.converted_event_id,
     // Migration 130 lineage. Null until quoteService.createFromQuote
     // sets it. Surfaced so QuoteDetailPage can render a "Linked
@@ -122,6 +155,14 @@ function transformQuote(q) {
     convertedContractNumber: q.converted_contract_number || null,
     pdfPath: q.pdf_path,
     businessBankAccountId: q.business_bank_account_id,
+    // Migration 220.
+    hours: q.hours == null ? null : Number(q.hours),
+    days: q.days == null ? null : Number(q.days),
+    sourceTemplateId: q.source_template_id || null,
+    sourceTemplateVersion: q.source_template_version || null,
+    // #1451 phase 2 — the add-on choice fixed at acceptance.
+    selectionAcceptedAt: q.selection_accepted_at || null,
+    optionalSelection: parseJsonColumn(q.optional_selection_snapshot),
     createdAt: q.created_at,
     updatedAt: q.updated_at,
   };
@@ -143,6 +184,8 @@ function transformLineItem(li) {
     parentLineItemId: li.parent_line_item_id || null,
     parentPosition: li.parent_position == null ? null : Number(li.parent_position),
     detailsText: li.details_text || null,
+    // Migration 220 — line kind, unit, optional add-on, rate + promotion.
+    ...lineItemFieldsToApi(li),
   };
 }
 
@@ -204,6 +247,13 @@ function transformLineItemPreset(p) {
     quantityDefault: Number(p.quantity_default),
     displayOrder: p.display_order,
     isActive: p.is_active === 1 || p.is_active === true,
+    // Migration 220 — service catalogue fields.
+    unit: p.unit || null,
+    detailsText: p.details_text || null,
+    category: p.category || null,
+    vatCode: p.vat_code || null,
+    priceMode: p.price_mode || 'fixed',
+    pinnedRateMinor: p.pinned_rate_minor == null ? null : Number(p.pinned_rate_minor),
   };
 }
 
@@ -231,12 +281,17 @@ function mapPayloadToService(body) {
     businessBankAccountId: 'businessBankAccountId',
     // Migration 121 — optional Project Overview link.
     projectId: 'projectId',
+    // Migration 220 — quote-wide hours / days that bound lines follow.
+    hours: 'hours', days: 'days',
   };
   for (const [api, svc] of Object.entries(map)) {
     if (Object.prototype.hasOwnProperty.call(body, api)) out[svc] = body[api];
   }
   if (Array.isArray(body.lineItems)) {
-    out.lineItems = body.lineItems.map((li, idx) => ({
+    // The editor keeps `position` as a stable row id, so the array order is
+    // the order the user arranged. Renumber it before the service stores it,
+    // or a reorder is lost on save (#1452).
+    out.lineItems = renumberLineItemPositions(body.lineItems.map((li, idx) => ({
       position: li.position == null ? idx + 1 : li.position,
       quantity: li.quantity,
       description: li.description,
@@ -248,7 +303,8 @@ function mapPayloadToService(body) {
       // the parents.
       parent_position: li.parentPosition == null || li.parentPosition === '' ? null : Number(li.parentPosition),
       details_text: li.detailsText == null ? null : String(li.detailsText),
-    }));
+      ...lineItemFieldsFromApi(li),
+    })));
   }
   return out;
 }
@@ -292,6 +348,19 @@ router.get(
   })
 );
 
+// Change history (migration 219): every change to this quote and its line
+// items, with old and new values, oldest first.
+router.get(
+  '/:id/history',
+  requirePermission('quotes.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const entries = await accountingHistory.listHistory('quote', parseInt(req.params.id, 10));
+    return successResponse(res, { entries });
+  }),
+);
+
 router.get(
   '/:id',
   requirePermission('quotes.view'),
@@ -311,6 +380,40 @@ router.get(
 // ---------------------------------------------------------------------
 // Create + update
 // ---------------------------------------------------------------------
+
+// Per-line rules, shared by POST and PUT (PUT used to accept line items
+// with no per-field checks at all).
+const QUOTE_LINE_VALIDATORS = [
+  body('lineItems.*.description').optional({ values: 'falsy' }).isString().isLength({ min: 1, max: 1000 }),
+  body('lineItems.*.quantity').optional({ values: 'falsy' }).isFloat({ min: 0 }),
+  // Negative unit prices are allowed so admins can add manual
+  // discount / Rabatt lines (e.g. "Treuerabatt -50,00 €"). The
+  // service-layer total guard rejects quotes whose net goes below
+  // zero — see quoteService.
+  body('lineItems.*.unitPriceMinor').optional({ values: 'falsy' }).isInt(),
+  body('lineItems.*.discountPercent').optional({ values: 'falsy' }).isFloat({ min: 0, max: 100 }),
+  // Migration 119: sub-item + details support. Cross-row constraints
+  // (parent must exist, max 1 level deep) are enforced by the service
+  // (validateLineItemHierarchy); these per-field validators just keep
+  // bad data from reaching it.
+  body('lineItems.*.parentPosition').optional({ values: 'falsy' }).isInt({ min: 1 }),
+  body('lineItems.*.detailsText').optional({ values: 'falsy' }).isString().isLength({ max: 2000 }),
+  // Migration 220 (#1451). Cross-row rules (a discount line is never a
+  // sub-item, sub-items follow their parent's add-on flags) live in
+  // utils/lineItemTotals.normalizeLineItems.
+  body('lineItems.*.lineKind').optional({ values: 'falsy' }).isIn(LINE_KINDS),
+  body('lineItems.*.unit').optional({ values: 'falsy' }).isIn(UNITS),
+  body('lineItems.*.isOptional').optional({ nullable: true }).isBoolean(),
+  body('lineItems.*.selected').optional({ nullable: true }).isBoolean(),
+  body('lineItems.*.priceMode').optional({ values: 'falsy' }).isIn(PRICE_MODES),
+  // 'auto' asks the server to apply the customer's or the default rate.
+  body('lineItems.*.rateSource').optional({ values: 'falsy' }).isIn([...RATE_SOURCES, 'auto']),
+  body('lineItems.*.boundTo').optional({ values: 'falsy' }).isIn(BOUND_TO),
+  body('lineItems.*.promotionId').optional({ values: 'falsy' }).isInt({ min: 1 }),
+  body('lineItems.*.promotionSnapshot').optional({ nullable: true }).isObject(),
+  body('hours').optional({ nullable: true, checkFalsy: true }).isFloat({ min: 0, max: 9999 }),
+  body('days').optional({ nullable: true, checkFalsy: true }).isFloat({ min: 0, max: 999 }),
+];
 
 const QUOTE_BODY_VALIDATORS = [
   body('customerAccountId').isInt({ min: 1 }).withMessage('Customer is required'),
@@ -342,20 +445,7 @@ const QUOTE_BODY_VALIDATORS = [
   body('ccPdfEmail').optional({ values: 'falsy' }).isString().isLength({ max: 255 }),
   body('businessBankAccountId').optional({ values: 'falsy' }).isInt({ min: 1 }),
   body('lineItems').optional({ values: 'falsy' }).isArray(),
-  body('lineItems.*.description').optional({ values: 'falsy' }).isString().isLength({ min: 1, max: 1000 }),
-  body('lineItems.*.quantity').optional({ values: 'falsy' }).isFloat({ min: 0 }),
-  // Negative unit prices are allowed so admins can add manual
-  // discount / Rabatt lines (e.g. "Treuerabatt -50,00 €"). The
-  // service-layer total guard rejects quotes whose net goes below
-  // zero — see quoteService.
-  body('lineItems.*.unitPriceMinor').optional({ values: 'falsy' }).isInt(),
-  body('lineItems.*.discountPercent').optional({ values: 'falsy' }).isFloat({ min: 0, max: 100 }),
-  // Migration 119: sub-item + details support. Cross-row constraints
-  // (parent must exist, max 1 level deep) are enforced by the service
-  // (validateLineItemHierarchy); these per-field validators just keep
-  // bad data from reaching it.
-  body('lineItems.*.parentPosition').optional({ values: 'falsy' }).isInt({ min: 1 }),
-  body('lineItems.*.detailsText').optional({ values: 'falsy' }).isString().isLength({ max: 2000 }),
+  ...QUOTE_LINE_VALIDATORS,
 ];
 
 router.post(
@@ -403,6 +493,7 @@ router.put(
     body('ccPdfEmail').optional({ values: 'falsy' }).isString().isLength({ max: 255 }),
     body('businessBankAccountId').optional({ values: 'falsy' }).isInt({ min: 1 }),
     body('lineItems').optional({ values: 'falsy' }).isArray(),
+    ...QUOTE_LINE_VALIDATORS,
   ],
   handleAsync(async (req, res) => {
     validateRequest(req);
@@ -443,6 +534,25 @@ router.post(
   })
 );
 
+// Re-apply the current customer / business rates to the lines that took
+// their price from a rate (#1451). Drafts only — a sent quote keeps the
+// prices the customer saw. Pinned and typed prices are left alone.
+router.post(
+  '/:id/recalculate-rates',
+  requirePermission('quotes.manage'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const id = parseInt(req.params.id, 10);
+    await quoteService.recalculateRates(id, req.admin.id);
+    const data = await quoteService.getQuoteById(id);
+    return successResponse(res, {
+      quote: transformQuote(data.quote),
+      lineItems: data.lineItems.map(transformLineItem),
+    });
+  })
+);
+
 // Admin "accept on behalf of customer" — flips the quote straight
 // to `accepted` without going through the public token + response
 // window. For phone-call workflows where the customer verbally
@@ -456,6 +566,30 @@ router.post(
     const id = parseInt(req.params.id, 10);
     const result = await quoteService.adminAcceptQuote(id, req.admin.id);
     return successResponse(res, result, 200, 'Quote accepted');
+  })
+);
+
+// Change the add-ons of an accepted quote (#1451), e.g. after a phone call —
+// until a contract, event or invoice exists. Recorded, re-rendered, and the
+// customer is emailed the updated quote.
+router.post(
+  '/:id/add-ons',
+  requirePermission('quotes.manage'),
+  [
+    param('id').isInt({ min: 1 }),
+    body('selectedOptional').isArray({ max: 200 }),
+    body('selectedOptional.*').isInt({ min: 1 }).toInt(),
+  ],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const id = parseInt(req.params.id, 10);
+    const result = await quoteService.adminChangeAddOns(id, { selectedOptional: req.body.selectedOptional }, req.admin.id);
+    const data = await quoteService.getQuoteById(id);
+    return successResponse(res, {
+      ...result,
+      quote: transformQuote(data.quote),
+      lineItems: data.lineItems.map(transformLineItem),
+    });
   })
 );
 
@@ -477,9 +611,34 @@ router.post(
   })
 );
 
+// Reissue an accepted quote (#1451), like an invoice with its Storno:
+// declines it (the customer's link stops working, the reason is kept) and
+// creates the draft copy that replaces it.
+router.post(
+  '/:id/reissue',
+  requirePermission('quotes.manage'),
+  [
+    param('id').isInt({ min: 1 }),
+    body('reason').optional({ values: 'falsy' }).isString().isLength({ max: 5000 }),
+  ],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const id = parseInt(req.params.id, 10);
+    const result = await quoteService.reissueQuote(id, req.admin.id, req.body.reason);
+    return successResponse(res, result, 201, 'Quote reissued');
+  })
+);
+
 router.post(
   '/:id/convert',
-  requirePermission('quotes.manage'),
+  // Conversion creates a record in another domain, so it needs that
+  // domain's permission as well; quotes.manage alone let a quote manager
+  // create events, contracts and invoices they could not create directly
+  // (Codex security audit 2026-09-30).
+  // Converting to an event also schedules the quote's invoices (convertToEvent
+  // has no invoice-free path outside workflow reserve_date), so bills.manage
+  // is required as well.
+  requirePermission(['quotes.manage', 'events.create', 'bills.manage'], { requireAll: true }),
   [param('id').isInt({ min: 1 })],
   handleAsync(async (req, res) => {
     validateRequest(req);
@@ -495,7 +654,7 @@ router.post(
 // deliverable to ship.
 router.post(
   '/:id/convert-to-invoice',
-  requirePermission('quotes.manage'),
+  requirePermission(['quotes.manage', 'bills.manage'], { requireAll: true }),
   [param('id').isInt({ min: 1 })],
   handleAsync(async (req, res) => {
     validateRequest(req);
@@ -513,15 +672,19 @@ router.post(
 // layer here would force admins to flip TWO flags to use the workflow.
 router.post(
   '/:id/convert-to-contract',
-  requirePermission('quotes.manage'),
-  [param('id').isInt({ min: 1 })],
+  requirePermission(['quotes.manage', 'contracts.manage'], { requireAll: true }),
+  // Optional (#1445): the contract template to start from; without it, the
+  // one the quote's template names, else the default.
+  [param('id').isInt({ min: 1 }), body('contractTemplateId').optional({ nullable: true }).isInt({ min: 1 }).toInt()],
   handleAsync(async (req, res) => {
     validateRequest(req);
     // Lazy require to keep the route file dep-light + avoid the
     // quoteService ↔ contractService cycle bleeding through.
     const contractService = require('../services/contractService');
     const id = parseInt(req.params.id, 10);
-    const result = await contractService.createFromQuote(id, req.admin.id);
+    const result = await contractService.createFromQuote(id, req.admin.id, {
+      contractTemplateId: req.body && req.body.contractTemplateId ? req.body.contractTemplateId : null,
+    });
     if (!result.alreadyConverted) capabilityEvidence(res, 'crm_document_conversion');
     return successResponse(res, result, 200,
       result.alreadyConverted ? 'Already linked to a contract' : 'Contract drafted from quote');
@@ -539,7 +702,8 @@ router.get(
   handleAsync(async (req, res) => {
     validateRequest(req);
     const id = parseInt(req.params.id, 10);
-    const buf = await quoteService.renderQuotePdfBuffer(id);
+    // A sent quote opens the file that went out; a draft renders live.
+    const buf = await quoteService.getQuotePdfBuffer(id);
     const { buildPdfFilename } = require('../utils/pdfFilename');
     const { buildContentDisposition } = require('../utils/filenameSanitizer');
     const quote = await db('quotes').where({ id }).first();
@@ -586,11 +750,41 @@ router.post(
 router.get(
   '/presets/line-items',
   requirePermission('quotes.view'),
+  // `includeInactive=true` for the catalogue admin page; the editor's
+  // picker keeps the default (active only).
+  [query('includeInactive').optional().isIn(['true', 'false'])],
   handleAsync(async (req, res) => {
-    const rows = await quoteService.listLineItemPresets();
+    validateRequest(req);
+    // The catalogue page (includeInactive) adds the archived examples on its
+    // first visit; the editor's picker never shows them.
+    if (req.query.includeInactive === 'true') {
+      await require('../services/quoteCatalogExamples').ensureCatalogExamples();
+    }
+    const rows = await quoteService.listLineItemPresets({ includeInactive: req.query.includeInactive === 'true' });
     return successResponse(res, { presets: rows.map(transformLineItemPreset) });
   })
 );
+
+// Migration 220 — service-catalogue fields, shared by POST and PUT.
+const PRESET_CATALOGUE_VALIDATORS = [
+  body('unit').optional({ values: 'falsy' }).isIn(UNITS),
+  body('detailsText').optional({ values: 'falsy' }).isString().isLength({ max: 2000 }),
+  body('category').optional({ values: 'falsy' }).isString().isLength({ max: 64 }),
+  body('vatCode').optional({ values: 'falsy' }).isString().isLength({ max: 16 }),
+  body('priceMode').optional({ values: 'falsy' }).isIn(PRICE_MODES),
+  body('pinnedRateMinor').optional({ nullable: true }).isInt({ min: 0 }),
+];
+
+function presetCatalogueFields(reqBody) {
+  return {
+    unit: reqBody.unit,
+    details_text: reqBody.detailsText,
+    category: reqBody.category,
+    vat_code: reqBody.vatCode,
+    price_mode: reqBody.priceMode,
+    pinned_rate_minor: reqBody.pinnedRateMinor,
+  };
+}
 
 router.post(
   '/presets/line-items',
@@ -602,6 +796,7 @@ router.post(
     body('currency').optional({ values: 'falsy' }).isString().isLength({ min: 3, max: 3 }),
     body('quantityDefault').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('displayOrder').optional({ values: 'falsy' }).isInt({ min: 0, max: 9999 }),
+    ...PRESET_CATALOGUE_VALIDATORS,
   ],
   handleAsync(async (req, res) => {
     validateRequest(req);
@@ -612,6 +807,7 @@ router.post(
       currency: req.body.currency,
       quantity_default: req.body.quantityDefault,
       display_order: req.body.displayOrder,
+      ...presetCatalogueFields(req.body),
     });
     return successResponse(res, { preset: transformLineItemPreset(row) }, 201);
   })
@@ -620,7 +816,17 @@ router.post(
 router.put(
   '/presets/line-items/:id',
   requirePermission('quotes.manage'),
-  [param('id').isInt({ min: 1 })],
+  [
+    param('id').isInt({ min: 1 }),
+    body('name').optional({ values: 'falsy' }).isString().isLength({ min: 1, max: 128 }),
+    body('description').optional({ values: 'falsy' }).isString().isLength({ max: 5000 }),
+    body('unitPriceMinor').optional({ values: 'falsy' }).isInt({ min: 0 }),
+    body('currency').optional({ values: 'falsy' }).isString().isLength({ min: 3, max: 3 }),
+    body('quantityDefault').optional({ values: 'falsy' }).isFloat({ min: 0 }),
+    body('displayOrder').optional({ values: 'falsy' }).isInt({ min: 0, max: 9999 }),
+    body('isActive').optional().isBoolean(),
+    ...PRESET_CATALOGUE_VALIDATORS,
+  ],
   handleAsync(async (req, res) => {
     validateRequest(req);
     const id = parseInt(req.params.id, 10);
@@ -632,6 +838,7 @@ router.put(
       quantity_default: req.body.quantityDefault,
       display_order: req.body.displayOrder,
       is_active: req.body.isActive,
+      ...presetCatalogueFields(req.body),
     });
     return successResponse(res, { preset: transformLineItemPreset(row) });
   })

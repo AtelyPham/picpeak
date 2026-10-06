@@ -25,6 +25,7 @@ import {
   newslettersService, type Campaign, type RecipientMode,
 } from '../../../services/newsletters.service';
 import { customerAdminService } from '../../../services/customerAdmin.service';
+import { GroupDot } from '../../../components/admin/CustomerGroupChips';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 
 /**
@@ -96,6 +97,23 @@ export const NewsletterComposerPage: React.FC = () => {
     enabled: draft?.recipientMode === 'manual' && canPickCustomers,
   });
 
+  // Customer groups (#1443) read /admin/customers/groups, also customers.view.
+  const { data: groupCatalogue } = useQuery({
+    queryKey: ['admin-customer-groups'],
+    queryFn: () => customerAdminService.listGroups(true),
+    enabled: draft?.recipientMode === 'groups' && canPickCustomers,
+  });
+  // Live groups, plus any archived one the draft still names so it can be
+  // unticked — the server refuses to save an archived group.
+  const groupOptions = useMemo(() => (groupCatalogue || [])
+    .filter((g) => !g.isArchived || (draft?.groupIds || []).includes(g.id)), [groupCatalogue, draft?.groupIds]);
+  // A group deleted after the draft was saved is gone from the catalogue but
+  // still named by the rule, and the server refuses to save an unknown id.
+  // List it so it can be unticked instead of blocking save, preview and send.
+  const missingGroupIds = useMemo(() => (groupCatalogue
+    ? (draft?.groupIds || []).filter((id) => !groupCatalogue.some((g) => g.id === id))
+    : []), [groupCatalogue, draft?.groupIds]);
+
   const save = useMutation({
     mutationFn: async () => {
       if (!draft) throw new Error('no draft');
@@ -107,6 +125,8 @@ export const NewsletterComposerPage: React.FC = () => {
         language: draft.language,
         recipientMode: draft.recipientMode,
         customerIds: draft.customerIds,
+        groupIds: draft.groupIds || [],
+        groupMatch: draft.groupMatch || 'any',
         sendRatePerMinute: draft.sendRatePerMinute,
       });
     },
@@ -217,7 +237,7 @@ export const NewsletterComposerPage: React.FC = () => {
   if (draft.status !== 'draft') {
     return (
       <Card>
-        <p className="text-neutral-700 dark:text-neutral-300">
+        <p className="text-body">
           {t('newsletters.notEditable',
             'This campaign has already been queued and can no longer be edited.')}
         </p>
@@ -238,7 +258,7 @@ export const NewsletterComposerPage: React.FC = () => {
         <button
           type="button"
           onClick={() => navigate('/admin/clients/newsletters')}
-          className="flex items-center gap-1 text-sm text-neutral-600 dark:text-neutral-400 hover:underline"
+          className="flex items-center gap-1 text-sm text-soft hover:underline"
         >
           <ArrowLeft className="w-4 h-4" />
           {t('newsletters.backToList', 'All campaigns')}
@@ -269,7 +289,7 @@ export const NewsletterComposerPage: React.FC = () => {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* ---- 1. Content ---- */}
         <Card className="xl:col-span-2">
-          <h3 className="font-semibold mb-4 text-neutral-900 dark:text-neutral-100">
+          <h3 className="font-semibold mb-4 text-heading">
             {t('newsletters.section.content', 'Content')}
           </h3>
           <div className="space-y-4">
@@ -285,7 +305,7 @@ export const NewsletterComposerPage: React.FC = () => {
               onChange={(e) => patch({ subject: e.target.value })}
             />
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('newsletters.field.body', 'Body')}
               </label>
               <EmailTemplateEditor
@@ -313,9 +333,9 @@ export const NewsletterComposerPage: React.FC = () => {
                     value={draft.bodyCss}
                     onChange={(e) => patch({ bodyCss: e.target.value })}
                     placeholder=".cta { background: #5C8762; color: #fff; }"
-                    className="mt-2 w-full font-mono text-xs rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-3 py-2"
+                    className="mt-2 w-full font-mono text-xs rounded-md border border-line-strong bg-panel px-3 py-2"
                   />
-                  <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                  <p className="mt-1 text-xs text-muted">
                     {t('newsletters.cssHelp',
                       'Many email clients drop a <style> block — keep the important styling on inline attributes. Remote images and @import are stripped.')}
                   </p>
@@ -329,13 +349,13 @@ export const NewsletterComposerPage: React.FC = () => {
         <Card>
           <div className="flex items-center gap-2 mb-4">
             <Users className="w-5 h-5 text-neutral-500" />
-            <h3 className="font-semibold text-neutral-900 dark:text-neutral-100">
+            <h3 className="font-semibold text-heading">
               {t('newsletters.section.recipients', 'Recipients & send')}
             </h3>
           </div>
 
           <div className="space-y-2 mb-4">
-            {(['all_active', 'manual'] as RecipientMode[])
+            {(['all_active', 'manual', 'groups'] as RecipientMode[])
               .filter((mode) => mode === 'all_active' || canPickCustomers)
               .map((mode) => (
               <label key={mode} className="flex items-start gap-2 cursor-pointer">
@@ -347,10 +367,12 @@ export const NewsletterComposerPage: React.FC = () => {
                   onChange={() => patch({ recipientMode: mode })}
                 />
                 <span className="text-sm">
-                  <span className="font-medium text-neutral-900 dark:text-neutral-100">
+                  <span className="font-medium text-heading">
                     {mode === 'all_active'
                       ? t('newsletters.mode.allActive', 'All active customers')
-                      : t('newsletters.mode.manual', 'Pick customers')}
+                      : mode === 'manual'
+                        ? t('newsletters.mode.manual', 'Pick customers')
+                        : t('newsletters.mode.groups', 'Customers in groups')}
                   </span>
                 </span>
               </label>
@@ -358,7 +380,7 @@ export const NewsletterComposerPage: React.FC = () => {
           </div>
 
           {draft.recipientMode === 'manual' && (
-            <div className="mb-4 max-h-64 overflow-y-auto border border-neutral-200 dark:border-neutral-700 rounded-md p-2">
+            <div className="mb-4 max-h-64 overflow-y-auto border border-line rounded-md p-2">
               {(customers ?? []).map((c) => (
                 <label key={c.id} className="flex items-center gap-2 py-1 cursor-pointer text-sm">
                   <input
@@ -370,11 +392,75 @@ export const NewsletterComposerPage: React.FC = () => {
                         : draft.customerIds.filter((x) => x !== c.id),
                     })}
                   />
-                  <span className="text-neutral-800 dark:text-neutral-200">
+                  <span className="text-body">
                     {c.displayName || c.email}
                   </span>
                 </label>
               ))}
+            </div>
+          )}
+
+          {draft.recipientMode === 'groups' && (
+            <div className="mb-4 space-y-2">
+              <div className="max-h-64 overflow-y-auto border border-line rounded-md p-2">
+                {groupOptions.length === 0 && missingGroupIds.length === 0 ? (
+                  <p className="text-sm text-muted">
+                    {t('customers.groups.emptyCatalogue', 'No groups yet. Create one under Customers → Groups.')}
+                  </p>
+                ) : groupOptions.map((g) => (
+                  <label key={g.id} className="flex items-center gap-2 py-1 cursor-pointer text-sm">
+                    <input
+                      type="checkbox"
+                      checked={(draft.groupIds || []).includes(g.id)}
+                      onChange={(e) => patch({
+                        groupIds: e.target.checked
+                          ? [...(draft.groupIds || []), g.id]
+                          : (draft.groupIds || []).filter((x) => x !== g.id),
+                      })}
+                    />
+                    <GroupDot color={g.color} className="h-2.5 w-2.5" />
+                    <span className="text-body">{g.name}</span>
+                    {g.isArchived && (
+                      <span className="text-xs text-muted">
+                        {t('customers.groups.archived', 'Archived')}
+                      </span>
+                    )}
+                  </label>
+                ))}
+                {missingGroupIds.map((id) => (
+                  <label key={`missing-${id}`} className="flex items-center gap-2 py-1 cursor-pointer text-sm">
+                    <input
+                      type="checkbox"
+                      checked
+                      onChange={() => patch({ groupIds: (draft.groupIds || []).filter((x) => x !== id) })}
+                    />
+                    <span className="text-muted line-through">
+                      {t('customers.groups.deletedGroup', 'Deleted group')}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {(draft.groupIds || []).length >= 2 && (
+                <div className="flex flex-wrap gap-4 text-sm" role="radiogroup" aria-label={t('customers.groups.matchLabel', 'Customers in') as string}>
+                  {(['any', 'all'] as const).map((value) => (
+                    <label key={value} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="groupMatch"
+                        checked={(draft.groupMatch || 'any') === value}
+                        onChange={() => patch({ groupMatch: value })}
+                      />
+                      {value === 'any'
+                        ? t('customers.groups.matchAny', 'Any of them')
+                        : t('customers.groups.matchAll', 'All of them')}
+                    </label>
+                  ))}
+                </div>
+              )}
+              <p className="text-xs text-muted">
+                {t('newsletters.groupsHint',
+                  'Who is in the groups is read when the campaign is sent, not now. Deactivated and unsubscribed customers are left out.')}
+              </p>
             </div>
           )}
 
@@ -383,17 +469,17 @@ export const NewsletterComposerPage: React.FC = () => {
             data-testid="recipient-summary"
             className="rounded-md bg-neutral-50 dark:bg-neutral-800/60 p-3 text-sm"
           >
-            <p className="font-medium text-neutral-900 dark:text-neutral-100">
+            <p className="font-medium text-heading">
               {t('newsletters.recipientCount', '{{count}} recipients',
                 { count: resolution?.recipientCount ?? 0 })}
             </p>
             {(resolution?.skippedOptOut ?? 0) > 0 && (
-              <p className="text-neutral-600 dark:text-neutral-400 mt-1">
+              <p className="text-soft mt-1">
                 {t('newsletters.skippedOptOut', '{{count}} skipped (opted out)',
                   { count: resolution?.skippedOptOut ?? 0 })}
               </p>
             )}
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-2">
+            <p className="text-xs text-muted mt-2">
               {t('newsletters.saveToRefresh', 'Save to refresh this count.')}
             </p>
           </div>
@@ -410,7 +496,7 @@ export const NewsletterComposerPage: React.FC = () => {
               value={String(draft.sendRatePerMinute)}
               onChange={(e) => patch({ sendRatePerMinute: Number(e.target.value) })}
             />
-            <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+            <p className="mt-1 text-xs text-muted">
               {t('newsletters.rateHelp',
                 'Sends are spread out so your mail provider does not rate-limit you, and so a '
                 + 'sudden burst does not look like spam. Check your provider\'s hourly cap '
@@ -419,7 +505,7 @@ export const NewsletterComposerPage: React.FC = () => {
           </div>
 
           {/* Test + queue live with the recipient rule they act on. */}
-          <div className="mt-6 pt-4 border-t border-neutral-200 dark:border-neutral-700 space-y-3">
+          <div className="mt-6 pt-4 border-t border-line space-y-3">
             <div className="flex gap-2 items-end">
               <div className="flex-1">
                 <Input
@@ -487,7 +573,7 @@ export const NewsletterComposerPage: React.FC = () => {
               {t('newsletters.queueButton', 'Queue campaign')}
             </Button>
             {!canQueue && (
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              <p className="text-xs text-muted">
                 {t('newsletters.queueBlocked',
                   'A subject, a body and at least one recipient are needed before sending.')}
               </p>
@@ -501,7 +587,7 @@ export const NewsletterComposerPage: React.FC = () => {
         <div className="flex items-center justify-between gap-4 mb-4">
           <div className="flex items-center gap-2">
             <Eye className="w-5 h-5 text-neutral-500" />
-            <h3 className="font-semibold text-neutral-900 dark:text-neutral-100">
+            <h3 className="font-semibold text-heading">
               {t('newsletters.section.preview', 'Preview')}
             </h3>
           </div>
@@ -521,10 +607,10 @@ export const NewsletterComposerPage: React.FC = () => {
             srcDoc={previewHtml}
             // 680px: the 600px email plus its wrapper padding, so it renders
             // at the width a recipient sees instead of side-scrolling.
-            className="w-full max-w-[680px] mx-auto h-[640px] border border-neutral-200 dark:border-neutral-700 rounded-md bg-white"
+            className="w-full max-w-[680px] mx-auto h-[640px] border border-line rounded-md bg-white"
           />
         ) : (
-          <div className="max-w-[680px] mx-auto h-[240px] rounded-md border border-dashed border-neutral-300 dark:border-neutral-600 flex items-center justify-center text-sm text-neutral-500 dark:text-neutral-400">
+          <div className="max-w-[680px] mx-auto h-[240px] rounded-md border border-dashed border-line-strong flex items-center justify-center text-sm text-muted">
             {t('newsletters.previewEmpty', 'Refresh the preview to see the email as a customer will.')}
           </div>
         )}

@@ -96,6 +96,10 @@ describe('Admin photos in reference mode', () => {
       table.string('slug').notNullable();
       table.boolean('is_global').defaultTo(true);
       table.integer('event_id');
+      // Migrations 185 / 265: the upload maps a folder sent as category_id
+      // onto folder_id, so it reads is_folder.
+      table.boolean('is_folder').defaultTo(false);
+      table.integer('parent_id');
     });
 
     await db.schema.createTable('photos', (table) => {
@@ -122,6 +126,12 @@ describe('Admin photos in reference mode', () => {
       table.string('processing_status', 16).notNullable().defaultTo('complete');
       table.string('upload_id', 64).nullable();
       table.boolean('auto_categorized');
+      // Migration 265: folder, folder request and first-look flag.
+      table.integer('folder_id');
+      table.integer('pending_folder_request_id');
+      table.boolean('first_look').notNullable().defaultTo(false);
+      // Initial schema (db.js); the queued upload writes it since #1561.
+      table.string('uploaded_by').defaultTo('admin');
       table.datetime('uploaded_at').defaultTo(db.fn.now());
       table.float('average_rating').defaultTo(0);
       table.integer('like_count').defaultTo(0);

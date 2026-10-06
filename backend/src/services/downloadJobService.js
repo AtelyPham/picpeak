@@ -36,6 +36,8 @@ const { parseResolution } = require('../utils/downloadResolutions');
 const { applyPhotoVisibilityFilter, canSeeHiddenPhotos } = require('../utils/photoVisibility');
 const logger = require('../utils/logger');
 
+const blockedFoldersOf = (eventId) => require('./folderTreeService').downloadBlockedFolderIds(eventId);
+
 // How long a finished archive stays downloadable before the sweep deletes it.
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
 // Guards against a handful of guests each kicking off a whole-gallery resize.
@@ -107,7 +109,9 @@ class DownloadJobService {
    * The photos a given requester would actually receive. Used both to build
    * the dedup identity and to build the archive, so the two can never drift.
    */
-  photoQuery(eventId, photoIds, accessLevel) {
+  photoQuery(eventId, photoIds, accessLevel, blockedFolders = []) {
+    // blockedFolders: folders whose downloads are off, inherited downwards
+    // (issue 1786) — from folderTreeService.downloadBlockedFolderIds.
     let query = db('photos')
       .leftJoin('photo_categories', 'photos.category_id', 'photo_categories.id')
       .where('photos.event_id', eventId)
@@ -115,7 +119,8 @@ class DownloadJobService {
         this.whereNull('photos.category_id')
           .orWhere('photo_categories.allow_downloads', true)
           .orWhereNull('photo_categories.allow_downloads');
-      });
+      })
+      .where(require('./folderTreeService').whereFolderAllowsDownload(blockedFolders));
     if (photoIds && photoIds.length) {
       query = query.whereIn('photos.id', photoIds);
     }
@@ -149,7 +154,7 @@ class DownloadJobService {
 
     // Resolve the photo set up front, under THIS requester's visibility, so
     // the dedup identity reflects what they may actually receive.
-    const resolved = await this.photoQuery(event.id, photoIds, accessLevel).select('photos.id');
+    const resolved = await this.photoQuery(event.id, photoIds, accessLevel, await blockedFoldersOf(event.id)).select('photos.id');
     const resolvedIds = resolved.map((r) => r.id);
     if (resolvedIds.length === 0) {
       const err = new Error('No photos available for this selection');
@@ -237,7 +242,7 @@ class DownloadJobService {
     if (!Array.isArray(ids) || ids.length === 0) return false;
 
     // Every packaged photo must still be visible to this requester.
-    const visible = await this.photoQuery(job.event_id, ids, accessLevel).select('photos.id');
+    const visible = await this.photoQuery(job.event_id, ids, accessLevel, await blockedFoldersOf(job.event_id)).select('photos.id');
     if (visible.length !== ids.length) return false;
 
     // …and the archive must still match the CURRENT rendition policy. Turning
@@ -275,7 +280,7 @@ class DownloadJobService {
 
       // Same query that produced the dedup identity, so the archive can never
       // contain photos the requester wasn't entitled to at creation time.
-      const photos = await this.photoQuery(event.id, photoIds, accessLevel)
+      const photos = await this.photoQuery(event.id, photoIds, accessLevel, await blockedFoldersOf(event.id))
         .select('photos.*')
         .orderBy('photos.uploaded_at', 'desc');
 

@@ -45,6 +45,24 @@ interface GuestIdentityContextValue {
 
 const GuestIdentityContext = createContext<GuestIdentityContextValue | null>(null);
 
+// Verdicts the redeem route gives on the token itself (backend
+// galleryGuests.js statusMap plus its 400 for a missing token).
+const TERMINAL_INVITE_STATUSES = new Set([400, 404, 409, 410]);
+
+// An invite that left the URL but is not yet redeemed or refused. Session
+// scoped: it is this tab's attempt, and it must survive a reload on any
+// history entry, which the URL alone cannot do once a photo entry is pushed.
+const pendingInviteKey = (slug: string) => `picpeak:pending-invite:${slug}`;
+function readPendingInvite(slug: string): string | null {
+  try { return window.sessionStorage.getItem(pendingInviteKey(slug)); } catch { return null; }
+}
+function writePendingInvite(slug: string, token: string | null): void {
+  try {
+    if (token === null) window.sessionStorage.removeItem(pendingInviteKey(slug));
+    else window.sessionStorage.setItem(pendingInviteKey(slug), token);
+  } catch { /* private mode or blocked storage: the URL copy was already consumed; nothing to keep */ }
+}
+
 interface GuestIdentityProviderProps {
   slug: string;
   identityMode: IdentityMode;
@@ -169,23 +187,48 @@ export const GuestIdentityProvider: React.FC<GuestIdentityProviderProps> = ({
   // identity and be filed under the wrong guest, permanently. ensureIdentity()
   // waits on this instead.
   const invitePromiseRef = useRef<Promise<void> | null>(null);
+  // The invite leaves the address bar on mount, whatever the identity mode.
+  // The provider can mount in `simple` mode and switch to `guest` once the
+  // feedback settings land; tiles are clickable in between, and any history
+  // entry the lightbox pushes (`?photo=`) is built from the current URL — it
+  // would carry the token, and cleaning up later reaches only the top entry.
+  // The rest of the query and the current history state are kept. The token
+  // waits in sessionStorage, keyed by slug, until redemption succeeds or is
+  // refused, so a reload on whichever entry redeems it again after a network
+  // error or 5xx. The ref covers a browser that blocks sessionStorage.
+  const parkedInviteRef = useRef<{ slug: string; token: string } | null>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('invite');
+    if (!token) return;
+    parkedInviteRef.current = { slug, token };
+    writePendingInvite(slug, token);
+    params.delete('invite');
+    const search = params.toString();
+    window.history.replaceState(
+      window.history.state ?? {},
+      '',
+      window.location.pathname + (search ? `?${search}` : '') + window.location.hash,
+    );
+  }, [slug]);
+
   useEffect(() => {
     if (identityMode !== 'guest') return;
-    const params = new URLSearchParams(window.location.search);
-    const inviteToken = params.get('invite');
+    const parked = parkedInviteRef.current;
+    const inviteToken = (parked && parked.slug === slug ? parked.token : null) || readPendingInvite(slug);
     if (!inviteToken || redeemedInviteRef.current === inviteToken) return;
     redeemedInviteRef.current = inviteToken;
+    const settleInvite = () => {
+      parkedInviteRef.current = null;
+      writePendingInvite(slug, null);
+    };
 
     invitePromiseRef.current = (async () => {
       try {
         const response = await guestsService.redeemInvite(slug, inviteToken);
+        settleInvite();
         storeGuestIdentity(slug, response.guest, response.token);
         setIdentity(response.guest);
-        // Strip invite param from URL to prevent re-redemption on reload.
-        params.delete('invite');
-        const newSearch = params.toString();
-        const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-        window.history.replaceState({}, '', newUrl);
       } catch (error) {
         // A spent (409) or revoked (410) invite is the normal way a guest comes
         // back through their own emailed link, and the identity this device
@@ -206,6 +249,16 @@ export const GuestIdentityProvider: React.FC<GuestIdentityProviderProps> = ({
             clearGuestIdentity(slug);
             setIdentity(null);
           }
+        }
+        // The redeem route's own verdicts on the token (galleryGuests.js:
+        // 400 missing, 404 unknown or guest gone, 409 used, 410 revoked) are
+        // final: the pending slot is cleared. Anything else — network,
+        // timeout, 408/429, 5xx — may well succeed next time, so the token
+        // stays pending and the ref no longer counts it as redeemed.
+        if (TERMINAL_INVITE_STATUSES.has(status?.status ?? 0)) {
+          settleInvite();
+        } else {
+          redeemedInviteRef.current = null;
         }
         // Otherwise fail silently; the visitor falls back to the normal prompt.
         // eslint-disable-next-line no-console
@@ -231,6 +284,11 @@ export const GuestIdentityProvider: React.FC<GuestIdentityProviderProps> = ({
   const register = useCallback(
     async (name: string, email?: string): Promise<GuestIdentity> => {
       const response = await guestsService.registerGuest(slug, { name, email });
+      // The visitor now has an identity of their own: a still-pending invite
+      // from an earlier failed redemption must not be retried on a reload
+      // and replace it (or, answered 409, clear it).
+      parkedInviteRef.current = null;
+      writePendingInvite(slug, null);
       storeGuestIdentity(slug, response.guest, response.token);
       setIdentity(response.guest);
       setPromptOpen(false);
@@ -252,7 +310,10 @@ export const GuestIdentityProvider: React.FC<GuestIdentityProviderProps> = ({
 
   const recoverVerify = useCallback(
     async (email: string, code: string): Promise<GuestIdentity> => {
+      // Same as register: the recovered identity wins over a pending invite.
       const response = await guestsService.verifyRecoveryCode(slug, email, code);
+      parkedInviteRef.current = null;
+      writePendingInvite(slug, null);
       storeGuestIdentity(slug, response.guest, response.token);
       setIdentity(response.guest);
       setPromptOpen(false);

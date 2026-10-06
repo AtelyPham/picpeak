@@ -1,5 +1,6 @@
 /**
- * Folder tiles for the gallery root (#1160).
+ * Folder tiles for the current level (#1160; nested since issue 1786 — the
+ * root shows top-level folders, an open folder its subfolders).
  *
  * Rendered above the photo grid rather than inside any one layout, so all eight
  * gallery layouts (Grid, Masonry, Justified, Mosaic, Timeline, Carousel, Story,
@@ -74,7 +75,7 @@ export const GalleryFolderTiles: React.FC<GalleryFolderTilesProps> = ({
         {t('gallery.folders', 'Folders')}
       </h2>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-        {tiles.map(({ category, count, coverPhoto }) => (
+        {tiles.map(({ category, count, subfolderCount, coverPhoto }) => (
           <button
             key={category.id}
             type="button"
@@ -105,8 +106,16 @@ export const GalleryFolderTiles: React.FC<GalleryFolderTilesProps> = ({
                   {category.name}
                 </span>
               </div>
-              <p className="mt-1 text-sm text-muted-theme">
-                {t('gallery.folderPhotoCount', '{{count}} photos', { count })}
+              <p className="mt-1 text-sm text-muted-theme flex items-center gap-2 flex-wrap">
+                {/* Recursive (issue 1786): what the folder holds all the way
+                    down, so the number matches what opening it leads to. */}
+                <span>{t('gallery.folderPhotoCount', '{{count}} photos', { count })}</span>
+                {subfolderCount > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <span aria-hidden="true">·</span>
+                    {t('gallery.subfolderCount', '{{count}} folders', { count: subfolderCount })}
+                  </span>
+                )}
               </p>
             </div>
           </button>

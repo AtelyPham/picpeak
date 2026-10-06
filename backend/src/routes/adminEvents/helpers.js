@@ -3,6 +3,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const logger = require('../../utils/logger');
 const settings = require('../../services/eventSettings');
+const { deleteWithAccountingHistory } = require('../../services/accountingHistory');
 
 async function deleteEventCascade(eventId, adminContext) {
   const event = await db('events').where('id', eventId).first();
@@ -28,7 +29,7 @@ async function deleteEventCascade(eventId, adminContext) {
   const tieredPhotos = await db('photos')
     .where('event_id', eventId)
     .select('id', 'path', 'filename', 'source_origin', 'external_relpath',
-      'thumbnail_path', 'hero_path', 'preview_path', 'watermark_path');
+      'thumbnail_path', 'hero_path', 'preview_path', 'watermark_path', 'web_path');
 
   // A Set because a photo can carry the same key in two columns (an unresized
   // gallery's hero and preview can resolve to one object) and deleting it
@@ -53,7 +54,7 @@ async function deleteEventCascade(eventId, adminContext) {
       }
       // Derived tiers are stored as canonical keys and pass through verbatim,
       // the same list adminPhotoDimensions.js:801 sweeps on a re-render.
-      for (const derived of [photo.thumbnail_path, photo.hero_path, photo.preview_path, photo.watermark_path]) {
+      for (const derived of [photo.thumbnail_path, photo.hero_path, photo.preview_path, photo.watermark_path, photo.web_path]) {
         if (derived) {
           storageKeys.add(derived);
           derivedKeys.add(derived);
@@ -86,10 +87,11 @@ async function deleteEventCascade(eventId, adminContext) {
           .whereIn('thumbnail_path', chunk)
           .orWhereIn('hero_path', chunk)
           .orWhereIn('preview_path', chunk)
-          .orWhereIn('watermark_path', chunk))
-        .select('thumbnail_path', 'hero_path', 'preview_path', 'watermark_path');
+          .orWhereIn('watermark_path', chunk)
+          .orWhereIn('web_path', chunk))
+        .select('thumbnail_path', 'hero_path', 'preview_path', 'watermark_path', 'web_path');
       for (const row of shared) {
-        for (const key of [row.thumbnail_path, row.hero_path, row.preview_path, row.watermark_path]) {
+        for (const key of [row.thumbnail_path, row.hero_path, row.preview_path, row.watermark_path, row.web_path]) {
           if (key && derivedKeys.has(key)) storageKeys.delete(key);
         }
       }
@@ -105,8 +107,10 @@ async function deleteEventCascade(eventId, adminContext) {
 
   // The archive zip is typically the largest single object an event owns, and
   // archiveService writes it through the backend (`storage.putFromFile`, see
-  // archiveService.js:160) — so the `fs.unlink` below is a no-op on S3 and the
-  // zip outlives the event it belongs to.
+  // archiveService.js:160). The sweep below is the only thing that removes it:
+  // it used to be joined onto STORAGE_PATH and unlinked as well, which was a
+  // no-op on S3 and, for a row carrying `../`, an unlink outside storage. The
+  // backend refuses such a key.
   if (event.archive_path) storageKeys.add(event.archive_path);
 
   // The download caches are the subtle ones: they live UNDER
@@ -145,7 +149,24 @@ async function deleteEventCascade(eventId, adminContext) {
   }
 
   await db.transaction(async (trx) => {
-    // 1. Delete activity logs (audit trail)
+    // Event row first (issue 1560): the download-limit grants lock the event
+    // row and then grant/photo rows, so taking them here in the opposite
+    // order could deadlock against a download on PostgreSQL. SQLite
+    // serialises writers anyway.
+    if (trx.client.config.client === 'pg') {
+      await trx('events').where({ id: eventId }).forUpdate().first();
+    }
+    // 1. Delete activity logs (audit trail) — and the per-admin bell
+    // dismissals that point at them (migration 261). On PostgreSQL the FK
+    // cascade removes them with the activity rows; deleting them first here
+    // would take the locks in the opposite order to the download-summary
+    // bump (activity row, then its dismissals) and could deadlock with it.
+    // SQLite runs without PRAGMA foreign_keys, so there it is explicit.
+    if (trx.client.config.client !== 'pg') {
+      await trx('notification_dismissals')
+        .whereIn('activity_log_id', trx('activity_logs').where('event_id', eventId).select('id'))
+        .del();
+    }
     await trx('activity_logs').where('event_id', eventId).del();
     // 2. Delete access logs
     await trx('access_logs').where('event_id', eventId).del();
@@ -167,10 +188,19 @@ async function deleteEventCascade(eventId, adminContext) {
     if (await trx.schema.hasTable('event_people_merge_dismissals')) {
       await trx('event_people_merge_dismissals').where('event_id', eventId).del();
     }
+    // Download-limit grants (issue 1560): the same inert-cascade reason.
+    if (await trx.schema.hasTable('event_download_grants')) {
+      await trx('event_download_grants').where('event_id', eventId).del();
+    }
+    // feedback_rate_limits.event_id is also ON DELETE CASCADE (#1585), same
+    // SQLite caveat as photo_faces above — delete explicitly so an event's
+    // rate-limit tracking rows don't outlive it on the SQLite path.
+    await trx('feedback_rate_limits').where('event_id', eventId).del();
 
     await trx('photos').where('event_id', eventId).del();
     // 5. Finally delete the event row
-    await trx('events').where('id', eventId).del();
+    await deleteWithAccountingHistory(trx, 'events', { id: eventId },
+      { actor: adminContext?.id ?? null, source: 'event.delete' });
 
     // Best-effort filesystem cleanup. Failures are logged but don't unwind
     // the transaction — the canonical state lives in the DB; orphan files
@@ -201,19 +231,9 @@ async function deleteEventCascade(eventId, adminContext) {
       }
     }
 
-    if (event.archive_path) {
-      const storagePath = process.env.STORAGE_PATH || path.join(__dirname, '../../../../storage');
-      const archiveFile = path.join(storagePath, event.archive_path);
-      try {
-        await fs.unlink(archiveFile);
-      } catch (fsErr) {
-        logger.warn('Failed to delete archive file during cascade delete', { eventId, path: archiveFile, error: fsErr.message });
-      }
-    }
-
     if (event.hero_logo_path) {
       try {
-        await fs.unlink(event.hero_logo_path);
+        await fs.unlink(require('../../utils/storedPath').resolveStoredPath(event.hero_logo_path) || '');
       } catch (fsErr) {
         logger.warn('Failed to delete event logo during cascade delete', { eventId, path: event.hero_logo_path, error: fsErr.message });
       }

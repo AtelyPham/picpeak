@@ -51,12 +51,23 @@ async function resolveGuest(req, res, next) {
       return next();
     }
 
+    // A guest identity belongs to one gallery. The token is valid for the
+    // event it names, which is not necessarily the gallery this request was
+    // authorized for (verifyGalleryAccess runs first and sets req.event); in
+    // simple and shared mode nothing downstream compared the two, so another
+    // gallery's guest id, name and email landed on this gallery's feedback.
+    if (req.event?.id != null && Number(guest.event_id) !== Number(req.event.id)) {
+      req.guest = null;
+      return next();
+    }
+
     req.guest = {
       id: guest.id,
       eventId: guest.event_id,
       identifier: guest.identifier,
       name: guest.name,
       email: guest.email || null,
+      uploadOnly: decoded.scope === 'upload',
     };
 
     return next();
@@ -74,6 +85,35 @@ async function resolveGuest(req, res, next) {
 function requireGuest(req, res, next) {
   if (!req.guest) {
     return res.status(401).json({ error: 'Guest identity required' });
+  }
+  return next();
+}
+
+/**
+ * An uploader name is not a feedback identity (#1561).
+ *
+ * A guest registered from the upload dialog outside guest identity mode
+ * carries `scope: 'upload'` in their token. The frontend sends that token on
+ * every gallery request, and in simple and shared mode feedback is anonymous
+ * per browser with a name typed per comment. Left in place, req.guest would
+ * put the upload name on the guest's likes and comments, which the upload
+ * dialog promises other guests never see, and would move their feedback to a
+ * new identity, so their earlier likes stop being theirs. So in those modes
+ * feedback ignores an upload-scoped guest. In guest identity mode the guest
+ * is the feedback identity, as it is for every guest registered there.
+ * Mount after resolveGuest on routes that read or write feedback.
+ */
+async function scopeGuestToFeedback(req, res, next) {
+  if (!req.guest?.uploadOnly || !req.event?.id) return next();
+  try {
+    // Required lazily: feedbackService is heavy and unrelated to token checks.
+    const feedbackService = require('../services/feedbackService');
+    const settings = await feedbackService.getEventFeedbackSettings(req.event.id);
+    if (settings.identity_mode !== 'guest') req.guest = null;
+  } catch (error) {
+    // Unknown mode: anonymous is the answer that discloses no name.
+    logger.error('scopeGuestToFeedback failed', { error: error.message });
+    req.guest = null;
   }
   return next();
 }
@@ -98,7 +138,7 @@ const GUEST_TOKEN_TTL = process.env.GUEST_TOKEN_TTL || '30d';
 /**
  * Sign a new guest JWT. Scoped to a specific event and guest row.
  */
-function signGuestToken({ guestId, eventId, identifier, name }, expiresIn = GUEST_TOKEN_TTL) {
+function signGuestToken({ guestId, eventId, identifier, name, scope }, expiresIn = GUEST_TOKEN_TTL) {
   return jwt.sign(
     {
       type: 'guest',
@@ -106,6 +146,8 @@ function signGuestToken({ guestId, eventId, identifier, name }, expiresIn = GUES
       eventId,
       identifier,
       name,
+      // 'upload': registered for an uploader name only (scopeGuestToFeedback).
+      ...(scope ? { scope } : {}),
     },
     process.env.JWT_SECRET,
     {
@@ -118,5 +160,6 @@ function signGuestToken({ guestId, eventId, identifier, name }, expiresIn = GUES
 module.exports = {
   resolveGuest,
   requireGuest,
+  scopeGuestToFeedback,
   signGuestToken,
 };

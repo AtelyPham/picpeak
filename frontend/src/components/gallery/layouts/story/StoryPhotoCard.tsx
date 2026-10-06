@@ -1,8 +1,9 @@
 import React, { useRef, useState } from 'react';
 import { motion, useInView } from 'framer-motion';
-import { Heart } from 'lucide-react';
+import { Heart, Check } from 'lucide-react';
 import { AuthenticatedImage } from '../../../common';
 import { ColorLabelBadge } from '../../ColorLabelBadge';
+import { FirstLookBadge } from '../../GalleryTileBadges';
 import type { Photo } from '../../../../types';
 import { lightboxImageUrl } from '../../imageTiers';
 
@@ -17,6 +18,18 @@ interface StoryPhotoCardProps {
   useEnhancedProtection?: boolean;
   featured?: boolean;
   galleryId: string;
+  /**
+   * Issue 1709: 'contain' when the box could not take the photo's own aspect
+   * ratio (justified-layout clamps a lone very wide or very tall row), so the
+   * photo is letterboxed on the card background instead of cropped.
+   */
+  fit?: 'cover' | 'contain';
+  /** Issue 1716: selection mode. The checkbox shows while selecting or when selected. */
+  isSelectionMode?: boolean;
+  isSelected?: boolean;
+  onSelect?: (id: number) => void;
+  /** Likes are a per-event sub-toggle (#506); the heart is not offered when they are off. */
+  likesAllowed?: boolean;
 }
 
 export const StoryPhotoCard: React.FC<StoryPhotoCardProps> = ({
@@ -27,6 +40,11 @@ export const StoryPhotoCard: React.FC<StoryPhotoCardProps> = ({
   onClick,
   slug,
   featured = false,
+  fit = 'cover',
+  isSelectionMode = false,
+  isSelected = false,
+  onSelect,
+  likesAllowed = true,
   galleryId: _galleryId
 }) => {
   // galleryId is kept for potential PhotoSwipe integration but not currently used
@@ -55,7 +73,10 @@ export const StoryPhotoCard: React.FC<StoryPhotoCardProps> = ({
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, margin: '-50px' }}
       transition={{ delay: Math.min(index * 0.05, 0.3) }}
-      className={`story-photo-card group ${featured ? 'story-gallery-grid-featured' : ''}`}
+      // The fit rides on the card, not the img: `.story-photo-card img` in the
+      // stylesheet outranks a Tailwind utility on the image itself.
+      className={`story-photo-card group ${featured ? 'story-gallery-grid-featured' : ''}${fit === 'contain' ? ' story-photo-card--contain' : ''}${isSelectionMode ? ' story-photo-card--selecting' : ''}${isSelected ? ' selected' : ''}`}
+      data-selected={isSelected ? 'true' : undefined}
     >
       <a
         href={photo.url}
@@ -67,11 +88,19 @@ export const StoryPhotoCard: React.FC<StoryPhotoCardProps> = ({
         data-pswp-height={photo.height || 800}
         data-photo-id={photo.id}
         onClick={(e) => {
+          // While selecting, the whole card toggles the selection instead of
+          // opening the lightbox (issue 1716).
+          if (isSelectionMode && onSelect) {
+            e.preventDefault();
+            onSelect(photo.id);
+            return;
+          }
           if (onClick) {
             e.preventDefault();
             onClick();
           }
         }}
+        aria-pressed={isSelectionMode ? isSelected : undefined}
         className="block w-full h-full"
       >
         {/* The placeholder keeps the card's box while the image is still
@@ -112,19 +141,45 @@ export const StoryPhotoCard: React.FC<StoryPhotoCardProps> = ({
       {/* Overlay */}
       <div className="story-photo-card-overlay" />
 
-      {/* Actions */}
-      <div className="story-photo-card-actions">
+      {/* First look (issue 1562). Bottom-left is free until hover, when the
+          filename caption slides over it — so the pill steps aside then. */}
+      <FirstLookBadge photo={photo} className="bottom-3 left-3 transition-opacity group-hover:opacity-0" />
+
+      {/* Selection checkbox (issue 1716). Visible while selecting or when
+          selected; outside selection mode it appears on hover and starts the
+          selection, the same as the shared grid's checkbox. */}
+      {onSelect && (
         <button
+          type="button"
+          role="checkbox"
+          aria-checked={isSelected}
+          aria-label={photo.original_filename || photo.filename}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            onToggleFavorite(photo.id);
+            onSelect(photo.id);
           }}
-          className={`story-photo-card-btn ${isFavorite ? 'favorite' : ''}`}
+          className={`story-photo-card-check${isSelectionMode || isSelected ? ' visible' : ''}${isSelected ? ' selected' : ''}`}
         >
-          <Heart size={18} fill={isFavorite ? 'currentColor' : 'none'} />
+          {isSelected && <Check size={14} strokeWidth={3} />}
         </button>
-      </div>
+      )}
+
+      {/* Actions */}
+      {likesAllowed && (
+        <div className="story-photo-card-actions">
+          <button
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleFavorite(photo.id);
+            }}
+            className={`story-photo-card-btn ${isFavorite ? 'favorite' : ''}`}
+          >
+            <Heart size={18} fill={isFavorite ? 'currentColor' : 'none'} />
+          </button>
+        </div>
+      )}
 
       {/* Caption */}
       <div className="story-photo-card-caption">

@@ -14,7 +14,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-toastify';
 import {
-  ArrowLeft, Mail, MapPin, Phone, Building2, Save, Trash2, AlertTriangle,
+  Mail, MapPin, Phone, Building2, Save, Trash2, AlertTriangle,
   CheckCircle2, X, FileText, Calendar, KeyRound, ToggleLeft, Settings as SettingsIcon, Megaphone,
 } from 'lucide-react';
 
@@ -22,6 +22,8 @@ import { Button, Card, CountrySelect, Input, Loading } from '../../components/co
 import { SUPPORTED_LANGUAGES } from '../../components/common/LanguageSelector';
 import { DecimalInput } from '../../components/common/DecimalInput';
 import { AssignedEventsDialog } from '../../components/admin/AssignedEventsDialog';
+import { CustomerGroupsCard } from '../../components/admin/CustomerGroupsCard';
+import { usePermissions } from '../../contexts/PermissionsContext';
 import {
   customerAdminService,
   type CustomerAccountDetail,
@@ -29,6 +31,9 @@ import {
 import { businessProfileService } from '../../services/businessProfile.service';
 import { CustomerCrmPanels } from '../../components/admin/CustomerCrmPanels';
 import { HoursSection } from '../../components/admin/HoursSection';
+import { CustomerDocumentsCard } from '../../components/admin/CustomerDocumentsCard';
+import { CustomerActivityCard } from '../../components/admin/CustomerActivityCard';
+import { PermissionGate } from '../../components/admin/PermissionGate';
 import { formatMoney } from '../../components/admin/LineItemsTable';
 import { useLocalizedDate } from '../../hooks/useLocalizedDate';
 import { useMutationWithToast, useModal } from '../../hooks';
@@ -40,7 +45,8 @@ type EditableFields =
   | 'addressLine1' | 'addressLine2' | 'postalCode' | 'city' | 'state'
   | 'countryCode' | 'countryName' | 'preferredLanguage' | 'notes'
   | 'featureCalendar' | 'featureQuotes' | 'featureBills' | 'featureHoursLogging' | 'featureContracts'
-  | 'hourlyRateMinor' | 'billingCadence' | 'billingCycleDay' | 'skontoDisabled' | 'rebillAttachProof'
+  | 'featureDocuments'
+  | 'hourlyRateMinor' | 'dayRateMinor' | 'billingCadence' | 'billingCycleDay' | 'skontoDisabled' | 'rebillAttachProof'
   | 'marketingOptOut';
 
 // `fmtDate` (from useLocalizedDate, below) is the single canonical date
@@ -62,6 +68,7 @@ export const CustomerDetailPage: React.FC = () => {
   // per-customer toggle in the features card is hidden and the
   // HoursSection card never renders, regardless of customer state.
   const { flags } = useFeatureFlags();
+  const { hasPermission } = usePermissions();
 
   const { data: customer, isLoading, error } = useQuery({
     queryKey: ['admin-customer', customerId],
@@ -141,7 +148,9 @@ export const CustomerDetailPage: React.FC = () => {
         // Contracts is opt-OUT (default on) — preserve the tab for customers
         // saved before the per-customer override existed.
         featureContracts: customer.featureContracts ?? true,
+        featureDocuments: customer.featureDocuments ?? true,
         hourlyRateMinor: customer.hourlyRateMinor ?? null,
+        dayRateMinor: customer.dayRateMinor ?? null,
         billingCadence: customer.billingCadence ?? 'per_event',
         billingCycleDay: customer.billingCycleDay ?? 1,
         skontoDisabled: customer.skontoDisabled ?? false,
@@ -154,7 +163,7 @@ export const CustomerDetailPage: React.FC = () => {
     }
   }, [customer, form]);
 
-  const toggleFeature = (key: 'featureCalendar' | 'featureQuotes' | 'featureBills' | 'featureHoursLogging' | 'featureContracts') => {
+  const toggleFeature = (key: 'featureCalendar' | 'featureQuotes' | 'featureBills' | 'featureHoursLogging' | 'featureContracts' | 'featureDocuments') => {
     setForm((prev) => ({ ...prev, [key]: !prev[key] }) as any);
   };
 
@@ -282,7 +291,7 @@ export const CustomerDetailPage: React.FC = () => {
   }
   if (error || !customer) {
     return (
-      <div className="container py-6">
+      <div>
         <div className="text-sm text-red-600 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4" />
           {t('customers.detail.loadError', 'Could not load customer')}
@@ -292,22 +301,13 @@ export const CustomerDetailPage: React.FC = () => {
   }
 
   return (
-    <div className="container py-6 space-y-6">
+    <div className="space-y-6">
       <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 min-w-0">
-          <Link
-            to="/admin/clients/accounts"
-            className="p-2 -ml-2 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700"
-            aria-label={t('common.back', 'Back')}
-          >
-            <ArrowLeft className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
-          </Link>
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100 truncate">
-              {customer.displayName || customer.email}
-            </h1>
-            <p className="text-sm text-neutral-500 dark:text-neutral-400 truncate">{customer.email}</p>
-          </div>
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold text-heading truncate">
+            {customer.displayName || customer.email}
+          </h1>
+          <p className="text-sm text-muted truncate">{customer.email}</p>
         </div>
         <div className="flex flex-col items-end gap-1">
           {customer.isActive ? (
@@ -323,7 +323,7 @@ export const CustomerDetailPage: React.FC = () => {
           )}
           {customer.isPassive ? (
             <span
-              className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300"
+              className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-subtle text-body"
               title={t(
                 'customers.passive.detailHint',
                 'This customer has no portal access (admin-only record). Click "Send portal invitation" below to email them a sign-up link.',
@@ -332,7 +332,7 @@ export const CustomerDetailPage: React.FC = () => {
               {t('customers.passive.badge', 'Passive — admin only')}
             </span>
           ) : (
-            <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
+            <span className="text-[11px] text-muted">
               {t('customers.passive.activeLabel', 'Has portal access')}
             </span>
           )}
@@ -341,16 +341,16 @@ export const CustomerDetailPage: React.FC = () => {
 
       {/* Account section */}
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-heading mb-4 flex items-center gap-2">
           <Mail className="w-5 h-5" /> {t('customers.detail.accountSection', 'Account')}
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.email', 'Email')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.email', 'Email')}</label>
             <Input type="email" value={form.email || ''} onChange={setField('email')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.preferredLanguage', 'Preferred language')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.preferredLanguage', 'Preferred language')}</label>
             <select
               value={form.preferredLanguage || profileDefaultLocale}
               onChange={setField('preferredLanguage')}
@@ -374,12 +374,12 @@ export const CustomerDetailPage: React.FC = () => {
 
       {/* Personal section */}
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">
+        <h2 className="text-lg font-semibold text-heading mb-4">
           {t('customers.detail.personalSection', 'Personal information')}
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.salutation', 'Salutation')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.salutation', 'Salutation')}</label>
             {/* Salutation values are stored verbatim in the DB ("Herr",
                 "Frau", "Mx", "Dr") — those are the canonical token values
                 across locales. Display labels are translated; the value
@@ -399,25 +399,25 @@ export const CustomerDetailPage: React.FC = () => {
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.firstName', 'First name')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.firstName', 'First name')}</label>
             <Input value={form.firstName || ''} onChange={setField('firstName')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.lastName', 'Last name')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.lastName', 'Last name')}</label>
             <Input value={form.lastName || ''} onChange={setField('lastName')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.displayName', 'Display name')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.displayName', 'Display name')}</label>
             <Input value={form.displayName || ''} onChange={setField('displayName')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1 flex items-center gap-1">
+            <label className="block text-sm font-medium text-heading mb-1 flex items-center gap-1">
               <Phone className="w-4 h-4" /> {t('customers.detail.phone', 'Phone')}
             </label>
             <Input value={form.phone || ''} onChange={setField('phone')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1 flex items-center gap-1">
+            <label className="block text-sm font-medium text-heading mb-1 flex items-center gap-1">
               <Building2 className="w-4 h-4" /> {t('customers.detail.company', 'Company')}
             </label>
             <Input value={form.companyName || ''} onChange={setField('companyName')} />
@@ -436,10 +436,10 @@ export const CustomerDetailPage: React.FC = () => {
 
       {/* Notes (admin-only) */}
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-heading mb-4 flex items-center gap-2">
           <FileText className="w-5 h-5" /> {t('customers.detail.notesSection', 'Internal notes')}
         </h2>
-        <p className="text-xs text-neutral-500 dark:text-neutral-400 mb-3">
+        <p className="text-xs text-muted mb-3">
           {t('customers.detail.notesHint', 'Visible only to admins. Never shown to the customer.')}
         </p>
         <textarea
@@ -450,10 +450,17 @@ export const CustomerDetailPage: React.FC = () => {
         />
       </Card>
 
+      {/* Groups (#1443) */}
+      <CustomerGroupsCard
+        customerId={customerId}
+        groups={customer.groups}
+        canManage={hasPermission('customers.groups.manage')}
+      />
+
       {/* Assigned events */}
       <Card padding="lg">
         <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
-          <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
+          <h2 className="text-lg font-semibold text-heading flex items-center gap-2">
             <Calendar className="w-5 h-5" /> {t('customers.detail.eventsSection', 'Assigned events')}
           </h2>
           {/* Manage galleries: opens the multi-select dialog that
@@ -472,17 +479,17 @@ export const CustomerDetailPage: React.FC = () => {
           </Button>
         </div>
         {customer.events.length === 0 ? (
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          <p className="text-sm text-muted">
             {t('customers.detail.noEvents', 'Not assigned to any events yet. Use "Manage galleries" to add some.')}
           </p>
         ) : (
-          <ul className="divide-y divide-neutral-200 dark:divide-neutral-700">
+          <ul className="divide-y divide-line">
             {customer.events.map((ev) => (
               <li key={ev.id} className="py-2 flex items-center justify-between">
-                <Link to={`/admin/events/${ev.id}`} className="text-neutral-900 dark:text-neutral-100 hover:underline">
+                <Link to={`/admin/events/${ev.id}`} className="text-heading hover:underline">
                   {ev.eventName}
                 </Link>
-                <span className="text-xs text-neutral-500 dark:text-neutral-400">
+                <span className="text-xs text-muted">
                   {ev.eventDate ? fmtDate(ev.eventDate) : ''}
                   {ev.expiresAt ? ` · ${t('customers.detail.expires', 'expires')} ${fmtDate(ev.expiresAt)}` : ''}
                 </span>
@@ -508,36 +515,36 @@ export const CustomerDetailPage: React.FC = () => {
 
       {/* Address + billing */}
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-heading mb-4 flex items-center gap-2">
           <MapPin className="w-5 h-5" /> {t('customers.detail.billingSection', 'Address & billing')}
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.billingEmail', 'Billing email')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.billingEmail', 'Billing email')}</label>
             <Input type="email" value={form.billingEmail || ''} onChange={setField('billingEmail')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.vatId', 'VAT / tax ID')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.vatId', 'VAT / tax ID')}</label>
             <Input value={form.vatId || ''} onChange={setField('vatId')} />
           </div>
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.addressLine1', 'Address line 1')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.addressLine1', 'Address line 1')}</label>
             <Input value={form.addressLine1 || ''} onChange={setField('addressLine1')} />
           </div>
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.addressLine2', 'Address line 2')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.addressLine2', 'Address line 2')}</label>
             <Input value={form.addressLine2 || ''} onChange={setField('addressLine2')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.postalCode', 'Postal code')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.postalCode', 'Postal code')}</label>
             <Input value={form.postalCode || ''} onChange={setField('postalCode')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.city', 'City')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.city', 'City')}</label>
             <Input value={form.city || ''} onChange={setField('city')} />
           </div>
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">{t('customers.detail.state', 'State / region')}</label>
+            <label className="block text-sm font-medium text-heading mb-1">{t('customers.detail.state', 'State / region')}</label>
             <Input value={form.state || ''} onChange={setField('state')} />
           </div>
           <div>
@@ -563,6 +570,23 @@ export const CustomerDetailPage: React.FC = () => {
           doesn't need to import useFeatureFlags directly. */}
       <CustomerCrmPanels customerAccountId={customer.id} />
 
+      {/* Customer documents (#1444). Every endpoint behind the card needs
+          customers.documents.manage, so the whole card is gated on it; the
+          card also keeps its query disabled without it. */}
+      {flags.documents && (
+        <PermissionGate permission="customers.documents.manage">
+          <CustomerDocumentsCard
+            customerId={customer.id}
+            events={(customer.events || []).map((e) => ({ id: e.id, eventName: e.eventName }))}
+          />
+        </PermissionGate>
+      )}
+
+      {/* The customer's timeline (#1444): documents, account, groups. */}
+      <PermissionGate permission="customers.view">
+        <CustomerActivityCard customerId={customer.id} />
+      </PermissionGate>
+
       {/* Per-customer feature flags (#354 follow-up). Sits
           second-to-last by request — admins glance at these least
           often, but they need to live above the destructive
@@ -580,21 +604,21 @@ export const CustomerDetailPage: React.FC = () => {
           customer who unsubscribes by phone can be honoured immediately. */}
       {flags.newsletters && (
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-heading mb-4 flex items-center gap-2">
           <Megaphone className="w-5 h-5" />
           {t('customers.detail.marketingSection', 'Newsletter consent')}
         </h2>
         <label className="flex items-start justify-between gap-3 cursor-pointer">
           <span className="text-sm">
-            <span className="font-medium text-neutral-900 dark:text-neutral-100">
+            <span className="font-medium text-heading">
               {t('customers.field.marketingOptOut', 'Unsubscribed from newsletters')}
             </span>
-            <span className="block text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
+            <span className="block text-xs text-muted mt-0.5">
               {t('customers.field.marketingOptOutHelp',
                 'When on, this customer is skipped by every newsletter campaign. Emails about their galleries, quotes and invoices are not affected.')}
             </span>
             {form.marketingOptOut && customer?.marketingOptOutAt && (
-              <span className="block text-xs text-neutral-400 dark:text-neutral-500 mt-1">
+              <span className="block text-xs text-faint mt-1">
                 {t('customers.field.marketingOptOutSince', 'Since {{date}}',
                   { date: fmtDate(customer.marketingOptOutAt) })}
               </span>
@@ -614,11 +638,11 @@ export const CustomerDetailPage: React.FC = () => {
 
       {(flags.calendar || flags.quotes || flags.bills || flags.hoursLogging || flags.contracts) && (
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-1 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-heading mb-1 flex items-center gap-2">
           <ToggleLeft className="w-5 h-5" />
           {t('customers.detail.featuresSection', 'Customer features')}
         </h2>
-        <p className="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
+        <p className="text-xs text-muted mb-4">
           {t(
             'customers.detail.featuresHint',
             'Per-customer overrides for the customer-surface tabs. The global toggles in Settings → Features are the master switch — when global is OFF nobody sees the tab, regardless of what you set here. Defaults are ON, so flip a switch OFF to hide a tab for this specific customer.'
@@ -654,11 +678,14 @@ export const CustomerDetailPage: React.FC = () => {
             ...(flags.contracts
               ? [{ key: 'featureContracts' as const, labelKey: 'customer.nav.contracts', fallback: 'Contracts', badge: 'new' as const }]
               : []),
+            ...(flags.documents
+              ? [{ key: 'featureDocuments' as const, labelKey: 'customer.nav.documents', fallback: 'Documents', badge: 'new' as const }]
+              : []),
           ] as const).map(({ key, labelKey, fallback, badge }) => {
             const enabled = !!form[key];
             return (
               <label key={key} className="flex items-center justify-between gap-3 cursor-pointer">
-                <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
+                <span className="text-sm font-medium text-heading flex items-center gap-2">
                   {t(labelKey, fallback)}
                   {/* Status pill — 'soon' = amber, 'new' = green.
                       Colors match Settings → Features StatusBadge so
@@ -678,7 +705,7 @@ export const CustomerDetailPage: React.FC = () => {
                   role="switch"
                   aria-checked={enabled}
                   onClick={() => toggleFeature(key)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${enabled ? '' : 'bg-neutral-300 dark:bg-neutral-600'}`}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${enabled ? '' : 'bg-fill-strong'}`}
                   style={enabled ? { backgroundColor: 'var(--color-accent)' } : undefined}
                 >
                   <span
@@ -696,9 +723,10 @@ export const CustomerDetailPage: React.FC = () => {
             customer who isn't using hours logging. The rate is the
             DEFAULT for new entries; admin can still override on a
             per-entry basis from the standalone Hours logging page. */}
-        {flags.hoursLogging && form.featureHoursLogging && (
-          <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">
+        {/* Quotes price per-hour / per-day lines from these rates too (#1451). */}
+        {((flags.hoursLogging && form.featureHoursLogging) || (flags.quotes && form.featureQuotes)) && (
+          <div className="mt-4 pt-4 border-t border-line">
+            <label className="block text-sm font-medium text-heading mb-1">
               {t('customers.field.hourlyRate', 'Default hourly rate')}
             </label>
             <DecimalInput
@@ -713,11 +741,35 @@ export const CustomerDetailPage: React.FC = () => {
               placeholder="150.00"
               className="w-40 input"
             />
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+            <p className="text-xs text-muted mt-1">
               {t('customers.field.hourlyRateHint',
                 'Major units (e.g. 150.00 for {{currency}} 150). Leave blank to require a per-entry override on every block.',
                 { currency: profileDefaultCurrency })}
             </p>
+            {flags.quotes && form.featureQuotes && (
+              <div className="mt-3">
+                <label className="block text-sm font-medium text-heading mb-1">
+                  {t('customers.field.dayRate', 'Default day rate')}
+                </label>
+                <DecimalInput
+                  value={form.dayRateMinor != null ? form.dayRateMinor / 100 : NaN}
+                  fractionDigits={2}
+                  onChange={(n) => {
+                    setForm((prev) => ({
+                      ...prev,
+                      dayRateMinor: Number.isFinite(n) ? Math.max(0, Math.round(n * 100)) : null,
+                    } as any));
+                  }}
+                  placeholder="1200.00"
+                  className="w-40 input"
+                />
+                <p className="text-xs text-muted mt-1">
+                  {t('customers.field.dayRateHint',
+                    'Used by per-day quote lines. Major units ({{currency}}). Leave blank to use the default day rate from Settings → Accounting.',
+                    { currency: profileDefaultCurrency })}
+                </p>
+              </div>
+            )}
           </div>
         )}
 
@@ -733,17 +785,17 @@ export const CustomerDetailPage: React.FC = () => {
           off — admin has nothing to bill, so cadence is moot. */}
       {flags.bills && (
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-1 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-heading mb-1 flex items-center gap-2">
           <Calendar className="w-5 h-5" />
           {t('customers.billing.section', 'Billing cadence')}
         </h2>
-        <p className="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
+        <p className="text-xs text-muted mb-4">
           {t('customers.billing.hint',
             'Per-event (default): every invoice is sent on its own schedule. Monthly: all invoices issued in the period accumulate into one bill that fires on the configured day.')}
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
-            <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">
+            <label className="block text-sm font-medium text-heading mb-1">
               {t('customers.billing.cadence', 'Billing cadence')}
             </label>
             <select
@@ -759,7 +811,7 @@ export const CustomerDetailPage: React.FC = () => {
           </div>
           {(form.billingCadence === 'monthly' || form.billingCadence === 'quarterly') && (
             <div>
-              <label className="block text-sm font-medium text-neutral-900 dark:text-neutral-100 mb-1">
+              <label className="block text-sm font-medium text-heading mb-1">
                 {t('customers.billing.cycleDay', 'Cycle day')}
               </label>
               <input
@@ -770,7 +822,7 @@ export const CustomerDetailPage: React.FC = () => {
                 onChange={(e) => setForm((prev) => ({ ...prev, billingCycleDay: Number(e.target.value) } as any))}
                 className="input w-full"
               />
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {t('customers.billing.cycleDayHint',
                   '1..28 = day of month. Use negative -1..-15 for "N days before month end" (so -3 fires on the 28th of a 31-day month).')}
               </p>
@@ -781,16 +833,16 @@ export const CustomerDetailPage: React.FC = () => {
         {/* Per-customer Skonto opt-out (migration 112). For B2B
             customers who negotiated "no early-payment discount" — set
             once instead of ticking the per-invoice toggle every time. */}
-        <label className="mt-4 flex items-start gap-2 text-sm text-neutral-900 dark:text-neutral-100">
+        <label className="mt-4 flex items-start gap-2 text-sm text-heading">
           <input
             type="checkbox"
             checked={!!form.skontoDisabled}
             onChange={(e) => setForm((prev) => ({ ...prev, skontoDisabled: e.target.checked } as any))}
-            className="mt-0.5 rounded border-neutral-300 dark:border-neutral-600"
+            className="mt-0.5 rounded border-line-strong"
           />
           <span>
             {t('customers.billing.skontoDisabled', 'No Skonto for this customer')}
-            <span className="block text-xs text-neutral-500 dark:text-neutral-400">
+            <span className="block text-xs text-muted">
               {t('customers.billing.skontoDisabledHint',
                 'Disables the early-payment discount on all of this customer’s invoices, regardless of template or global defaults.')}
             </span>
@@ -801,7 +853,7 @@ export const CustomerDetailPage: React.FC = () => {
             inherit the tenant default, or force on/off for this client. */}
         {flags.incomingInvoices && (
           <div className="mt-4">
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+            <label className="block text-sm font-medium text-body mb-1">
               {t('customers.billing.rebillAttachProof', 'Attach supplier proof to re-billed invoices')}
             </label>
             <select
@@ -810,13 +862,13 @@ export const CustomerDetailPage: React.FC = () => {
                 const v = e.target.value;
                 setForm((prev) => ({ ...prev, rebillAttachProof: v === 'inherit' ? null : v === 'on' } as any));
               }}
-              className="w-full max-w-xs rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-3 py-2 text-sm text-neutral-900 dark:text-neutral-100"
+              className="w-full max-w-xs rounded-md border border-line-strong bg-panel px-3 py-2 text-sm text-heading"
             >
               <option value="inherit">{t('customers.billing.rebillAttachProofInherit', 'Use tenant default')}</option>
               <option value="on">{t('customers.billing.rebillAttachProofOn', 'Always attach')}</option>
               <option value="off">{t('customers.billing.rebillAttachProofOff', 'Never attach')}</option>
             </select>
-            <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+            <p className="mt-1 text-xs text-muted">
               {t('customers.billing.rebillAttachProofHint',
                 'Overrides the global default for this customer. The Send dialog still lets you pick individual proofs each time an invoice goes out.')}
             </p>
@@ -829,16 +881,16 @@ export const CustomerDetailPage: React.FC = () => {
             would ship. Hidden when no draft exists yet (admin hasn't
             saved anything onto the period). */}
         {(form.billingCadence === 'monthly' || form.billingCadence === 'manual') && monthlyDraft && monthlyDraft.lineItems.length > 0 && (
-          <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
+          <div className="mt-4 pt-4 border-t border-line">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+              <h3 className="text-sm font-semibold text-heading">
                 {form.billingCadence === 'manual'
                   ? t('customers.billing.draftPreview.titleManual',
                       'Pending — ships on manual trigger')
                   : t('customers.billing.draftPreview.title',
                       'Pending in this month\'s bill')}
               </h3>
-              <span className="text-xs text-neutral-500 dark:text-neutral-400">
+              <span className="text-xs text-muted">
                 {monthlyDraft.periodStart && monthlyDraft.periodEnd
                   ? t('customers.billing.draftPreview.periodRange',
                       '{{number}} · {{from}} – {{to}}',
@@ -850,9 +902,9 @@ export const CustomerDetailPage: React.FC = () => {
                   : monthlyDraft.invoiceNumber}
               </span>
             </div>
-            <div className="rounded-lg border border-neutral-200 dark:border-neutral-700 overflow-hidden">
+            <div className="rounded-lg border border-line overflow-hidden">
               <table className="w-full text-sm">
-                <thead className="bg-neutral-50 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
+                <thead className="bg-subtle text-body">
                   <tr>
                     <th className="px-3 py-2 text-left w-12">#</th>
                     <th className="px-3 py-2 text-left">
@@ -871,11 +923,11 @@ export const CustomerDetailPage: React.FC = () => {
                 </thead>
                 <tbody>
                   {monthlyDraft.lineItems.map((li) => (
-                    <tr key={li.id} className="border-t border-neutral-200 dark:border-neutral-700">
-                      <td className="px-3 py-1.5 tabular-nums text-neutral-500 dark:text-neutral-400">{li.position}</td>
+                    <tr key={li.id} className="border-t border-line">
+                      <td className="px-3 py-1.5 tabular-nums text-muted">{li.position}</td>
                       <td className="px-3 py-1.5">
                         {li.parentPosition != null && (
-                          <span className="text-neutral-500 dark:text-neutral-400 mr-1">↳</span>
+                          <span className="text-muted mr-1">↳</span>
                         )}
                         {li.description}
                       </td>
@@ -889,8 +941,8 @@ export const CustomerDetailPage: React.FC = () => {
                     </tr>
                   ))}
                 </tbody>
-                <tfoot className="bg-neutral-50 dark:bg-neutral-800">
-                  <tr className="border-t-2 border-neutral-300 dark:border-neutral-600">
+                <tfoot className="bg-subtle">
+                  <tr className="border-t-2 border-line-strong">
                     <td colSpan={4} className="px-3 py-2 text-right font-medium">
                       {t('crm.lineItems.total', 'Total')}
                     </td>
@@ -911,7 +963,7 @@ export const CustomerDetailPage: React.FC = () => {
             has no draft to arm; the equivalent action there is "Bill
             these hours" on the standalone Hours-logging page. */}
         {(form.billingCadence === 'monthly' || form.billingCadence === 'manual') && (
-          <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
+          <div className="mt-4 pt-4 border-t border-line">
             <Button
               variant="outline"
               disabled={triggerMonthlyBillMutation.isPending}
@@ -929,7 +981,7 @@ export const CustomerDetailPage: React.FC = () => {
             >
               {t('customers.billing.triggerNow', 'Trigger invoice now')}
             </Button>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-2">
+            <p className="text-xs text-muted mt-2">
               {form.billingCadence === 'manual'
                 ? t('customers.billing.triggerHintManual',
                     'Issues the running draft immediately. Manual-cadence drafts never ship automatically — this is the only way to send them. Refuses when nothing has been queued.')
@@ -965,13 +1017,13 @@ export const CustomerDetailPage: React.FC = () => {
           firing the standard portal-invitation email. We show ONE
           card with the right action based on the customer's state. */}
       <Card padding="lg">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-1 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-heading mb-1 flex items-center gap-2">
           <KeyRound className="w-5 h-5" />
           {t('customers.detail.passwordSection', 'Account actions')}
         </h2>
         {customer.isPassive ? (
           <>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
+            <p className="text-xs text-muted mb-4">
               {t(
                 'customers.passive.detailHint',
                 'This customer has no portal access (admin-only record). Click below to email them a portal sign-up link. The customer\'s existing invoices, quotes, and gallery assignments are preserved when they claim the invitation.',
@@ -987,7 +1039,7 @@ export const CustomerDetailPage: React.FC = () => {
               {t('customers.passive.sendInvite', 'Send portal invitation')}
             </Button>
             {!customer.isActive && (
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-2">
+              <p className="text-xs text-muted mt-2">
                 {t('customers.passive.deactivatedHint',
                   'Reactivate the customer before sending the invitation.')}
               </p>
@@ -995,7 +1047,7 @@ export const CustomerDetailPage: React.FC = () => {
           </>
         ) : (
           <>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
+            <p className="text-xs text-muted mb-4">
               {t(
                 'customers.detail.passwordHint',
                 'Sends a 7-day single-use reset link to the customer\'s email. The customer\'s current password keeps working until they click the link and set a new one.'
@@ -1011,7 +1063,7 @@ export const CustomerDetailPage: React.FC = () => {
               {t('customers.detail.passwordReset.button', 'Send password reset email')}
             </Button>
             {!customer.isActive && (
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-2">
+              <p className="text-xs text-muted mt-2">
                 {t('customers.detail.passwordReset.inactive', 'Reactivate the customer before sending a reset.')}
               </p>
             )}
@@ -1068,15 +1120,15 @@ export const CustomerDetailPage: React.FC = () => {
 
       {deactivateModal.isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-md rounded-xl shadow-lg bg-white dark:bg-neutral-900">
+          <div className="w-full max-w-md rounded-xl shadow-lg bg-shell">
             <div className="p-6">
               <div className="flex items-start gap-3 mb-4">
                 <AlertTriangle className="w-5 h-5 mt-0.5 text-amber-500" />
                 <div>
-                  <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
+                  <h2 className="text-lg font-semibold text-heading">
                     {t('customers.deactivate.title', 'Deactivate customer?')}
                   </h2>
-                  <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+                  <p className="mt-1 text-sm text-muted">
                     {t('customers.deactivate.body',
                       'They will no longer be able to log in. You can re-activate or fully erase them later.')}
                   </p>
@@ -1105,15 +1157,15 @@ export const CustomerDetailPage: React.FC = () => {
           and audit-log references are preserved. */}
       {eraseModal.isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-md rounded-xl shadow-lg bg-white dark:bg-neutral-900">
+          <div className="w-full max-w-md rounded-xl shadow-lg bg-shell">
             <div className="p-6">
               <div className="flex items-start gap-3 mb-4">
                 <AlertTriangle className="w-5 h-5 mt-0.5 text-red-600" />
                 <div>
-                  <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
+                  <h2 className="text-lg font-semibold text-heading">
                     {t('customers.erase.title', 'Erase customer data?')}
                   </h2>
-                  <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+                  <p className="mt-1 text-sm text-muted">
                     {t('customers.erase.body',
                       'Removes the customer\'s name, email, phone, address, company and credentials. The account row stays so historical event-access records and audit logs still reference it. This is irreversible — you cannot restore the data afterwards.')}
                   </p>

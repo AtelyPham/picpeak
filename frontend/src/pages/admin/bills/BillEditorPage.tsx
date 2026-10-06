@@ -7,7 +7,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Eye, Save as SaveIcon } from 'lucide-react';
+import { Eye, Save as SaveIcon } from 'lucide-react';
 import { Button, Card, Loading, Input, LocalizedDateInput, TimeField } from '../../../components/common';
 import { billsService, type InvoiceCreatePayload, type InvoiceQrFormat } from '../../../services/bills.service';
 import { quotesService } from '../../../services/quotes.service';
@@ -17,7 +17,10 @@ import { CustomerPicker } from '../../../components/admin/CustomerPicker';
 import { VatRateSelect } from '../../../components/admin/VatRateSelect';
 import { accountingService } from '../../../services/accounting.service';
 import { vatCodesService } from '../../../services/vatCodes.service';
-import { LineItemsTable, type EditableLineItem } from '../../../components/admin/LineItemsTable';
+import {
+  LineItemsTable, toEditableLineItem, toPayloadLineItem, type EditableLineItem,
+} from '../../../components/admin/LineItemsTable';
+import { countedLines } from '../../../utils/lineItemTotals';
 import { InstallmentsPanel } from '../../../components/admin/InstallmentsPanel';
 import { customerAdminService } from '../../../services/customerAdmin.service';
 import { userManagementService } from '../../../services/userManagement.service';
@@ -156,16 +159,7 @@ export const BillEditorPage: React.FC = () => {
       setEventDate(inv.eventDate || '');
       setEventTimeStart(inv.eventTimeStart || '');
       setEventTimeEnd(inv.eventTimeEnd || '');
-      setLineItems(existing.lineItems.map((li) => ({
-        id: li.id,
-        position: li.position,
-        quantity: Number(li.quantity),
-        description: li.description,
-        unitPrice: Number(li.unitPriceMinor || 0) / 100,
-        discountPercent: Number(li.discountPercent || 0),
-        parentPosition: li.parentPosition ?? null,
-        detailsText: li.detailsText || '',
-      })));
+      setLineItems(existing.lineItems.map(toEditableLineItem));
     }
   }, [existing]);
 
@@ -312,15 +306,9 @@ export const BillEditorPage: React.FC = () => {
           // shape. ids drop (this is a brand-new invoice; line items
           // get fresh ids on save) but position + parent linkage are
           // preserved so the hierarchy carries through.
-          setLineItems((quoteLineItems || []).map((li: any) => ({
-            position: li.position,
-            quantity: Number(li.quantity),
-            description: li.description,
-            unitPrice: Number(li.unitPriceMinor || 0) / 100,
-            discountPercent: Number(li.discountPercent || 0),
-            parentPosition: li.parentPosition ?? null,
-            detailsText: li.detailsText || '',
-          })));
+          // Unselected optional add-ons were never part of the deal (#1451);
+          // discount lines and units carry over as they are.
+          setLineItems(countedLines(quoteLineItems || []).map((li) => ({ ...toEditableLineItem(li), id: undefined })));
         }
       } catch {
         // Silent fail — admin can still author the invoice manually.
@@ -400,7 +388,9 @@ export const BillEditorPage: React.FC = () => {
     vatRate,
     vatCode,
     shippingAmountMinor: toMinor(shipping),
-    ccPdfEmail: ccPdfEmail || undefined,
+    // A cleared field is sent as null so the save clears it (see the event
+    // snapshot below).
+    ccPdfEmail: ccPdfEmail || null,
     // Payment-term template id (migration 113). null = no template
     // selected; backend falls back to source-quote snapshot or the
     // global crm_invoices_* defaults.
@@ -425,25 +415,17 @@ export const BillEditorPage: React.FC = () => {
     // spawns N invoices via spawnInstallmentInvoices and returns
     // { invoiceIds: [...] }; single-row or null → single invoice.
     installments: installments || undefined,
-    // Inline event snapshot (migration 123). Empty string → undefined
-    // so the backend can distinguish "not provided" from a deliberate
-    // clear (which the route's `optional({ values: 'falsy' })` already
-    // treats identically — falsy values bypass validation entirely).
+    // Inline event snapshot (migration 123). A cleared field is sent as
+    // null so the save clears it: undefined drops the key from the request,
+    // and the PUT handler kept the old value. The route's
+    // `optional({ values: 'falsy' })` lets null through unvalidated.
     eventId: eventId ?? undefined,
-    eventName: eventName || undefined,
-    eventDate: eventDate || undefined,
-    eventTimeStart: eventTimeStart || undefined,
-    eventTimeEnd: eventTimeEnd || undefined,
-    lineItems: lineItems.map((li) => ({
-      position: li.position,
-      quantity: li.quantity,
-      description: li.description,
-      unitPriceMinor: toMinor(li.unitPrice),
-      discountPercent: li.discountPercent,
-      // Migration 119 — sub-items + details survive save → reload.
-      parentPosition: li.parentPosition ?? null,
-      detailsText: li.detailsText || null,
-    })),
+    eventName: eventName || null,
+    eventDate: eventDate || null,
+    eventTimeStart: eventTimeStart || null,
+    eventTimeEnd: eventTimeEnd || null,
+    // Sub-items, details, units and discount lines survive save → reload.
+    lineItems: lineItems.map(toPayloadLineItem),
   });
 
   const handleSave = async (then?: 'preview') => {
@@ -503,15 +485,21 @@ export const BillEditorPage: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      {/* Wraps: Cancel made this row one button wider, and at 390px the
+          action group ran past the card edge. German labels are wider
+          still. */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <button onClick={() => navigate('/admin/clients/bills')}
-            className="text-sm text-neutral-600 dark:text-neutral-400 hover:underline mb-1 inline-flex items-center gap-1">
-            <ArrowLeft className="w-4 h-4" /> {t('common.back', 'Back')}
-          </button>
           <h2 className="text-xl font-bold">{isEdit ? `${t('bills.edit', 'Edit invoice')} ${existing?.invoice.invoiceNumber || ''}` : t('bills.new', 'New invoice')}</h2>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          {/* The only exit that does not write. These editors have no other
+              cancel, and the sidebar is an off-canvas drawer below lg, so a
+              named control beats relying on browser-back. An edit returns to
+              the record it came from; a new one has no detail page yet. */}
+          <Button variant="outline" onClick={() => navigate(isEdit ? `/admin/clients/bills/${id}` : '/admin/clients/bills')} disabled={busy}>
+            {t('common.cancel', 'Cancel')}
+          </Button>
           <Button variant="outline" onClick={handlePreviewUnsaved} disabled={busy}>
             <Eye className="w-4 h-4 mr-1" />{t('common.preview', 'Preview')}
           </Button>
@@ -580,12 +568,12 @@ export const BillEditorPage: React.FC = () => {
               onChange={setDueDate}
               disabled={!dueDateOverridden}
             />
-            <label className="mt-1.5 flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-400">
+            <label className="mt-1.5 flex items-center gap-2 text-xs text-soft">
               <input
                 type="checkbox"
                 checked={dueDateOverridden}
                 onChange={(e) => setDueDateOverridden(e.target.checked)}
-                className="rounded border-neutral-300 dark:border-neutral-600"
+                className="rounded border-line-strong"
               />
               {dueDateOverridden
                 ? t('bills.field.dueDateOverrideOn', 'Manual due date — untick to auto-set from send date + payment term')
@@ -622,7 +610,7 @@ export const BillEditorPage: React.FC = () => {
             <select
               value={qrFormat || ''}
               onChange={(e) => setQrFormat((e.target.value || null) as any)}
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm">
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm">
               {/* Empty value = use the business-profile default. Server
                   resolves the actual format at render time, so admins
                   who curate it once in Settings → Business profile
@@ -646,7 +634,7 @@ export const BillEditorPage: React.FC = () => {
             <select
               value={businessBankAccountId == null ? '' : String(businessBankAccountId)}
               onChange={(e) => setBusinessBankAccountId(e.target.value ? Number(e.target.value) : null)}
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm">
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm">
               <option value="">
                 {t('bills.field.bankAccountProfileDefault',
                   'Use business profile default for {{currency}}', { currency })}
@@ -688,7 +676,7 @@ export const BillEditorPage: React.FC = () => {
           <div>
             <label className="block text-sm font-medium mb-1">{t('bills.field.currency', 'Currency')}</label>
             <select value={currency} onChange={(e) => setCurrency(e.target.value)}
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm">
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm">
               <option>CHF</option><option>EUR</option><option>USD</option><option>GBP</option>
             </select>
           </div>
@@ -714,7 +702,7 @@ export const BillEditorPage: React.FC = () => {
           <div>
             <label className="block text-sm font-medium mb-1">{t('bills.field.paymentNetDays', 'Net days')}</label>
             <select
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm"
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm"
               value={paymentNetDaysTemplateId || ''}
               onChange={(e) => setPaymentNetDaysTemplateId(e.target.value ? Number(e.target.value) : null)}
             >
@@ -727,7 +715,7 @@ export const BillEditorPage: React.FC = () => {
           <div>
             <label className="block text-sm font-medium mb-1">{t('bills.field.paymentTiming', 'Payment schedule')}</label>
             <select
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm"
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm"
               value={paymentTimingTemplateId || ''}
               onChange={(e) => setPaymentTimingTemplateId(e.target.value ? Number(e.target.value) : null)}
             >
@@ -764,7 +752,7 @@ export const BillEditorPage: React.FC = () => {
             a multi-row plan and clicks Save, the backend spawns one
             invoice per row via spawnInstallmentInvoices (commit #4)
             and returns the array of new ids. */}
-        <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
+        <div className="mt-4 pt-4 border-t border-line">
           <InstallmentsPanel
             value={installments}
             onChange={setInstallments}
@@ -785,7 +773,7 @@ export const BillEditorPage: React.FC = () => {
             value={ccPdfEmail} onChange={(e) => setCcPdfEmail(e.target.value)} />
           {activeAdmins.length > 1 && (
             <div className="flex items-center gap-2">
-              <label htmlFor="bill-cc-pdf-picker" className="text-xs text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
+              <label htmlFor="bill-cc-pdf-picker" className="text-xs text-soft whitespace-nowrap">
                 {t('bills.field.ccPdfPickFromAdmins', 'Pick from admins:')}
               </label>
               <select
@@ -795,7 +783,7 @@ export const BillEditorPage: React.FC = () => {
                   const email = e.target.value;
                   if (email) setCcPdfEmail(email);
                 }}
-                className="text-xs px-2 py-1 border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+                className="text-xs px-2 py-1 border border-line-strong bg-panel text-heading rounded focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
               >
                 <option value="">{t('bills.field.ccPdfCustom', 'Custom email')}</option>
                 {activeAdmins.map((a: any) => (

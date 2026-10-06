@@ -57,13 +57,15 @@
   right: 0;
   z-index: 50;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   padding: 1rem 1.5rem;
   transition: all 0.3s ease;
 }
 
-.story-nav.scrolled {
+.story-nav.scrolled,
+.story-nav--selecting {
   background-color: rgba(13, 13, 13, 0.8);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -134,6 +136,86 @@
   color: var(--story-primary);
 }
 
+.story-nav-btn:focus-visible {
+  outline: 2px solid var(--story-primary);
+  outline-offset: 2px;
+  border-radius: 9999px;
+}
+
+.story-nav-btn.active {
+  color: var(--story-primary);
+}
+
+/* Selection bar (issue 1716): the fixed nav's second row while selecting.
+   It lives inside the nav rather than at a fixed offset below it, so the
+   nav's height (which changes with the search field and wrapping) can never
+   cover it. */
+.story-selection-bar {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.story-selection-count {
+  font-size: 0.875rem;
+  letter-spacing: 0.05em;
+  color: var(--story-foreground);
+}
+
+.story-selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.story-selection-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+  letter-spacing: 0.03em;
+  color: var(--story-foreground);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.story-selection-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.story-selection-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.story-selection-btn--primary {
+  background: var(--story-primary);
+  border-color: var(--story-primary);
+  color: var(--story-primary-foreground);
+  font-weight: 500;
+}
+
+.story-selection-btn--primary:hover:not(:disabled) {
+  background: white;
+  border-color: white;
+}
+
+.story-selection-btn:focus-visible {
+  outline: 2px solid var(--story-primary);
+  outline-offset: 2px;
+}
+
 .story-nav-favorites-count {
   position: absolute;
   top: -0.25rem;
@@ -187,11 +269,33 @@
   padding: 1rem;
 }
 
+/* Issue 1708: the title used `mix-blend-mode: overlay`, so its contrast came
+   entirely from the pixels behind it and it vanished over mid-toned hero
+   images. The copy now sits on a localised radial scrim that only darkens the
+   pixels behind the text, and the text itself carries a shadow, so the title
+   is legible over light, dark and mixed images without covering the hero. */
+.story-hero-copy {
+  position: relative;
+  padding: 2.5rem 2rem;
+  border-radius: 1.5rem;
+  /* The ellipse reaches the box corners at 100%, so the fade ends late
+     enough that a three-line title on a phone still sits on darkened
+     pixels; the text shadow carries the last few percent. */
+  background: radial-gradient(
+    ellipse at center,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 0, 0, 0.35) 50%,
+    rgba(0, 0, 0, 0.12) 80%,
+    rgba(0, 0, 0, 0) 100%
+  );
+}
+
 .story-hero-date {
   font-size: 0.875rem;
   text-transform: uppercase;
   letter-spacing: 0.2em;
-  opacity: 0.8;
+  opacity: 0.9;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
 }
 
 .story-hero-title {
@@ -199,7 +303,8 @@
   font-size: 3.75rem;
   font-style: italic;
   line-height: 1.1;
-  mix-blend-mode: overlay;
+  color: #ffffff;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6), 0 8px 32px rgba(0, 0, 0, 0.55);
 }
 
 @media (min-width: 768px) {
@@ -221,7 +326,8 @@
   gap: 1rem;
   font-size: 0.875rem;
   font-weight: 500;
-  opacity: 0.7;
+  opacity: 0.85;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
 }
 
 .story-hero-stats-divider {
@@ -296,6 +402,24 @@
   }
 }
 
+/* Issue 1709: `storyGridMode: 'natural'`. Rows are laid out from the stored
+   photo dimensions (justified-layout), so every box has the photo's own
+   aspect ratio and object-cover has nothing to crop. Boxes are positioned
+   before the images arrive, so nothing shifts while they load. */
+.story-gallery-justified {
+  position: relative;
+  width: 100%;
+}
+
+.story-gallery-justified-box {
+  position: absolute;
+}
+
+.story-gallery-justified-box .story-photo-card {
+  width: 100%;
+  height: 100%;
+}
+
 .story-gallery-grid-featured {
   grid-column: span 1;
   grid-row: span 1;
@@ -334,12 +458,80 @@
   transform: scale(1.05);
 }
 
+/* Issue 1709: a natural-grid box that could not take the photo's ratio
+   (justified-layout clamped the row) shows the whole photo on the card
+   background instead of cropping. Same specificity as the cover rule above
+   plus the modifier, so it wins. */
+.story-photo-card.story-photo-card--contain img {
+  object-fit: contain;
+}
+
 .story-photo-card-overlay {
   position: absolute;
   inset: 0;
   background-color: transparent;
   transition: background-color 0.3s ease;
   pointer-events: none;
+}
+
+/* Selection (issue 1716). The checkbox follows the Premium layout's: hidden
+   until hover, always shown while selecting or once selected. */
+.story-photo-card-check {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 10;
+  display: flex;
+  height: 1.75rem;
+  width: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  background-color: rgba(0, 0, 0, 0.35);
+  color: white;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+}
+
+.story-photo-card:hover .story-photo-card-check,
+.story-photo-card-check.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.story-photo-card-check:hover {
+  transform: scale(1.1);
+  background-color: rgba(0, 0, 0, 0.55);
+}
+
+.story-photo-card-check.selected {
+  background-color: var(--story-primary);
+  border-color: var(--story-primary);
+  color: var(--story-primary-foreground);
+}
+
+.story-photo-card-check:focus-visible {
+  outline: 2px solid var(--story-primary);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+.story-photo-card.selected {
+  outline: 3px solid var(--story-primary);
+  outline-offset: -3px;
+}
+
+.story-photo-card.selected img {
+  transform: scale(0.94);
+}
+
+.story-photo-card--selecting .story-photo-card-actions {
+  display: none;
 }
 
 .story-photo-card:hover .story-photo-card-overlay {
@@ -429,15 +621,24 @@
 }
 
 .story-carousel-item {
+  --story-carousel-height: 400px;
   width: 300px;
-  height: 400px;
+  height: var(--story-carousel-height);
 }
 
 @media (min-width: 768px) {
   .story-carousel-item {
+    --story-carousel-height: 500px;
     width: 400px;
-    height: 500px;
   }
+}
+
+/* Issue 1709: in natural mode a slide is as wide as the photo's aspect ratio
+   makes it at the row height, capped so a panorama cannot outgrow the
+   viewport. */
+.story-carousel-item--natural {
+  width: calc(var(--story-carousel-height) * var(--story-ratio, 0.75));
+  max-width: calc(100vw - 2rem);
 }
 
 /* Scroll to Top */
@@ -499,4 +700,9 @@
 
 .story-footer-btn:hover {
   background-color: white;
+}
+
+.story-footer-btn:focus-visible {
+  outline: 2px solid var(--story-primary);
+  outline-offset: 3px;
 }

@@ -113,6 +113,10 @@ export const LocalizedDateInput: React.FC<LocalizedDateInputProps> = ({
     const el = nativeRef.current;
     if (!el) return;
     try {
+      // The native input takes focus while its calendar is open: browsers
+      // (Safari especially) close the calendar when that input loses focus,
+      // so without this it stayed open after moving to another field.
+      el.focus({ preventScroll: true });
       el.showPicker();
     } catch {
       // showPicker throws on unsupported browsers / outside a user
@@ -123,7 +127,7 @@ export const LocalizedDateInput: React.FC<LocalizedDateInputProps> = ({
   return (
     <div className="w-full">
       {label && (
-        <label htmlFor={inputId} className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1.5">
+        <label htmlFor={inputId} className="block text-sm font-medium text-body mb-1.5">
           {label}
         </label>
       )}
@@ -167,7 +171,7 @@ export const LocalizedDateInput: React.FC<LocalizedDateInputProps> = ({
           disabled={disabled}
           tabIndex={-1}
           aria-label={label}
-          className="absolute inset-y-0 right-0 pr-3 flex items-center text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 disabled:opacity-50"
+          className="absolute inset-y-0 right-0 pr-3 flex items-center text-muted hover:text-body disabled:opacity-50"
         >
           <Calendar className="w-5 h-5" />
         </button>
@@ -183,7 +187,12 @@ export const LocalizedDateInput: React.FC<LocalizedDateInputProps> = ({
           min={min}
           max={max}
           disabled={disabled}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            onChange(e.target.value);
+            // Back to the visible field once a date is picked, so the next
+            // Tab or click behaves as usual.
+            document.getElementById(inputId)?.focus({ preventScroll: true });
+          }}
           tabIndex={-1}
           aria-hidden="true"
           className="sr-only"
@@ -195,7 +204,7 @@ export const LocalizedDateInput: React.FC<LocalizedDateInputProps> = ({
         </p>
       )}
       {helperText && !error && (
-        <p id={`${inputId}-helper`} className="mt-1.5 text-sm text-neutral-500 dark:text-neutral-400">
+        <p id={`${inputId}-helper`} className="mt-1.5 text-sm text-muted">
           {helperText}
         </p>
       )}

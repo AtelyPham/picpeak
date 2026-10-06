@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Mail,
-  Save,
   Send,
   Server,
   Lock,
@@ -26,12 +25,15 @@ import { Palette, RefreshCw, Info } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useModal, useMutationWithToast } from '../../hooks';
+import { SettingsSaveBar } from '../../components/admin/SettingsSaveBar';
+import { useConfirm } from '../../components/common/ConfirmDialog';
 import { emailService, type EmailConfig, type EmailTemplate, type EmailTemplateTranslation } from '../../services/email.service';
 import { settingsService } from '../../services/settings.service';
 import { businessProfileService } from '../../services/businessProfile.service';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from "../../components/common/LanguageSelector.tsx";
 import { useFeatureFlags, type FeatureKey } from '../../contexts/FeatureFlagsContext';
+import { SectionPageHeader } from '../../components/admin/SectionPageHeader';
 
 /**
  * Template categorisation (migration 098). Sidebar sections render
@@ -124,6 +126,9 @@ const TEMPLATE_DISPLAY_NAMES: Record<string, string> = {
   expiration_warning: 'Expiration Warning',
   gallery_expired: 'Gallery Expired',
   archive_complete: 'Archive Complete (Admin)',
+  // two-stage delivery (issue 1562)
+  gallery_completed: 'Complete Gallery Ready',
+  delivery_due_reminder: 'Full Gallery Due (Admin)',
   // core / admin
   admin_invitation: 'Admin Invitation',
   admin_password_reset: 'Admin Password Reset',
@@ -144,6 +149,12 @@ const TEMPLATE_DISPLAY_NAMES: Record<string, string> = {
   customer_invitation: 'Customer Invitation',
   customer_password_reset: 'Customer Password Reset',
   customer_gallery_assigned: 'Gallery Assigned to Customer',
+  customer_document_shared: 'Document Shared with Customer',
+  customer_document_uploaded_admin: 'Customer Uploaded a Document (Admin)',
+  customer_document_reviewed: 'Customer Document Not Accepted',
+  customer_document_access_alert_admin: 'Unusual Document Access (Admin)',
+  customer_document_requested: 'Document Requested from Customer',
+  customer_document_request_reminder: 'Document Request Reminder',
   // quotes
   quote_sent: 'Quote Sent',
   quote_accepted_customer: 'Quote Accepted (Customer)',
@@ -175,6 +186,9 @@ export const EmailConfigPage: React.FC = () => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'smtp' | 'templates' | 'sent' | 'received'>('smtp');
   const [selectedTemplateKey, setSelectedTemplateKey] = useState<string>('gallery_created');
+  // For callbacks that outlive a render (a save completing after a switch).
+  const selectedTemplateKeyRef = useRef(selectedTemplateKey);
+  selectedTemplateKeyRef.current = selectedTemplateKey;
   const [editedTemplate, setEditedTemplate] = useState<Partial<EmailTemplate>>({});
   const [editingLang, setEditingLang] = useState<string>('en');
   const [showPassword, setShowPassword] = useState(false);
@@ -245,17 +259,38 @@ export const EmailConfigPage: React.FC = () => {
     queryFn: () => settingsService.getAllSettings(),
   });
 
+  // Server snapshots for the shared save bar: the bar is dirty when a draft
+  // differs from these, and Discard puts the draft back.
+  const colorsDraft = {
+    primary: emailPrimaryColor, secondary: emailSecondaryColor, bodyBg: emailBodyBgColor,
+    containerBg: emailContainerBgColor, listBg: emailListBgColor, bodyText: emailBodyTextColor,
+    mutedText: emailMutedTextColor, buttonText: emailButtonTextColor,
+  };
+  const [loadedColors, setLoadedColors] = useState<typeof colorsDraft | null>(null);
+  const applyColors = (c: typeof colorsDraft) => {
+    setEmailPrimaryColor(c.primary); setEmailSecondaryColor(c.secondary); setEmailBodyBgColor(c.bodyBg);
+    setEmailContainerBgColor(c.containerBg); setEmailListBgColor(c.listBg); setEmailBodyTextColor(c.bodyText);
+    setEmailMutedTextColor(c.mutedText); setEmailButtonTextColor(c.buttonText);
+  };
+  const [loadedSmtp, setLoadedSmtp] = useState<EmailConfig | null>(null);
+  const [loadedTemplate, setLoadedTemplate] = useState<Partial<EmailTemplate>>({});
+
   React.useEffect(() => {
     if (allSettings) {
-      if (allSettings.email_primary_color) setEmailPrimaryColor(allSettings.email_primary_color);
-      if (allSettings.email_secondary_color) setEmailSecondaryColor(allSettings.email_secondary_color);
-      if (allSettings.email_body_bg_color) setEmailBodyBgColor(allSettings.email_body_bg_color);
-      if (allSettings.email_container_bg_color) setEmailContainerBgColor(allSettings.email_container_bg_color);
-      if (allSettings.email_list_bg_color) setEmailListBgColor(allSettings.email_list_bg_color);
-      if (allSettings.email_body_text_color) setEmailBodyTextColor(allSettings.email_body_text_color);
-      if (allSettings.email_muted_text_color) setEmailMutedTextColor(allSettings.email_muted_text_color);
-      if (allSettings.email_button_text_color) setEmailButtonTextColor(allSettings.email_button_text_color);
+      const next = {
+        primary: allSettings.email_primary_color || '#5C8762',
+        secondary: allSettings.email_secondary_color || '#f9f9f9',
+        bodyBg: allSettings.email_body_bg_color || '#f5f5f5',
+        containerBg: allSettings.email_container_bg_color || '#ffffff',
+        listBg: allSettings.email_list_bg_color || '#f9f9f9',
+        bodyText: allSettings.email_body_text_color || '#333333',
+        mutedText: allSettings.email_muted_text_color || '#666666',
+        buttonText: allSettings.email_button_text_color || '#ffffff',
+      };
+      applyColors(next);
+      setLoadedColors(next);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allSettings]);
 
   // Fetch email templates
@@ -277,6 +312,7 @@ export const EmailConfigPage: React.FC = () => {
       try {
         const config = await emailService.getConfig();
         setSmtpConfig(config);
+        setLoadedSmtp(config);
       } catch (error) {
         // Config might not exist yet
       }
@@ -287,6 +323,7 @@ export const EmailConfigPage: React.FC = () => {
   React.useEffect(() => {
     if (selectedTemplate) {
       setEditedTemplate(selectedTemplate);
+      setLoadedTemplate(selectedTemplate);
     }
   }, [selectedTemplate]);
 
@@ -344,7 +381,8 @@ export const EmailConfigPage: React.FC = () => {
   });
 
   const handleSaveEmailColors = () => {
-    saveEmailColorsMutation.mutate({
+    const snapshot = colorsDraft;
+    void saveEmailColorsMutation.mutateAsync({
       email_primary_color: emailPrimaryColor,
       email_secondary_color: emailSecondaryColor,
       email_body_bg_color: emailBodyBgColor,
@@ -353,7 +391,7 @@ export const EmailConfigPage: React.FC = () => {
       email_body_text_color: emailBodyTextColor,
       email_muted_text_color: emailMutedTextColor,
       email_button_text_color: emailButtonTextColor,
-    });
+    }).then(() => setLoadedColors(snapshot)).catch(() => {});
   };
 
   /**
@@ -394,6 +432,41 @@ export const EmailConfigPage: React.FC = () => {
     toast.info(t('email.syncedFromBranding', 'Email colours synced from Branding. Click Save to apply.'));
   };
 
+  // ---- Shared save bar: one bar per sub-tab saves whatever is dirty ----
+  const confirm = useConfirm();
+  const smtpDirty = !!loadedSmtp && JSON.stringify(smtpConfig) !== JSON.stringify(loadedSmtp);
+  const colorsDirty = !!loadedColors && JSON.stringify(colorsDraft) !== JSON.stringify(loadedColors);
+  const templateDirty = JSON.stringify(editedTemplate.translations ?? null) !== JSON.stringify(loadedTemplate.translations ?? null);
+  const isDirty = activeTab === 'smtp' ? (smtpDirty || colorsDirty) : activeTab === 'templates' ? templateDirty : false;
+  const discardActive = () => {
+    if (activeTab === 'smtp') {
+      if (loadedSmtp) setSmtpConfig(loadedSmtp);
+      if (loadedColors) applyColors(loadedColors);
+    } else if (activeTab === 'templates') {
+      setEditedTemplate(loadedTemplate);
+    }
+  };
+  const confirmDiscard = () => confirm({
+    title: t('settings.saveBar.leaveTitle', 'Discard unsaved changes?'),
+    message: t('settings.saveBar.leaveMessage', 'You have unsaved changes on this page. Leaving now discards them.'),
+    confirmLabel: t('settings.saveBar.leaveConfirm', 'Discard and leave'),
+    cancelLabel: t('settings.saveBar.leaveCancel', 'Stay'),
+    variant: 'warning',
+  });
+  const switchTab = async (tab: typeof activeTab) => {
+    if (tab === activeTab) return;
+    if (isDirty && !(await confirmDiscard())) return;
+    if (isDirty) discardActive();
+    setActiveTab(tab);
+  };
+  const pickTemplate = async (template: EmailTemplate) => {
+    if (template.template_key === selectedTemplateKey) return;
+    if (templateDirty && !(await confirmDiscard())) return;
+    setSelectedTemplateKey(template.template_key);
+    setEditedTemplate(template);
+    setLoadedTemplate(template);
+  };
+
   const handleSaveSmtp = () => {
     // Validate SMTP config
     if (!smtpConfig.smtp_host || !smtpConfig.smtp_port || !smtpConfig.from_email) {
@@ -401,7 +474,7 @@ export const EmailConfigPage: React.FC = () => {
       return;
     }
 
-    saveConfigMutation.mutate(smtpConfig);
+    void saveConfigMutation.mutateAsync(smtpConfig).then(() => setLoadedSmtp(smtpConfig)).catch(() => {});
   };
 
   const handleTestEmail = () => {
@@ -448,10 +521,18 @@ export const EmailConfigPage: React.FC = () => {
 
   const handleSaveTemplate = () => {
     if (selectedTemplateKey && editedTemplate.translations) {
-      saveTemplateMutation.mutate({
-        key: selectedTemplateKey,
+      const snapshot = editedTemplate;
+      const savedKey = selectedTemplateKey;
+      void saveTemplateMutation.mutateAsync({
+        key: savedKey,
         translations: editedTemplate.translations,
-      });
+      }).then(() => {
+        // Only if this template is still the open one: picking another
+        // template while the save was in flight has already loaded that
+        // one's snapshot, and this one's must not replace it — Discard
+        // would then copy A into B's editor.
+        if (selectedTemplateKeyRef.current === savedKey) setLoadedTemplate(snapshot);
+      }).catch(() => {});
     }
   };
 
@@ -497,51 +578,52 @@ export const EmailConfigPage: React.FC = () => {
 
   return (
     <div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">{t('email.title')}</h1>
-        <p className="text-neutral-600 dark:text-neutral-400 mt-1">{t('email.subtitle')}</p>
-      </div>
+      <SectionPageHeader
+        icon={Mail}
+        title={t('email.title')}
+        description={t('email.subtitle')}
+      />
 
       {/* Tab Navigation */}
-      <div className="border-b border-neutral-200 dark:border-neutral-700 mb-6">
+      <div className="border-b border-line mb-6">
         <nav className="-mb-px flex gap-6">
           <button
-            onClick={() => setActiveTab('smtp')}
+            onClick={() => { void switchTab('smtp'); }}
             className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${
               activeTab === 'smtp'
                 ? 'border-accent text-accent'
-                : 'border-transparent text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300'
+                : 'border-transparent text-muted hover:text-body'
             }`}
           >
             {t('email.smtpSettings')}
           </button>
           <button
-            onClick={() => setActiveTab('templates')}
+            onClick={() => { void switchTab('templates'); }}
             className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${
               activeTab === 'templates'
                 ? 'border-accent text-accent'
-                : 'border-transparent text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300'
+                : 'border-transparent text-muted hover:text-body'
             }`}
           >
             {t('email.emailTemplates')}
           </button>
           <button
-            onClick={() => setActiveTab('sent')}
+            onClick={() => { void switchTab('sent'); }}
             className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${
               activeTab === 'sent'
                 ? 'border-accent text-accent'
-                : 'border-transparent text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300'
+                : 'border-transparent text-muted hover:text-body'
             }`}
           >
             {t('email.sentEmails.tab', 'Sent emails')}
           </button>
           {featureFlags.incomingMail && (
             <button
-              onClick={() => setActiveTab('received')}
+              onClick={() => { void switchTab('received'); }}
               className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${
                 activeTab === 'received'
                   ? 'border-accent text-accent'
-                  : 'border-transparent text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300'
+                  : 'border-transparent text-muted hover:text-body'
               }`}
             >
               {t('email.received.tab', 'Received emails')}
@@ -564,7 +646,7 @@ export const EmailConfigPage: React.FC = () => {
               the Business profile — point at it from where the mail is set
               up rather than making the operator hunt for it. */}
           {!signatureUnknown && (
-          <div className="lg:col-span-2 flex items-start gap-2 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/60 p-3 text-sm text-neutral-600 dark:text-neutral-400">
+          <div className="lg:col-span-2 flex items-start gap-2 rounded-md border border-line bg-neutral-50 dark:bg-neutral-800/60 p-3 text-sm text-soft">
             <Info className="w-4 h-4 mt-0.5 shrink-0" />
             <span>
               {signatureEnabled
@@ -578,11 +660,11 @@ export const EmailConfigPage: React.FC = () => {
           </div>
           )}
           <Card padding="md">
-            <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('email.smtpConfiguration')}</h2>
+            <h2 className="text-lg font-semibold text-heading mb-4">{t('email.smtpConfiguration')}</h2>
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('email.smtpHost')} <span className="text-red-500">*</span>
                 </label>
                 <Input
@@ -596,7 +678,7 @@ export const EmailConfigPage: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                  <label className="block text-sm font-medium text-body mb-1">
                     {t('email.port')} <span className="text-red-500">*</span>
                   </label>
                   <Input
@@ -608,13 +690,13 @@ export const EmailConfigPage: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                  <label className="block text-sm font-medium text-body mb-1">
                     {t('email.security')}
                   </label>
                   <select
                     value={smtpConfig.smtp_secure ? 'ssl' : 'tls'}
                     onChange={(e) => setSmtpConfig(prev => ({ ...prev, smtp_secure: e.target.value === 'ssl' }))}
-                    className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+                    className="w-full px-3 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
                   >
                     <option value="tls">TLS</option>
                     <option value="ssl">SSL</option>
@@ -629,9 +711,9 @@ export const EmailConfigPage: React.FC = () => {
                     type="checkbox"
                     checked={!smtpConfig.tls_reject_unauthorized}
                     onChange={(e) => setSmtpConfig(prev => ({ ...prev, tls_reject_unauthorized: !e.target.checked }))}
-                    className="w-4 h-4 text-accent border-neutral-300 dark:border-neutral-600 rounded focus:ring-primary-500"
+                    className="w-4 h-4 text-accent border-line-strong rounded focus:ring-primary-500"
                   />
-                  <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                  <span className="text-sm font-medium text-body">
                     {t('email.ignoreSslErrors')}
                   </span>
                 </label>
@@ -647,7 +729,7 @@ export const EmailConfigPage: React.FC = () => {
                 )}</div>
 
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('email.username')}
                 </label>
                 <Input
@@ -660,7 +742,7 @@ export const EmailConfigPage: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('email.password')}
                 </label>
                 <div className="relative">
@@ -682,7 +764,7 @@ export const EmailConfigPage: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('email.fromEmail')} <span className="text-red-500">*</span>
                 </label>
                 <Input
@@ -695,7 +777,7 @@ export const EmailConfigPage: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('email.fromName')}
                 </label>
                 <Input
@@ -706,20 +788,11 @@ export const EmailConfigPage: React.FC = () => {
                 />
               </div>
 
-              <Button
-                variant="primary"
-                onClick={handleSaveSmtp}
-                isLoading={saveConfigMutation.isPending}
-                leftIcon={<Save className="w-5 h-5" />}
-                className="w-full"
-              >
-                {t('email.saveSmtpSettings')}
-              </Button>
             </div>
           </Card>
 
           <Card padding="md">
-            <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('email.testEmailSection')}</h2>
+            <h2 className="text-lg font-semibold text-heading mb-4">{t('email.testEmailSection')}</h2>
 
             <div className="mb-4 p-4 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-lg">
               <div className="flex items-start gap-3">
@@ -737,7 +810,7 @@ export const EmailConfigPage: React.FC = () => {
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('email.testEmailAddressLabel')}
                 </label>
                 <Input
@@ -776,8 +849,8 @@ export const EmailConfigPage: React.FC = () => {
           </Card>
 
           <Card padding="md">
-            <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-2">{t('email.flushQueue.title')}</h2>
-            <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4">{t('email.flushQueue.help')}</p>
+            <h2 className="text-lg font-semibold text-heading mb-2">{t('email.flushQueue.title')}</h2>
+            <p className="text-sm text-soft mb-4">{t('email.flushQueue.help')}</p>
             <Button
               variant="outline"
               onClick={() => flushQueueMutation.mutate()}
@@ -798,7 +871,7 @@ export const EmailConfigPage: React.FC = () => {
             <div className="flex items-center justify-between gap-4 mb-4">
               <div className="flex items-center gap-2">
                 <Palette className="w-5 h-5 text-neutral-500" />
-                <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">{t('email.brandingTitle')}</h2>
+                <h2 className="text-lg font-semibold text-heading">{t('email.brandingTitle')}</h2>
               </div>
               {/* One-click copy from Branding theme so email + site share an
                   identical palette. Just stages the values — admin still has
@@ -812,7 +885,7 @@ export const EmailConfigPage: React.FC = () => {
                 {t('email.syncFromBranding', 'Sync from Branding')}
               </Button>
             </div>
-            <p className="text-sm text-neutral-500 dark:text-neutral-400 mb-6">{t('email.brandingDescription')}</p>
+            <p className="text-sm text-muted mb-6">{t('email.brandingDescription')}</p>
 
             {/* 8 email colour pickers. Each row uses the same compact label
                 + info-tooltip pattern as the gallery palette in
@@ -832,9 +905,9 @@ export const EmailConfigPage: React.FC = () => {
                 { label: t('email.buttonTextColor', 'Button text'), help: t('email.buttonTextColorHelp', 'Text colour on filled buttons. Should contrast cleanly against the Primary colour. No Branding equivalent — usually white.'), value: emailButtonTextColor, setter: setEmailButtonTextColor, fallback: '#ffffff' },
               ].map(({ label, help, value, setter, fallback }) => (
                 <div key={label}>
-                  <label className="flex items-center gap-1.5 text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+                  <label className="flex items-center gap-1.5 text-sm font-medium text-body mb-2">
                     {label}
-                    <span className="info-tooltip text-neutral-400 dark:text-neutral-500" data-tooltip={help} tabIndex={0}>
+                    <span className="info-tooltip text-faint" data-tooltip={help} tabIndex={0}>
                       <Info className="w-3.5 h-3.5" />
                     </span>
                   </label>
@@ -843,7 +916,7 @@ export const EmailConfigPage: React.FC = () => {
                       type="color"
                       value={value}
                       onChange={(e) => setter(e.target.value)}
-                      className="w-10 h-10 rounded border border-neutral-300 dark:border-neutral-600 cursor-pointer"
+                      className="w-10 h-10 rounded border border-line-strong cursor-pointer"
                     />
                     <Input
                       type="text"
@@ -857,16 +930,6 @@ export const EmailConfigPage: React.FC = () => {
               ))}
             </div>
 
-            <div className="mt-6">
-              <Button
-                variant="primary"
-                onClick={handleSaveEmailColors}
-                isLoading={saveEmailColorsMutation.isPending}
-                leftIcon={<Save className="w-5 h-5" />}
-              >
-                {t('email.saveEmailColors')}
-              </Button>
-            </div>
           </Card>
         </div>
       )}
@@ -879,7 +942,7 @@ export const EmailConfigPage: React.FC = () => {
       {activeTab === 'templates' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <Card padding="sm">
-            <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('email.templates')}</h3>
+            <h3 className="text-lg font-semibold text-heading mb-4">{t('email.templates')}</h3>
             {/* Templates grouped by category (migration 098). Categories
                 in CATEGORY_ORDER render in sequence; templates that
                 report an unrecognised category fall into 'core' so a
@@ -913,18 +976,15 @@ export const EmailConfigPage: React.FC = () => {
                 return (
                   <button
                     key={template.template_key}
-                    onClick={() => {
-                      setSelectedTemplateKey(template.template_key);
-                      setEditedTemplate(template);
-                    }}
+                    onClick={() => { void pickTemplate(template); }}
                     className={`w-full text-left p-3 rounded-lg transition-colors ${
                       selectedTemplateKey === template.template_key
                         ? 'tile-selected'
-                        : 'bg-neutral-50 dark:bg-neutral-700 border-2 border-transparent hover:bg-neutral-100 dark:hover:bg-neutral-600'
+                        : 'bg-inset border-2 border-transparent hover:bg-hover'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium text-neutral-900 dark:text-neutral-100 truncate">
+                      <p className="font-medium text-heading truncate">
                         {templateName}
                       </p>
                       <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -936,12 +996,12 @@ export const EmailConfigPage: React.FC = () => {
                             {t('email.featureOff', 'Feature off')}
                           </span>
                         )}
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 dark:bg-neutral-600 text-neutral-600 dark:text-neutral-300">
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-fill text-body">
                           {translationCount}/{SUPPORTED_LANGUAGES.length}
                         </span>
                       </div>
                     </div>
-                    <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1 truncate">
+                    <p className="text-sm text-muted mt-1 truncate">
                       {enTranslation?.subject || ''}
                     </p>
                   </button>
@@ -968,13 +1028,13 @@ export const EmailConfigPage: React.FC = () => {
                       ];
                       return (
                         <div key={category}>
-                          <h4 className="px-1 mb-2 text-[11px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+                          <h4 className="px-1 mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
                             {t(`email.categories.${category}`, category)}
                           </h4>
                           <div className="space-y-4 pl-1">
                             {visibleSubs.map((sub) => (
                               <div key={sub}>
-                                <h5 className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+                                <h5 className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-faint">
                                   {t(`email.subcategories.${sub}`, sub)}
                                 </h5>
                                 <div className="space-y-2">
@@ -988,7 +1048,7 @@ export const EmailConfigPage: React.FC = () => {
                     }
                     return (
                       <div key={category}>
-                        <h4 className="px-1 mb-2 text-[11px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+                        <h4 className="px-1 mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
                           {t(`email.categories.${category}`, category)}
                         </h4>
                         <div className="space-y-2">
@@ -1005,7 +1065,7 @@ export const EmailConfigPage: React.FC = () => {
           <div className="lg:col-span-2">
             <Card padding="md">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">{t('email.editTemplate')}</h3>
+                <h3 className="text-lg font-semibold text-heading">{t('email.editTemplate')}</h3>
                 <div className="flex gap-2">
                   <Button
                     variant="outline"
@@ -1015,20 +1075,11 @@ export const EmailConfigPage: React.FC = () => {
                   >
                     {t('email.preview')}
                   </Button>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={handleSaveTemplate}
-                    isLoading={saveTemplateMutation.isPending}
-                    leftIcon={<Save className="w-4 h-4" />}
-                  >
-                    {t('email.save')}
-                  </Button>
                 </div>
               </div>
 
               {/* Language tabs */}
-              <div className="flex flex-wrap gap-1 mb-4 p-1 bg-neutral-100 dark:bg-neutral-700 rounded-lg">
+              <div className="flex flex-wrap gap-1 mb-4 p-1 bg-inset rounded-lg">
                 {SUPPORTED_LANGUAGES.map(lang => {
                   const hasContent = editedTemplate.translations?.[lang.code]?.body_html;
                   return (
@@ -1037,8 +1088,8 @@ export const EmailConfigPage: React.FC = () => {
                       onClick={() => setEditingLang(lang.code)}
                       className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-1.5 ${
                         editingLang === lang.code
-                          ? 'bg-white dark:bg-neutral-800 text-accent-dark shadow-sm'
-                          : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200'
+                          ? 'bg-panel text-accent-dark shadow-sm'
+                          : 'text-soft hover:text-body'
                       }`}
                     >
                       <lang.Flag/>
@@ -1060,7 +1111,7 @@ export const EmailConfigPage: React.FC = () => {
                       <button
                         key={lang.code}
                         onClick={() => handleCopyFromLanguage(lang.code)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1 text-sm bg-white dark:bg-neutral-800 border border-blue-300 dark:border-blue-700 rounded-md hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-700 dark:text-blue-300"
+                        className="inline-flex items-center gap-1.5 px-3 py-1 text-sm bg-panel border border-blue-300 dark:border-blue-700 rounded-md hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-700 dark:text-blue-300"
                       >
                         <Copy className="w-3.5 h-3.5" />
                         {t('email.copyFrom')} <lang.Flag/> {lang.name}
@@ -1072,19 +1123,19 @@ export const EmailConfigPage: React.FC = () => {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                  <label className="block text-sm font-medium text-body mb-1">
                     {t('email.templateName')}
                   </label>
                   <Input
                     type="text"
                     value={TEMPLATE_DISPLAY_NAMES[selectedTemplateKey] || selectedTemplateKey}
                     disabled
-                    className="bg-neutral-50 dark:bg-neutral-700"
+                    className="bg-inset"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                  <label className="block text-sm font-medium text-body mb-1">
                     {t('email.subjectLine')} ({SUPPORTED_LANGUAGES.find(l => l.code === editingLang)?.name || editingLang})
                   </label>
                   <Input
@@ -1096,7 +1147,7 @@ export const EmailConfigPage: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                  <label className="block text-sm font-medium text-body mb-1">
                     {t('email.emailBody')} ({SUPPORTED_LANGUAGES.find(l => l.code === editingLang)?.name || editingLang})
                   </label>
                   <EmailTemplateEditor
@@ -1109,6 +1160,22 @@ export const EmailConfigPage: React.FC = () => {
             </Card>
           </div>
         </div>
+      )}
+
+      {(activeTab === 'smtp' || activeTab === 'templates') && (
+        <SettingsSaveBar
+          isDirty={isDirty}
+          isSaving={saveConfigMutation.isPending || saveEmailColorsMutation.isPending || saveTemplateMutation.isPending}
+          onSave={() => {
+            if (activeTab === 'smtp') {
+              if (smtpDirty) handleSaveSmtp();
+              if (colorsDirty) handleSaveEmailColors();
+            } else {
+              handleSaveTemplate();
+            }
+          }}
+          onDiscard={discardActive}
+        />
       )}
 
       {/* Email Preview Modal */}

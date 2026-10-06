@@ -1,8 +1,14 @@
 const express = require('express');
+const path = require('path');
 const router = express.Router();
 const { adminAuth } = require('../middleware/auth');
-const { requirePermission } = require('../middleware/permissions');
-const { databaseBackupService, isUnderPubliclyServableRoot } = require('../services/databaseBackup');
+const { requirePermission, isSuperAdminUser } = require('../middleware/permissions');
+const {
+  databaseBackupService,
+  isUnderPubliclyServableRoot,
+  resolveDatabaseBackupDestination,
+  destinationPathProblem,
+} = require('../services/databaseBackup');
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
 const { getPagination } = require('../utils/routeHelpers');
@@ -72,6 +78,14 @@ router.put('/config', requirePermission('backup.create'), async (req, res) => {
       return res.status(400).json({ error: 'Destination path must not be inside a publicly served directory' });
     }
 
+    // Quotes and line breaks would let the path end a sqlite3 dot-command and
+    // start another one. createSQLiteBackup no longer interpolates the
+    // destination, but such a path should never be saved in the first place.
+    const pathProblem = destinationPathProblem(req.body.database_backup_destination_path);
+    if (pathProblem) {
+      return res.status(400).json({ error: pathProblem });
+    }
+
     // A retention of 0 or less pushes cleanupOldBackups' cutoff to today or
     // the future, deleting every completed backup on the next scheduled run
     // — a backup.create holder achieving what backup.delete gates on /cleanup.
@@ -80,6 +94,31 @@ router.put('/config', requirePermission('backup.create'), async (req, res) => {
       && (!Number.isFinite(req.body.database_backup_retention_days) || req.body.database_backup_retention_days < 1)
     ) {
       return res.status(400).json({ error: 'database_backup_retention_days must be a positive number' });
+    }
+
+    // Where the database dump lands decides who can read it. The file-backup
+    // download route zips `<backup_destination_path>/backup-<run>` for any
+    // backup.view holder, so a backup.create holder who could point the dump
+    // at one of those directories could pull the whole database — password
+    // hashes, integration secrets, customer data — past the super-admin-only
+    // export. Changing the destination is a super-admin decision; every
+    // other setting stays with backup.create (Codex security audit
+    // 2026-09-30).
+    if (Object.prototype.hasOwnProperty.call(req.body, 'database_backup_destination_path')) {
+      const current = await db('app_settings')
+        .where('setting_key', 'database_backup_destination_path')
+        .first();
+      let currentValue = null;
+      if (current) {
+        try { currentValue = JSON.parse(current.setting_value); } catch { currentValue = current.setting_value; }
+      }
+      const requested = req.body.database_backup_destination_path;
+      if (String(requested ?? '') !== String(currentValue ?? '') && !(await isSuperAdminUser(req.admin.id))) {
+        return res.status(403).json({
+          error: 'Only a super admin can change the database backup destination',
+          code: 'SUPER_ADMIN_REQUIRED',
+        });
+      }
     }
 
     const updates = [];
@@ -255,16 +294,24 @@ router.post('/test', requirePermission('backup.create'), async (req, res) => {
       testResults.databaseConnectionError = error.message;
     }
     
-    // Test destination path
-    if (config.destinationPath) {
+    // Test the directory a real backup would write to. This read an
+    // unprefixed `destinationPath` that getBackupConfig() never returns, so
+    // the check was skipped and always reported the destination unwritable.
+    const destinationPath = await resolveDatabaseBackupDestination(config);
+    testResults.destinationPath = destinationPath;
+    if (isUnderPubliclyServableRoot(destinationPath)) {
+      testResults.destinationError = `Refusing to write a database backup to a publicly served directory: ${destinationPath}`;
+    } else {
       try {
         const fs = require('fs').promises;
-        const testFile = `${config.destinationPath}/.test-${Date.now()}`;
+        await fs.mkdir(destinationPath, { recursive: true });
+        const testFile = path.join(destinationPath, `.test-${Date.now()}`);
         await fs.writeFile(testFile, 'test');
         await fs.unlink(testFile);
         testResults.destinationWritable = true;
       } catch (error) {
-        testResults.destinationError = error.message;
+        testResults.destinationError = `Cannot write to the database backup directory ${destinationPath}: ${error.code || error.message}. `
+          + 'Set database_backup_destination_path to a directory the backend can write to, or mount a writable volume at that path.';
       }
     }
     

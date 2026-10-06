@@ -6,12 +6,15 @@
  *   POST   /                            create (status=draft, seeded with all active system blocks)
  *   GET    /:id                         detail (contract + included blocks)
  *   PUT    /:id                         update (block toggles + scalars; draft only)
+ *   GET    /:id/send-preview            what a send would freeze and deliver, and its problems (read-only)
  *   POST   /:id/send                    render PDF + mint token + queue email
  *   POST   /:id/cancel                  cancel (draft|sent)
  *   POST   /:id/countersign             admin in-browser counter-signature
  *   POST   /:id/upload-signed-pdf       attach wet-signed PDF (multer single)
+ *   GET    /:id/paper-signature-coverage  signers a paper copy must cover
  *   GET    /:id/pdf                     download / preview the system PDF
  *   GET    /:id/signed-pdf              download the wet-signed PDF (when present)
+ *   GET    /:id/certificate             download the signing certificate
  *   GET    /:id/preview                 render fresh PDF for preview (no DB write)
  *   GET    /blocks                      list block library
  *   POST   /blocks                      create admin-authored block
@@ -25,17 +28,24 @@
 const express = require('express');
 const { capabilityEvidence } = require('../usage/capabilityEvidence');
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const multer = require('multer');
 const { assertContractPdfPath } = require('../utils/safePath');
-const { body, param, query } = require('express-validator');
+const { resolveStoredPath, toStoredPath } = require('../utils/storedPath');
+const { body, header, param, query } = require('express-validator');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
 const { handleAsync, validateRequest, successResponse } = require('../utils/routeHelpers');
-const { validateFileType } = require('../utils/fileSecurityUtils');
+const { validateFileType, validateFileContent } = require('../utils/fileSecurityUtils');
+const { buildContentDisposition } = require('../utils/filenameSanitizer');
 const contractService = require('../services/contractService');
+const accountingHistory = require('../services/accountingHistory');
 const contractBlocksService = require('../services/contractBlocksService');
+const contractContent = require('../services/contract/content');
+const contractAttachments = require('../services/contract/attachments');
 const { db } = require('../database/db');
+const { clientIpForAudit } = require('../utils/clientIp');
 
 const router = express.Router();
 
@@ -57,7 +67,7 @@ router.use(adminAuth);
 router.use(requireContractsFlag);
 
 // ----- multer upload (wet-signed PDF) --------------------------------
-const getStoragePath = () => process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
+const { getStoragePath } = require('../config/storage');
 
 const signedPdfStorage = multer.diskStorage({
   destination: async (req, file, cb) => {
@@ -71,7 +81,10 @@ const signedPdfStorage = multer.diskStorage({
       return cb(new Error('Invalid contract id'));
     }
     const ext = path.extname(file.originalname) || '.pdf';
-    cb(null, `contract-${contractId}-${Date.now()}${ext}`);
+    // The random part keeps two uploads in the same millisecond apart. They
+    // shared one file, and the request that lost the compare-and-set in
+    // attachSignedPdfUpload then deleted the winner's PDF with its cleanup.
+    cb(null, `contract-${contractId}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`);
   },
 });
 
@@ -91,7 +104,7 @@ const signedPdfUpload = multer({
 // Transforms (snake_case DB → camelCase API)
 // ---------------------------------------------------------------------
 
-function transformContract(c, inclusions) {
+function transformContract(c, inclusions, textSections, attachmentRows) {
   if (!c) return null;
   return {
     id: c.id,
@@ -158,6 +171,25 @@ function transformContract(c, inclusions) {
     // service writes them through hasColumn guards).
     sourceQuoteId: c.source_quote_id || null,
     convertedEventId: c.converted_event_id || null,
+    // Contract templates (#1445).
+    templateId: c.template_id || null,
+    templateVersionId: c.template_version_id || null,
+    templateName: c.template_name || null,
+    templateVersion: c.template_version_number == null ? null : Number(c.template_version_number),
+    lockVersion: c.lock_version == null ? 1 : Number(c.lock_version),
+    renderedContentSha256: c.rendered_content_sha256 || null,
+    // Collect-then-freeze (#1446): when the customer's details came in.
+    dataCollectedAt: c.data_collected_at || null,
+    textSections: Array.isArray(textSections)
+      ? textSections.map((s) => ({
+        id: s.id,
+        section: s.section,
+        position: s.position,
+        heading: s.heading || null,
+        body: contractContent.parseLocaleMap(s.body),
+      }))
+      : undefined,
+    attachments: Array.isArray(attachmentRows) ? attachmentRows.map(contractAttachments.inclusionToApi) : undefined,
     createdAt: c.created_at,
     updatedAt: c.updated_at,
     inclusions: Array.isArray(inclusions)
@@ -173,10 +205,17 @@ function transformContract(c, inclusions) {
           description: inc.block_description,
           bodyText: inc.block_body_text,
           bodyTextDe: inc.block_body_text_de,
+          bodyTextRu: inc.block_body_text_ru ?? null,
+          bodyTextPt: inc.block_body_text_pt ?? null,
+          bodyTextNl: inc.block_body_text_nl ?? null,
+          bodyTextFr: inc.block_body_text_fr ?? null,
           isSystem: inc.block_is_system === true || inc.block_is_system === 1 || inc.block_is_system === '1',
         },
         bodyTextSnapshot: inc.body_text_snapshot,
         bodyTextDeSnapshot: inc.body_text_de_snapshot,
+        // #1445: every frozen language, and the per-contract override.
+        snapshot: contractContent.inclusionSnapshot(inc),
+        bodyOverride: contractContent.parseLocaleMap(inc.body_override),
       }))
       : undefined,
   };
@@ -315,8 +354,15 @@ router.get(
       page,
       pageSize,
     });
+    // How far the customer signers have got, for the derived "partly signed
+    // (1 of 2)" label (#1446) — derived here, never stored as a status.
+    const progress = await require('../services/contract/signers')
+      .customerSignerProgress(result.rows.map((row) => row.id));
     return successResponse(res, {
-      contracts: result.rows.map((row) => transformContract(row)),
+      contracts: result.rows.map((row) => ({
+        ...transformContract(row),
+        signerProgress: progress.get(Number(row.id)) || null,
+      })),
       total: result.total,
       page: result.page,
       pageSize: result.pageSize,
@@ -339,12 +385,45 @@ router.post(
     body('outroText').optional({ nullable: true }).isString(),
     body('issueDate').optional({ nullable: true }).isISO8601(),
     body('validUntil').optional({ nullable: true }).isISO8601(),
+    body('blocks').optional().isArray(),
+    body('blocks.*.blockId').optional().isInt({ min: 1 }),
+    body('blocks.*.included').optional().isBoolean(),
+    body('blocks.*.position').optional().isInt({ min: 0 }),
+    // Contract templates (#1445): the version to start from, per-clause
+    // overrides and free-text sections.
+    body('templateVersionId').optional({ nullable: true }).isInt({ min: 1 }),
+    body('blocks.*.body').optional({ nullable: true }).isObject(),
+    body('textSections').optional().isArray({ max: 100 }),
+    body('textSections.*.section').optional().isString().isLength({ max: 32 }),
+    body('textSections.*.position').optional().isInt({ min: 0 }),
+    body('textSections.*.heading').optional({ nullable: true }).isString().isLength({ max: 255 }),
+    body('textSections.*.body').optional({ nullable: true }).isObject(),
+    // The editor sends one key per save and reuses it on retry (issue 1447).
+    header('Idempotency-Key').optional()
+      .matches(/^[A-Za-z0-9_-]{8,128}$/)
+      .withMessage('Idempotency-Key must be 8-128 letters, digits, "-" or "_"'),
   ],
   handleAsync(async (req, res) => {
     validateRequest(req);
-    const id = await contractService.createContract(req.body, req.admin?.id);
+    const { id, replayed } = await contractService.createContractIdempotent(
+      req.body, req.admin?.id, req.get('Idempotency-Key') || null,
+    );
+    // One line per successful create, keyed by outcome, so log monitoring can
+    // count created drafts and idempotent replays separately. Failures are
+    // logged by the error handler with the same requestId and an errorCode
+    // (VALIDATION_ERROR, IDEMPOTENCY_KEY_CONFLICT, ...) or errorClass.
+    require('../utils/logger').info('contract_create', {
+      outcome: replayed ? 'replayed' : 'created',
+      contractId: id,
+      adminId: req.admin?.id,
+      requestId: req.id,
+    });
     const data = await contractService.getContractById(id);
-    return successResponse(res, { contract: transformContract(data.contract, data.inclusions) }, 201);
+    return successResponse(
+      res,
+      { contract: transformContract(data.contract, data.inclusions, data.textSections, data.attachments), ...(replayed && { replayed: true }) },
+      replayed ? 200 : 201,
+    );
   }),
 );
 
@@ -356,7 +435,31 @@ router.get(
     validateRequest(req);
     const data = await contractService.getContractById(parseInt(req.params.id, 10));
     if (!data) return res.status(404).json({ error: 'Contract not found' });
-    return successResponse(res, { contract: transformContract(data.contract, data.inclusions) });
+    const contract = transformContract(data.contract, data.inclusions, data.textSections, data.attachments);
+    // Whether {{customer_address}} would print empty — the Send path then
+    // offers to ask the customer for their details first (#1446).
+    if (data.contract.status === 'draft') {
+      const customer = await db('customer_accounts').where({ id: data.contract.customer_account_id })
+        .first('address_line1', 'address_line2', 'postal_code', 'city');
+      contract.customerAddressMissing = require('../services/contract/dataCollection').addressMissing(customer);
+    }
+    return successResponse(res, { contract });
+  }),
+);
+
+// The PDFs generated for this contract (#1445): unsigned, signed, audit
+// certificate — kind, sha256, size, pages, template version. No paths.
+router.get(
+  '/:id/documents',
+  requirePermission('contracts.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const id = parseInt(req.params.id, 10);
+    const exists = await db('contracts').where({ id }).first('id');
+    if (!exists) return res.status(404).json({ error: 'Contract not found' });
+    const documents = await require('../services/documentArtifactService').listForDocument('contract', id);
+    return successResponse(res, { documents });
   }),
 );
 
@@ -379,22 +482,54 @@ router.put(
     body('blocks.*.blockId').optional().isInt({ min: 1 }),
     body('blocks.*.included').optional().isBoolean(),
     body('blocks.*.position').optional().isInt({ min: 0 }),
+    body('blocks.*.body').optional({ nullable: true }).isObject(),
+    body('textSections').optional().isArray({ max: 100 }),
+    body('textSections.*.section').optional().isString().isLength({ max: 32 }),
+    body('textSections.*.position').optional().isInt({ min: 0 }),
+    body('textSections.*.heading').optional({ nullable: true }).isString().isLength({ max: 255 }),
+    body('textSections.*.body').optional({ nullable: true }).isObject(),
+    // Optimistic lock (#1445): the lockVersion the editor loaded.
+    body('lockVersion').optional().isInt({ min: 1 }),
+    body('attachments').optional().isArray({ max: 20 }),
+    body('attachments.*.attachmentId').optional().isInt({ min: 1 }),
+    body('attachments.*.delivery').optional().isIn(['merged', 'separate']),
   ],
   handleAsync(async (req, res) => {
     validateRequest(req);
     await contractService.updateContract(parseInt(req.params.id, 10), req.body, req.admin?.id);
     const data = await contractService.getContractById(parseInt(req.params.id, 10));
-    return successResponse(res, { contract: transformContract(data.contract, data.inclusions) });
+    return successResponse(res, { contract: transformContract(data.contract, data.inclusions, data.textSections, data.attachments) });
+  }),
+);
+
+// The pre-send review (#1445): read-only, nothing is written or logged.
+router.get(
+  '/:id/send-preview',
+  requirePermission('contracts.manage'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const { buildSendPreview } = require('../services/contract/sendPreview');
+    return successResponse(res, await buildSendPreview(parseInt(req.params.id, 10)));
   }),
 );
 
 router.post(
   '/:id/send',
   requirePermission('contracts.manage'),
-  [param('id').isInt({ min: 1 })],
+  // collectData (#1446): ask the customer to complete their details first;
+  // the contract is frozen and sent once they have.
+  [
+    param('id').isInt({ min: 1 }),
+    body('reviewToken').optional({ nullable: true }).isString().isLength({ min: 64, max: 64 }),
+    body('collectData').optional().isBoolean(),
+  ],
   handleAsync(async (req, res) => {
     validateRequest(req);
-    const result = await contractService.sendContract(parseInt(req.params.id, 10), req.admin?.id);
+    const result = await contractService.sendContract(parseInt(req.params.id, 10), req.admin?.id, {
+      reviewToken: req.body && req.body.reviewToken ? req.body.reviewToken : null,
+      collectData: req.body && req.body.collectData === true,
+    });
     return successResponse(res, result);
   }),
 );
@@ -416,7 +551,11 @@ router.post(
 // to replay).
 router.post(
   '/:id/convert-to-event',
-  requirePermission('contracts.manage'),
+  // Same rule as the quote conversions: the destination domain's permission
+  // is required too (Codex security audit 2026-09-30).
+  // Delegates to quoteService.convertToEvent, which schedules the invoices
+  // too, so bills.manage is required as well.
+  requirePermission(['contracts.manage', 'events.create', 'bills.manage'], { requireAll: true }),
   [param('id').isInt({ min: 1 })],
   handleAsync(async (req, res) => {
     validateRequest(req);
@@ -430,7 +569,7 @@ router.post(
 // Convert a fully-signed contract into invoice(s) only — no event.
 router.post(
   '/:id/convert-to-invoice',
-  requirePermission('contracts.manage'),
+  requirePermission(['contracts.manage', 'bills.manage'], { requireAll: true }),
   [param('id').isInt({ min: 1 })],
   handleAsync(async (req, res) => {
     validateRequest(req);
@@ -484,6 +623,79 @@ router.post(
   }),
 );
 
+// Signers and the signing log (#1446). Reading needs contracts.view;
+// changing the signers, sending a link again and opening the encrypted
+// evidence need contracts.manage. Signers only change on drafts.
+router.get(
+  '/:id/signers',
+  requirePermission('contracts.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const signingV2 = require('../services/contract/signingV2');
+    return successResponse(res, await signingV2.adminOverview(parseInt(req.params.id, 10)));
+  }),
+);
+
+router.put(
+  '/:id/signers',
+  requirePermission('contracts.manage'),
+  [
+    param('id').isInt({ min: 1 }),
+    body('order').optional().isIn(['parallel', 'sequential']),
+    body('signers').isArray({ min: 1, max: 5 }),
+    body('signers.*.name').isString().trim().isLength({ min: 1, max: 255 }),
+    body('signers.*.email').isString().trim().isEmail().isLength({ max: 255 }),
+  ],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const id = parseInt(req.params.id, 10);
+    await require('../services/contract/signers').setSigners(id, { signers: req.body.signers, order: req.body.order });
+    return successResponse(res, await require('../services/contract/signingV2').adminOverview(id));
+  }),
+);
+
+router.post(
+  '/:id/signers/:signerId/resend',
+  requirePermission('contracts.manage'),
+  [param('id').isInt({ min: 1 }), param('signerId').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const signingV2 = require('../services/contract/signingV2');
+    return successResponse(res, await signingV2.resendInvitation(
+      parseInt(req.params.id, 10), parseInt(req.params.signerId, 10), req.admin?.id,
+    ));
+  }),
+);
+
+// A reminder for one signer (#1446): a new link in the reminder mail — the
+// same function the hourly reminder ladder uses.
+router.post(
+  '/:id/signers/:signerId/remind',
+  requirePermission('contracts.manage'),
+  [param('id').isInt({ min: 1 }), param('signerId').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const signingV2 = require('../services/contract/signingV2');
+    return successResponse(res, await signingV2.sendReminder(
+      parseInt(req.params.id, 10), parseInt(req.params.signerId, 10), { adminId: req.admin?.id },
+    ));
+  }),
+);
+
+// The encrypted evidence (IP address, user agent, a decline reason),
+// decrypted for a dispute. Every opening is written to the activity log.
+router.get(
+  '/:id/signing-evidence',
+  requirePermission('contracts.manage'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const signingV2 = require('../services/contract/signingV2');
+    return successResponse(res, { evidence: await signingV2.revealEvidence(parseInt(req.params.id, 10), req.admin?.id) });
+  }),
+);
+
 router.post(
   '/:id/countersign',
   requirePermission('contracts.manage'),
@@ -491,18 +703,44 @@ router.post(
     param('id').isInt({ min: 1 }),
     body('name').isString().isLength({ min: 1, max: 255 }),
     body('signatureDataUrl').optional({ nullable: true }).isString(),
+    body('mode').optional().isIn(['drawn', 'typed']),
   ],
   handleAsync(async (req, res) => {
     validateRequest(req);
-    const ip = req.ip || req.headers['x-forwarded-for'] || null;
+    // req.ip only (utils/clientIp): X-Forwarded-For can be set by anyone.
+    const ip = clientIpForAudit(req);
     const result = await contractService.recordAdminCountersignature(
       parseInt(req.params.id, 10),
-      { name: req.body.name, ip, signatureDataUrl: req.body.signatureDataUrl },
+      {
+        name: req.body.name, ip, userAgent: req.get('user-agent') || null,
+        signatureDataUrl: req.body.signatureDataUrl, mode: req.body.mode,
+      },
       req.admin?.id,
     );
     return successResponse(res, result);
   }),
 );
+
+/**
+ * A wet-signed PDF the admin holds on paper. It completes the contract for
+ * everyone, so on a signatures-v2 contract the admin states which customer
+ * signers the copy carries (#1446) — `coversSignerIds`, a JSON array or a
+ * comma-separated list, since this is a multipart body. The service refuses
+ * the upload unless it accounts for every signer who has not signed or
+ * declined, and records the answer in the event log. Once any signer has
+ * signed in the browser the upload is refused outright
+ * (ELECTRONIC_SIGNATURE_PRESENT).
+ */
+function parseCoversSignerIds(raw) {
+  if (raw === undefined || raw === null || raw === '') return [];
+  const list = Array.isArray(raw)
+    ? raw
+    : String(raw).trim().startsWith('[')
+      ? (() => { try { return JSON.parse(raw); } catch (_) { return []; } })()
+      : String(raw).split(',');
+  return (Array.isArray(list) ? list : []).map((value) => Number(String(value).trim()))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
 
 router.post(
   '/:id/upload-signed-pdf',
@@ -510,16 +748,73 @@ router.post(
   [param('id').isInt({ min: 1 })],
   signedPdfUpload.single('file'),
   handleAsync(async (req, res) => {
-    validateRequest(req);
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded', code: 'NO_FILE' });
+    // Multer has written the file by now. Whatever refuses the upload from
+    // here on — validation, a missing or unsignable contract, a failed
+    // write — the file must not stay behind under the storage root.
+    try {
+      validateRequest(req);
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded', code: 'NO_FILE' });
+      }
+      // The filter above only saw the reported type and the file name. The upload
+      // becomes the authoritative signed contract, so its bytes must be a PDF.
+      if (!(await validateFileContent(req.file.path, 'application/pdf'))) {
+        await fs.promises.unlink(req.file.path).catch(() => {});
+        return res.status(400).json({ error: 'The uploaded file is not a PDF.', code: 'INVALID_PDF' });
+      }
+      const result = await contractService.attachSignedPdfUpload(
+        parseInt(req.params.id, 10),
+        req.file.path,
+        'admin',
+        req.admin.id,
+        { coversSignerIds: parseCoversSignerIds(req.body && req.body.coversSignerIds) },
+      );
+      return successResponse(res, result);
+    } catch (err) {
+      // The service removes the file on the refusals it knows; this covers
+      // everything else — unless the contract already points at the file,
+      // which means the upload committed and something after it failed.
+      // A lookup that fails says nothing either way; the file stays, as an
+      // orphan at worst, rather than deleting the PDF a fully_signed contract
+      // may point at.
+      if (req.file && req.file.path) {
+        let verdict = 'unknown';
+        try {
+          const committed = await db('contracts')
+            .where({ id: parseInt(req.params.id, 10), signed_pdf_path: toStoredPath(req.file.path) })
+            .first();
+          verdict = committed ? 'committed' : 'not_committed';
+        } catch (lookupErr) {
+          require('../utils/logger').warn('Signed PDF upload: could not verify whether the upload committed; keeping the file', {
+            contractId: req.params.id, path: req.file.path, error: lookupErr.message,
+          });
+        }
+        if (verdict === 'not_committed') await fs.promises.unlink(req.file.path).catch(() => {});
+      }
+      throw err;
     }
-    const result = await contractService.attachSignedPdfUpload(
-      parseInt(req.params.id, 10),
-      req.file.path,
-      'admin',
-    );
-    return successResponse(res, result);
+  }),
+);
+
+// Which customer signers an uploaded paper copy would have to cover: the
+// list the upload dialog ticks off (#1446). `electronicSignaturePresent`
+// says the upload would be refused because someone already signed in the
+// browser.
+router.get(
+  '/:id/paper-signature-coverage',
+  requirePermission('contracts.manage'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const signingV2 = require('../services/contract/signingV2');
+    const signers = require('../services/contract/signers');
+    const contractId = parseInt(req.params.id, 10);
+    const rows = await signingV2.awaitingCustomerSigners(contractId);
+    return successResponse(res, {
+      signers: rows.map(signers.signerToApi).map((s) => ({ id: s.id, position: s.position, name: s.name, status: s.status })),
+      // A signature given in the browser rules the paper copy out entirely.
+      electronicSignaturePresent: await signingV2.electronicSignaturePresent(contractId),
+    });
   }),
 );
 
@@ -534,7 +829,7 @@ router.get(
     if (!data.contract.pdf_path) {
       return res.status(404).json({ error: 'PDF not yet rendered', code: 'PDF_MISSING' });
     }
-    if (!fs.existsSync(data.contract.pdf_path)) {
+    if (!fs.existsSync(resolveStoredPath(data.contract.pdf_path) || '')) {
       return res.status(404).json({ error: 'PDF file missing from disk', code: 'PDF_MISSING_ON_DISK' });
     }
     // Defence-in-depth: reject any path that resolves outside the
@@ -563,7 +858,7 @@ router.get(
     if (!data.contract.signed_pdf_path) {
       return res.status(404).json({ error: 'No signed PDF uploaded', code: 'SIGNED_PDF_MISSING' });
     }
-    if (!fs.existsSync(data.contract.signed_pdf_path)) {
+    if (!fs.existsSync(resolveStoredPath(data.contract.signed_pdf_path) || '')) {
       return res.status(404).json({ error: 'Signed PDF missing from disk', code: 'SIGNED_PDF_MISSING_ON_DISK' });
     }
     const safePath = assertContractPdfPath(data.contract.signed_pdf_path);
@@ -573,6 +868,37 @@ router.get(
       `inline; filename="${data.contract.contract_number}-signed.pdf"`,
     );
     fs.createReadStream(safePath).pipe(res);
+  }),
+);
+
+// The signing certificate — the evidence record issued when the contract was
+// completed (#1446). Until this route existed it only ever left the server as
+// an email attachment.
+router.get(
+  '/:id/certificate',
+  requirePermission('contracts.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const { readCertificate } = require('../services/contract/signatureAssets');
+    const { fileName, buffer } = await readCertificate(parseInt(req.params.id, 10));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', buildContentDisposition(fileName, 'attachment'));
+    return res.send(buffer);
+  }),
+);
+
+// Change history (migration 219): every change to this contract, and its
+// included blocks, with old and new values, oldest first.
+router.get(
+  '/:id/history',
+  requirePermission('contracts.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const entries = await accountingHistory.listHistory('contract', parseInt(req.params.id, 10));
+    return successResponse(res, { entries });
   }),
 );
 
@@ -594,14 +920,31 @@ router.get(
 // 131). Lets the admin confirm a contract PDF on disk still matches
 // what was issued, catching backup-corruption / manual-edit cases
 // without needing to drop to a shell.
+// The itemised integrity report (#1446): every artefact re-hashed against
+// what was recorded, the event chain, the manifest. `?format=pdf` renders it
+// as a one-page report. Each run is logged with its overall result.
 router.get(
   '/:id/verify-integrity',
   requirePermission('contracts.view'),
-  [param('id').isInt({ min: 1 })],
+  [param('id').isInt({ min: 1 }), query('format').optional().isIn(['json', 'pdf'])],
   handleAsync(async (req, res) => {
     validateRequest(req);
-    const result = await contractService.verifyIntegrity(parseInt(req.params.id, 10));
-    return successResponse(res, result);
+    const report = await require('../services/contract/integrity')
+      .integrityReport(parseInt(req.params.id, 10), { adminId: req.admin?.id });
+    if (req.query.format !== 'pdf') return successResponse(res, report);
+    const contract = await db('contracts').where({ id: report.contractId }).first('language');
+    const profile = (await db('business_profile').where({ id: 1 }).first()) || {};
+    const theme = await require('../services/pdfThemeService').resolveTheme('contract');
+    const buffer = await require('../services/pdf/integrityReport').renderIntegrityReport({
+      report,
+      locale: (contract && contract.language) || 'de',
+      theme,
+      issuer: { pdfFontTtfPath: profile.pdf_font_ttf_path || null, pdfFontFamily: profile.pdf_font_family || null, companyName: profile.company_name || null },
+    });
+    res.set('Content-Type', 'application/pdf');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Disposition', buildContentDisposition(`${report.contractNumber}-integrity.pdf`, 'attachment'));
+    return res.send(buffer);
   }),
 );
 

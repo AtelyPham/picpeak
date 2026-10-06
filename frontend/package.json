@@ -1,13 +1,14 @@
 {
   "name": "picpeak-frontend",
   "private": true,
-  "version": "3.132.0-beta.0",
+  "version": "3.164.0-beta.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "node ./scripts/build.js",
     "build:check": "tsc -b && node ./scripts/build.js",
     "lint": "eslint .",
+    "codemod:ui-tokens": "node scripts/codemod-ui-tokens.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "i18n:extract": "i18next-cli extract",
@@ -16,6 +17,8 @@
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
+    "@dnd-kit/core": "6.3.1",
+    "@dnd-kit/sortable": "10.0.0",
     "@fullcalendar/core": "^6.1.20",
     "@fullcalendar/daygrid": "^6.1.20",
     "@fullcalendar/interaction": "^6.1.20",
@@ -88,7 +91,7 @@
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.34.1",
     "vite": "^7.1.12",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
   },
   "optionalDependencies": {
     "@rollup/rollup-linux-x64-gnu": "^4.45.1"

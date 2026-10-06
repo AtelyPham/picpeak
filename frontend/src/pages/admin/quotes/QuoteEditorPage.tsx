@@ -15,14 +15,20 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Eye, Send } from 'lucide-react';
+import { Eye, RefreshCw, Send } from 'lucide-react';
 import { Button, Card, Loading, Input, LocalizedDateInput, TimeField } from '../../../components/common';
 import {
   quotesService,
   type QuoteCreatePayload,
   type PaymentTermInstallment,
 } from '../../../services/quotes.service';
-import { LineItemsTable, type EditableLineItem } from '../../../components/admin/LineItemsTable';
+import {
+  LineItemsTable, toEditableLineItem, toPayloadLineItem, type EditableLineItem,
+} from '../../../components/admin/LineItemsTable';
+import { DiscountsPanel } from '../../../components/admin/quotes/DiscountsPanel';
+import { TextBlockPicker, appendTextBlock } from '../../../components/admin/quotes/TextBlockPicker';
+import { DecimalInput } from '../../../components/common/DecimalInput';
+import { quoteCatalogService } from '../../../services/quoteCatalog.service';
 import { CustomerPicker } from '../../../components/admin/CustomerPicker';
 import { ProjectSelect } from '../../../components/admin/ProjectSelect';
 import { VatRateSelect } from '../../../components/admin/VatRateSelect';
@@ -37,6 +43,7 @@ import { userManagementService } from '../../../services/userManagement.service'
 import { settingsService } from '../../../services/settings.service';
 import { useAdminAuth } from '../../../contexts/AdminAuthContext';
 import { toast } from 'react-toastify';
+import { quoteErrorText } from '../../../utils/quoteErrors';
 
 interface FormState {
   customerAccountId: number | null;
@@ -73,6 +80,9 @@ interface FormState {
   /** Migration 121 — optional Project Overview link. */
   projectId: number | null;
   lineItems: EditableLineItem[];
+  /** Migration 220 — quote-wide hours / days that bound lines follow. */
+  hours: number | null;
+  days: number | null;
   // Ad-hoc installments (commit #6). null = use the payment-timing
   // template's installments; array = explicit per-quote override.
   installments?: import('../../../services/quotes.service').PaymentTermInstallment[] | null;
@@ -106,6 +116,8 @@ const empty: FormState = {
   businessBankAccountId: null,
   projectId: null,
   lineItems: [],
+  hours: null,
+  days: null,
   installments: null,
 };
 
@@ -113,20 +125,24 @@ function toMinor(amount: number) {
   return Math.round((Number(amount) || 0) * 100);
 }
 
-function buildPayload(f: FormState): QuoteCreatePayload {
+// A field the admin cleared is sent as null so the save clears it: undefined
+// drops the key from the request, and the server kept the old value.
+// validUntil, the payment-term pickers and the bank account stay undefined
+// when empty — there "empty" means "use the default".
+export function buildPayload(f: FormState): QuoteCreatePayload {
   return {
     customerAccountId: f.customerAccountId || 0,
     language: f.language,
     currency: f.currency,
     issueDate: f.issueDate,
     validUntil: f.validUntil || undefined,
-    eventName: f.eventName || undefined,
-    eventDate: f.eventDate || undefined,
+    eventName: f.eventName || null,
+    eventDate: f.eventDate || null,
     eventType: f.eventType || null,
     bookingWorkflowId: f.bookingWorkflowId,
-    eventTimeStart: f.eventTimeStart || undefined,
-    eventTimeEnd: f.eventTimeEnd || undefined,
-    expectedDurationHours: f.expectedDurationHours ? Number(f.expectedDurationHours) : undefined,
+    eventTimeStart: f.eventTimeStart || null,
+    eventTimeEnd: f.eventTimeEnd || null,
+    expectedDurationHours: f.expectedDurationHours ? Number(f.expectedDurationHours) : null,
     paymentTermTemplateId: f.paymentTermTemplateId || undefined,
     // Migration 124 — split picker. Send both; backend ignores either
     // half unless both are set (legacy single FK still works).
@@ -138,24 +154,19 @@ function buildPayload(f: FormState): QuoteCreatePayload {
     vatRate: f.vatRate,
     vatCode: f.vatCode,
     shippingAmountMinor: toMinor(f.shippingAmount),
-    introText: f.introText || undefined,
-    outroText: f.outroText || undefined,
-    internalNotes: f.internalNotes || undefined,
-    ccPdfEmail: f.ccPdfEmail || undefined,
+    introText: f.introText || null,
+    outroText: f.outroText || null,
+    internalNotes: f.internalNotes || null,
+    ccPdfEmail: f.ccPdfEmail || null,
     businessBankAccountId: f.businessBankAccountId || undefined,
     // Migration 121 — Project Overview link. Send null to clear.
     projectId: f.projectId ?? null,
-    lineItems: f.lineItems.map((li) => ({
-      position: li.position,
-      quantity: li.quantity,
-      description: li.description,
-      unitPriceMinor: toMinor(li.unitPrice),
-      discountPercent: li.discountPercent,
-      // Migration 119 — sub-items + details. Pass through to backend
-      // so the hierarchy survives save → reload.
-      parentPosition: li.parentPosition ?? null,
-      detailsText: li.detailsText || null,
-    })),
+    // Migration 220 — quote-wide hours / days that bound lines follow.
+    hours: f.hours,
+    days: f.days,
+    // Sub-items, details, units, rates, add-ons and promotions all pass
+    // through so they survive save → reload.
+    lineItems: f.lineItems.map(toPayloadLineItem),
   };
 }
 
@@ -273,16 +284,9 @@ export const QuoteEditorPage: React.FC = () => {
         ccPdfEmail: q.ccPdfEmail || '',
         businessBankAccountId: q.businessBankAccountId,
         projectId: q.projectId ?? null,
-        lineItems: existing.lineItems.map((li) => ({
-          id: li.id,
-          position: li.position,
-          quantity: Number(li.quantity),
-          description: li.description,
-          unitPrice: Number(li.unitPriceMinor || 0) / 100,
-          discountPercent: Number(li.discountPercent || 0),
-          parentPosition: li.parentPosition ?? null,
-          detailsText: li.detailsText || '',
-        })),
+        hours: q.hours ?? null,
+        days: q.days ?? null,
+        lineItems: existing.lineItems.map(toEditableLineItem),
       });
     }
   }, [existing]);
@@ -309,6 +313,20 @@ export const QuoteEditorPage: React.FC = () => {
   const { data: liPresets } = useQuery({
     queryKey: ['line-item-presets'],
     queryFn: () => quotesService.listLineItemPresets(),
+  });
+  // Catalogue (#1451): packages to insert, promotions for the discount
+  // panel, text blocks for intro / outro. Active entries only.
+  const { data: packages = [] } = useQuery({
+    queryKey: ['quote-catalog', 'packages', 'active'],
+    queryFn: () => quoteCatalogService.listPackages({ activeOnly: true }),
+  });
+  const { data: promotions = [] } = useQuery({
+    queryKey: ['quote-catalog', 'promotions', 'active'],
+    queryFn: () => quoteCatalogService.listPromotions({ activeOnly: true }),
+  });
+  const { data: textBlocks = [] } = useQuery({
+    queryKey: ['quote-catalog', 'text-blocks', 'active'],
+    queryFn: () => quoteCatalogService.listTextBlocks({ activeOnly: true }),
   });
 
   // Admin user list — used to pre-fill + offer a dropdown for the
@@ -441,7 +459,6 @@ export const QuoteEditorPage: React.FC = () => {
       // Close the placeholder window if the save failed so it doesn't
       // sit there showing "about:blank".
       if (previewWindow) previewWindow.close();
-      const msg = err?.response?.data?.error || err.message || 'Save failed';
       // Server returns a friendly code for the "customer feature off"
       // case — surface a clearer message so admins know to flip the
       // toggle on the customer detail page.
@@ -457,7 +474,7 @@ export const QuoteEditorPage: React.FC = () => {
         const first = err.response.data.details[0];
         toast.error(`${first.field}: ${first.message}`);
       } else {
-        toast.error(msg);
+        toast.error(quoteErrorText(err, t, 'Save failed'));
       }
     } finally {
       setBusy(false);
@@ -483,7 +500,26 @@ export const QuoteEditorPage: React.FC = () => {
       previewWindow.location.href = url;
     } catch (err: any) {
       previewWindow.close();
-      toast.error(err?.response?.data?.error || err.message || 'Preview failed');
+      toast.error(quoteErrorText(err, t, 'Preview failed'));
+    }
+  };
+
+  // Re-apply today's customer / default rates to the lines priced from a
+  // rate. Drafts only — a sent quote keeps what the customer saw.
+  const canRecalculate = !!isEdit && existing?.quote.status === 'draft'
+    && form.lineItems.some((li) => li.rateSource === 'customer' || li.rateSource === 'default');
+  const handleRecalculateRates = async () => {
+    if (!isEdit) return;
+    if (!window.confirm(t('quotes.recalculateRatesConfirm', 'Apply today\'s rates to this draft? Unsaved changes on this page are discarded.'))) return;
+    setBusy(true);
+    try {
+      await quotesService.recalculateRates(parseInt(id!, 10));
+      await queryClient.invalidateQueries({ queryKey: ['quote', id] });
+      toast.success(t('quotes.ratesRecalculatedToast', 'Rates updated to today\'s values.'));
+    } catch (err: any) {
+      toast.error(quoteErrorText(err, t, 'Failed'));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -491,17 +527,27 @@ export const QuoteEditorPage: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      {/* Wraps: up to five controls here — Cancel, Recalculate, Preview PDF,
+          Save, Save & send — and they do not fit a phone in any language. */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <button onClick={() => navigate('/admin/clients/quotes')}
-            className="text-sm text-neutral-600 dark:text-neutral-400 hover:underline mb-1 inline-flex items-center gap-1">
-            <ArrowLeft className="w-4 h-4" /> {t('common.back', 'Back')}
-          </button>
           <h2 className="text-xl font-bold">
             {isEdit ? `${t('quotes.edit', 'Edit quote')} ${existing?.quote.quoteNumber || ''}` : t('quotes.new', 'New quote')}
           </h2>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          {/* The only exit that does not write. These editors have no other
+              cancel, and the sidebar is an off-canvas drawer below lg, so a
+              named control beats relying on browser-back. An edit returns to
+              the record it came from; a new one has no detail page yet. */}
+          <Button variant="outline" onClick={() => navigate(isEdit ? `/admin/clients/quotes/${id}` : '/admin/clients/quotes')} disabled={busy}>
+            {t('common.cancel', 'Cancel')}
+          </Button>
+          {canRecalculate && (
+            <Button variant="outline" onClick={handleRecalculateRates} disabled={busy}>
+              <RefreshCw className="w-4 h-4 mr-1" />{t('quotes.recalculateRates', 'Recalculate with current rates')}
+            </Button>
+          )}
           <Button variant="outline" onClick={handlePreviewUnsaved} disabled={busy}>
             <Eye className="w-4 h-4 mr-1" />{t('quotes.preview', 'Preview PDF')}
           </Button>
@@ -559,32 +605,32 @@ export const QuoteEditorPage: React.FC = () => {
           <Input label={t('quotes.field.eventName', 'Event name') as string} value={form.eventName}
             onChange={(e) => setForm((f) => ({ ...f, eventName: e.target.value }))} />
           <div>
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+            <label className="block text-sm font-medium text-body mb-1">
               {t('quotes.field.eventType', 'Event type')}
             </label>
             <select
               value={form.eventType}
               onChange={(e) => setForm((f) => ({ ...f, eventType: e.target.value }))}
-              className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100"
+              className="w-full px-3 py-2 rounded-lg border border-line-strong bg-shell text-heading"
             >
               <option value="">{t('quotes.field.eventTypeNone', '— Use default —')}</option>
               {eventTypes.map((et) => (
                 <option key={et.id} value={et.slug_prefix}>{et.emoji ? `${et.emoji} ` : ''}{et.name}</option>
               ))}
             </select>
-            <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+            <p className="mt-1 text-xs text-muted">
               {t('quotes.field.eventTypeHint', 'Used for the event created when this quote is accepted.')}
             </p>
           </div>
           {workflowsLive && (
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('quotes.field.bookingWorkflow', 'Booking workflow (on acceptance)')}
               </label>
               <select
                 value={form.bookingWorkflowId ?? ''}
                 onChange={(e) => setForm((f) => ({ ...f, bookingWorkflowId: e.target.value ? Number(e.target.value) : null }))}
-                className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100"
+                className="w-full px-3 py-2 rounded-lg border border-line-strong bg-shell text-heading"
               >
                 <option value="">{t('quotes.field.bookingWorkflowNone', '— None —')}</option>
                 {bookingWorkflows.map((w) => (
@@ -593,7 +639,7 @@ export const QuoteEditorPage: React.FC = () => {
                   </option>
                 ))}
               </select>
-              <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+              <p className="mt-1 text-xs text-muted">
                 {t('quotes.field.bookingWorkflowHint', 'The flow that runs when the customer accepts. Leave as None to run no booking flow. The flow must be enabled to fire.')}
               </p>
             </div>
@@ -607,6 +653,37 @@ export const QuoteEditorPage: React.FC = () => {
           <Input type="number" step="0.5" label={t('quotes.field.expectedDuration', 'Expected duration (h)') as string}
             value={form.expectedDurationHours}
             onChange={(e) => setForm((f) => ({ ...f, expectedDurationHours: e.target.value }))} />
+          {/* Migration 220 — lines set to follow the quote hours / days take these. */}
+          <div>
+            <label htmlFor="quote-hours" className="block text-sm font-medium text-body mb-1">
+              {t('quotes.field.hours', 'Hours')}
+            </label>
+            <DecimalInput
+              id="quote-hours"
+              value={form.hours ?? NaN}
+              fractionDigits={2}
+              onChange={(n) => setForm((f) => ({ ...f, hours: Number.isFinite(n) ? n : null }))}
+              className="w-full px-3 py-2 rounded-lg border border-line-strong bg-shell text-heading"
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t('quotes.field.hoursHint', 'Lines set to follow the quote hours use this quantity.')}
+            </p>
+          </div>
+          <div>
+            <label htmlFor="quote-days" className="block text-sm font-medium text-body mb-1">
+              {t('quotes.field.days', 'Days')}
+            </label>
+            <DecimalInput
+              id="quote-days"
+              value={form.days ?? NaN}
+              fractionDigits={2}
+              onChange={(n) => setForm((f) => ({ ...f, days: Number.isFinite(n) ? n : null }))}
+              className="w-full px-3 py-2 rounded-lg border border-line-strong bg-shell text-heading"
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t('quotes.field.daysHint', 'Lines set to follow the quote days use this quantity.')}
+            </p>
+          </div>
           <LocalizedDateInput label={t('quotes.field.validUntil', 'Valid until') as string} value={form.validUntil}
             onChange={(iso) => setForm((f) => ({ ...f, validUntil: iso }))} />
         </div>
@@ -623,6 +700,16 @@ export const QuoteEditorPage: React.FC = () => {
           shippingAmount={form.shippingAmount}
           roundTotal={appSettings?.crm_invoice_round_total === true}
           presets={liPresets?.presets || []}
+          mode="quote"
+          hours={form.hours}
+          days={form.days}
+          packages={packages}
+          onChange={(items) => setForm((f) => ({ ...f, lineItems: items }))}
+        />
+        <DiscountsPanel
+          promotions={promotions}
+          items={form.lineItems}
+          currency={form.currency}
           onChange={(items) => setForm((f) => ({ ...f, lineItems: items }))}
         />
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
@@ -637,7 +724,7 @@ export const QuoteEditorPage: React.FC = () => {
           <div>
             <label className="block text-sm font-medium mb-1">{t('quotes.field.currency', 'Currency')}</label>
             <select value={form.currency} onChange={(e) => setForm((f) => ({ ...f, currency: e.target.value }))}
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm">
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm">
               <option>CHF</option><option>EUR</option><option>USD</option><option>GBP</option>
             </select>
           </div>
@@ -658,7 +745,7 @@ export const QuoteEditorPage: React.FC = () => {
           <div>
             <label className="block text-sm font-medium mb-1">{t('quotes.field.paymentNetDays', 'Net days')}</label>
             <select
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm"
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm"
               value={form.paymentNetDaysTemplateId || ''}
               onChange={(e) => setForm((f) => ({ ...f, paymentNetDaysTemplateId: e.target.value ? Number(e.target.value) : null }))}
             >
@@ -671,7 +758,7 @@ export const QuoteEditorPage: React.FC = () => {
           <div>
             <label className="block text-sm font-medium mb-1">{t('quotes.field.paymentTiming', 'Payment schedule')}</label>
             <select
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm"
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm"
               value={form.paymentTimingTemplateId || ''}
               onChange={(e) => setForm((f) => ({ ...f, paymentTimingTemplateId: e.target.value ? Number(e.target.value) : null }))}
             >
@@ -683,7 +770,7 @@ export const QuoteEditorPage: React.FC = () => {
           </div>
         </div>
         {installmentPreview.length > 0 && (
-          <ul className="mt-3 text-sm space-y-1 text-neutral-600 dark:text-neutral-400">
+          <ul className="mt-3 text-sm space-y-1 text-soft">
             {installmentPreview.map((inst, i) => (
               <li key={i}>• {inst.percent}% — {inst.label} ({t(`quotes.trigger.${inst.trigger}`, inst.trigger)}{inst.offset_days ? `, ${inst.offset_days}d` : ''})</li>
             ))}
@@ -694,7 +781,7 @@ export const QuoteEditorPage: React.FC = () => {
             timing-template preview above when set. The plan is
             snapshotted onto the quote and spawns N invoices on
             conversion via convertQuoteToInvoices. */}
-        <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
+        <div className="mt-4 pt-4 border-t border-line">
           <InstallmentsPanel
             value={form.installments ?? null}
             onChange={(next) => setForm((f) => ({ ...f, installments: next }))}
@@ -709,13 +796,21 @@ export const QuoteEditorPage: React.FC = () => {
         <h3 className="font-semibold mb-2">5. {t('quotes.section.extras', 'Intro / outro / extras')}</h3>
         <div className="space-y-3">
           <div>
-            <label className="block text-sm font-medium mb-1">{t('quotes.field.introText', 'Intro text')}</label>
-            <textarea rows={3} className="w-full rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="block text-sm font-medium">{t('quotes.field.introText', 'Intro text')}</label>
+              <TextBlockPicker id="quote-intro-block" blocks={textBlocks}
+                onPick={(body) => setForm((f) => ({ ...f, introText: appendTextBlock(f.introText, body) }))} />
+            </div>
+            <textarea rows={3} className="w-full rounded-md border border-line-strong bg-panel text-heading px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
               value={form.introText} onChange={(e) => setForm((f) => ({ ...f, introText: e.target.value }))} />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">{t('quotes.field.outroText', 'Outro text')}</label>
-            <textarea rows={3} className="w-full rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="block text-sm font-medium">{t('quotes.field.outroText', 'Outro text')}</label>
+              <TextBlockPicker id="quote-outro-block" blocks={textBlocks}
+                onPick={(body) => setForm((f) => ({ ...f, outroText: appendTextBlock(f.outroText, body) }))} />
+            </div>
+            <textarea rows={3} className="w-full rounded-md border border-line-strong bg-panel text-heading px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
               value={form.outroText} onChange={(e) => setForm((f) => ({ ...f, outroText: e.target.value }))} />
           </div>
 
@@ -732,7 +827,7 @@ export const QuoteEditorPage: React.FC = () => {
             />
             {activeAdmins.length > 1 && (
               <div className="flex items-center gap-2">
-                <label htmlFor="cc-pdf-picker" className="text-xs text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
+                <label htmlFor="cc-pdf-picker" className="text-xs text-soft whitespace-nowrap">
                   {t('quotes.field.ccPdfPickFromAdmins', 'Pick from admins:')}
                 </label>
                 <select
@@ -742,7 +837,7 @@ export const QuoteEditorPage: React.FC = () => {
                     const email = e.target.value;
                     if (email) setForm((prev) => ({ ...prev, ccPdfEmail: email }));
                   }}
-                  className="text-xs px-2 py-1 border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+                  className="text-xs px-2 py-1 border border-line-strong bg-panel text-heading rounded focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
                 >
                   <option value="">{t('quotes.field.ccPdfCustom', 'Custom email')}</option>
                   {activeAdmins.map((a: any) => (
@@ -755,7 +850,7 @@ export const QuoteEditorPage: React.FC = () => {
 
           <div>
             <label className="block text-sm font-medium mb-1">{t('quotes.field.internalNotes', 'Internal notes (not on PDF)')}</label>
-            <textarea rows={3} className="w-full rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+            <textarea rows={3} className="w-full rounded-md border border-line-strong bg-panel text-heading px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
               value={form.internalNotes} onChange={(e) => setForm((f) => ({ ...f, internalNotes: e.target.value }))} />
           </div>
         </div>

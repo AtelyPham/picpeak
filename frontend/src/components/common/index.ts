@@ -6,6 +6,8 @@ export { LocalizedDateInput } from './LocalizedDateInput';
 export { TimeField, parseTimeToHHMM } from './TimeField';
 export { SortableHeader, useColumnSort } from './SortableHeader';
 export type { SortDir, SortPair, SortColumnMap } from './SortableHeader';
+export { ColumnMenuHeader } from './ColumnMenuHeader';
+export type { ColumnMenuOption, ColumnMenuState } from './ColumnMenuHeader';
 export { Card, CardHeader, CardContent, CardFooter } from './Card';
 export { Loading, LoadingSkeleton } from './Loading';
 export { ErrorBoundary, PageErrorBoundary } from './ErrorBoundary';

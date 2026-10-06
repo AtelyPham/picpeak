@@ -4,8 +4,11 @@
  * kept for power users / config the form doesn't cover. Changes are applied
  * live to the node (the global Save persists them).
  */
-import React, { useState } from 'react';
+import React, { useContext, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
+import { customerAdminService } from '../../../services/customerAdmin.service';
+import { PermissionsContext } from '../../../contexts/PermissionsContext';
 
 type Cfg = Record<string, any>;
 
@@ -18,8 +21,8 @@ interface Props {
   webhooks?: WebhookOption[];
 }
 
-const field = 'w-full px-2 py-1.5 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 text-sm';
-const lbl = 'block text-xs text-neutral-500 dark:text-neutral-400 mb-1';
+const field = 'w-full px-2 py-1.5 rounded border border-line-strong bg-shell text-heading text-sm';
+const lbl = 'block text-xs text-muted mb-1';
 
 const ACTIONS = [
   ['queue_payment_check', 'Send payment-check email (dunning gate)'],
@@ -32,6 +35,7 @@ const ACTIONS = [
   ['prepare_quote', 'Prepare a quote (draft)'],
   ['prepare_contract', 'Prepare a contract (draft)'],
   ['prepare_invoice', 'Prepare an invoice (draft)'],
+  ['prepare_contract_invoice', 'Prepare an invoice from a completed contract (draft)'],
   ['prepare_event', 'Create an event (draft)'],
   ['prepare_gallery', 'Create a gallery (draft)'],
   ['send_document', 'Send the document'],
@@ -40,6 +44,7 @@ const ACTIONS = [
 ];
 const CONDITIONS = [
   ['invoice_paid', 'Invoice is paid'],
+  ['customer_in_group', 'Customer is in group'],
   ['expr', 'Compare a field'],
   ['always', 'Always → yes'],
   ['never', 'Never → no'],
@@ -72,10 +77,25 @@ export const NodeConfigPanel: React.FC<Props> = ({ nodeType, config, onChange, w
 
   const waitMode = config.untilVar ? 'until' : 'delay';
 
+  // Customer groups for the customer_in_group condition (#1443). Listing them
+  // needs customers.view; without it the ids already in the config stay as
+  // they are and only the JSON editor can change them.
+  const canListGroups = !!useContext(PermissionsContext)?.hasPermission('customers.view');
+  const wantsGroups = (nodeType === 'condition' || nodeType === 'branch') && config.condition === 'customer_in_group';
+  const { data: groups } = useQuery({
+    queryKey: ['admin-customer-groups'],
+    queryFn: () => customerAdminService.listGroups(true),
+    enabled: wantsGroups && canListGroups,
+  });
+  const groupIds: number[] = Array.isArray(config.groupIds) ? config.groupIds : [];
+  // Ids of groups deleted since, listed so they can be unticked: kept
+  // invisibly, they would make an "all of them" condition always false.
+  const missingGroupIds = groups ? groupIds.filter((id) => !groups.some((g) => g.id === id)) : [];
+
   return (
     <div className="space-y-3">
       {nodeType === 'trigger' && (
-        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+        <p className="text-sm text-muted">
           {t('workflows.editor.triggerHint', 'The trigger is set in the toolbar above (When …).')}
         </p>
       )}
@@ -105,7 +125,7 @@ export const NodeConfigPanel: React.FC<Props> = ({ nodeType, config, onChange, w
       {nodeType === 'action' && config.action === 'notify_pre_event' && (
         <Row label={t('workflows.editor.templateGroup', 'Reminder template group')}>
           <input className={field} value={config.templateGroup || ''} onChange={(e) => set({ templateGroup: e.target.value })} placeholder="event_reminder" />
-          <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+          <p className="text-xs text-muted mt-1">
             {t('workflows.editor.templateGroupHint', 'The exact template is auto-picked per event type within this group: «group»_«eventType» if you authored one, else «group»_default. Blank = event_reminder.')}
           </p>
         </Row>
@@ -119,7 +139,7 @@ export const NodeConfigPanel: React.FC<Props> = ({ nodeType, config, onChange, w
               <option key={w.id} value={w.id}>{w.name}{w.active ? '' : ` ${t('workflows.editor.webhookInactive', '(inactive)')}`}</option>
             ))}
           </select>
-          <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+          <p className="text-xs text-muted mt-1">
             {t('workflows.editor.webhookHint', 'Delivered via the webhook pipeline (signing, retries, SSRF checks). Manage endpoints in Settings → Webhooks.')}
           </p>
         </Row>
@@ -149,7 +169,53 @@ export const NodeConfigPanel: React.FC<Props> = ({ nodeType, config, onChange, w
               )}
             </>
           )}
-          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+          {config.condition === 'customer_in_group' && (
+            <>
+              <Row label={t('workflows.editor.groups', 'Customer groups')}>
+                {canListGroups ? (
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {(groups || []).filter((g) => !g.isArchived || groupIds.includes(g.id)).map((g) => (
+                      <label key={g.id} className="flex items-center gap-2 text-sm text-body">
+                        <input
+                          type="checkbox"
+                          checked={groupIds.includes(g.id)}
+                          onChange={(e) => set({
+                            groupIds: e.target.checked ? [...groupIds, g.id] : groupIds.filter((id) => id !== g.id),
+                          })}
+                        />
+                        {g.name}
+                      </label>
+                    ))}
+                    {missingGroupIds.map((id) => (
+                      <label key={`missing-${id}`} className="flex items-center gap-2 text-sm text-muted">
+                        <input
+                          type="checkbox"
+                          checked
+                          onChange={() => set({ groupIds: groupIds.filter((x) => x !== id) })}
+                        />
+                        <span className="line-through">{t('customers.groups.deletedGroup', 'Deleted group')}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted">
+                    {t('workflows.editor.groupsNoPermission', 'Listing customer groups needs the customers.view permission.')}
+                  </p>
+                )}
+              </Row>
+              <Row label={t('customers.groups.matchLabel', 'Customers in')}>
+                <select className={field} value={config.match === 'all' ? 'all' : 'any'} onChange={(e) => set({ match: e.target.value })}>
+                  <option value="any">{t('customers.groups.matchAny', 'Any of them')}</option>
+                  <option value="all">{t('customers.groups.matchAll', 'All of them')}</option>
+                </select>
+              </Row>
+              <p className="text-xs text-muted">
+                {t('workflows.editor.groupsHint',
+                  'Checked when this step runs. Needs a customer on the run: customer, quote, contract and invoice triggers have one; on gallery and event triggers this is always “no”.')}
+              </p>
+            </>
+          )}
+          <p className="text-xs text-muted">
             {t('workflows.editor.conditionHint', 'Routes to the “yes” edge when true, “no” when false.')}
           </p>
         </>
@@ -205,13 +271,13 @@ export const NodeConfigPanel: React.FC<Props> = ({ nodeType, config, onChange, w
           <Row label={t('workflows.editor.gateTimeout', 'Auto-expire after (days, optional)')}>
             <input type="number" min={0} className={field} value={config.timeoutDays ?? ''} onChange={(e) => set({ timeoutDays: num(e.target.value) })} />
           </Row>
-          <p className="text-xs text-neutral-500 dark:text-neutral-400">
+          <p className="text-xs text-muted">
             {t('workflows.editor.gateHint', 'Emails the admin a confirm/deny link; routes to the “confirm” or “deny” edge.')}
           </p>
         </>
       )}
 
-      <button type="button" className="text-xs text-neutral-500 dark:text-neutral-400 underline" onClick={() => { setJsonText(JSON.stringify(config || {}, null, 2)); setShowJson((s) => !s); }}>
+      <button type="button" className="text-xs text-muted underline" onClick={() => { setJsonText(JSON.stringify(config || {}, null, 2)); setShowJson((s) => !s); }}>
         {showJson ? t('workflows.editor.hideAdvanced', 'Hide advanced (JSON)') : t('workflows.editor.showAdvanced', 'Advanced (JSON)')}
       </button>
       {showJson && (

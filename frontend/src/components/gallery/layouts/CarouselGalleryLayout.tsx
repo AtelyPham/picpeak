@@ -1,13 +1,16 @@
 import { usePhotoSelection } from '../../../hooks/usePhotoSelection';
 import React, { useState, useEffect, useRef } from 'react';
-import { ChevronLeft, ChevronRight, Download, Maximize2, Play, Pause, Heart, MessageSquare } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Maximize2, Play, Pause, Heart, MessageSquare, Sparkles } from 'lucide-react';
 import { useTheme } from '../../../contexts/ThemeContext';
 import { AuthenticatedImage, Button } from '../../common';
 import { ColorLabelBadge } from '../ColorLabelBadge';
+import { useGalleryTileBadges } from '../GalleryTileBadges';
 import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import { FeedbackIdentityModal } from '../../gallery/FeedbackIdentityModal';
 import { feedbackService } from '../../../services/feedback.service';
 import { useGuestIdentityOptional } from '../../../contexts/GuestIdentityContext';
+import { useDownloadQuota } from '../../../contexts/DownloadQuotaContext';
+import { downloadLimitReachedMessage } from '../../../utils/downloadLimit';
 
 export const CarouselGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
   photos,
@@ -67,6 +70,12 @@ export const CarouselGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
   const [pendingAction, setPendingAction] = useState<null | { type: 'like'; photoId: number }>(null);
   const [savedIdentity, setSavedIdentity] = useState<{ name: string; email: string } | null>(null);
   const guestIdentity = useGuestIdentityOptional();
+  // Download limit (issue 1560); see PhotoCard for why aria-disabled.
+  const downloadQuota = useDownloadQuota();
+  // First look (issue 1562) and the "All photos" folder hint (issue 1786)
+  // ride in the chip row next to the category: this layout's corners are
+  // all taken (see the colour-label note below).
+  const tileBadges = useGalleryTileBadges();
   const [likedIds, setLikedIds] = useState<Set<number>>(new Set());
   // Seed from server is_liked on first non-empty payload (#590 follow-up).
   // Mount-only so refetches don't clobber in-session optimistic toggles.
@@ -79,13 +88,17 @@ export const CarouselGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
   const canQuickComment = Boolean(feedbackEnabled && feedbackOptions?.allowComments && onOpenPhotoWithFeedback);
 
   if (!currentPhoto) return null;
+  const currentPhotoAtLimit = !downloadQuota.canDownload(currentPhoto);
 
   return (
     <div className="photo-grid relative">
       {/* Main Carousel */}
       <div className="photo-card relative h-[50vh] sm:h-[60vh] lg:h-[70vh] bg-black rounded-lg overflow-hidden">
+        {/* A video's original cannot render as an image, and on a gallery
+            with a download limit fetching it takes a slot (issue 1560):
+            its poster instead. */}
         <AuthenticatedImage
-          src={currentPhoto.url}
+          src={currentPhoto.media_type === 'video' && currentPhoto.thumbnail_url ? currentPhoto.thumbnail_url : currentPhoto.url}
           alt={currentPhoto.filename}
           className="w-full h-full object-contain"
           isGallery={true}
@@ -131,6 +144,17 @@ export const CarouselGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                 {currentPhoto.category_name}
               </span>
             )}
+            {tileBadges.folderNameOf && tileBadges.folderNameOf(currentPhoto) && (
+              <span className="px-3 py-1 bg-black/50 text-white rounded-full text-sm max-w-[10rem] truncate">
+                {tileBadges.folderNameOf(currentPhoto)}
+              </span>
+            )}
+            {currentPhoto.first_look && tileBadges.firstLookLabel && (
+              <span className="inline-flex items-center gap-1 px-3 py-1 bg-white/90 text-neutral-800 rounded-full text-sm">
+                <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
+                {tileBadges.firstLookLabel}
+              </span>
+            )}
           </div>
           
           <div className="flex items-center gap-2">
@@ -159,8 +183,9 @@ export const CarouselGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                 variant="ghost"
                 size="sm"
                 onClick={(e) => onDownload(currentPhoto, e)}
-                className="text-white hover:bg-white/20"
-                title="Download photo"
+                className={`text-white hover:bg-white/20${currentPhotoAtLimit ? ' opacity-50 cursor-not-allowed' : ''}`}
+                aria-disabled={currentPhotoAtLimit || undefined}
+                title={currentPhotoAtLimit ? downloadLimitReachedMessage() : 'Download photo'}
               >
                 <Download className="w-5 h-5" />
               </Button>
@@ -187,7 +212,11 @@ export const CarouselGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                       await feedbackService.submitFeedback(slug!, String(currentPhoto.id), {
                         feedback_type: 'like',
                       });
-                    } catch (_) {}
+                    } catch (err) {
+                      // Same rule as PhotoCard: keep the optimistic state, a
+                      // refresh reconciles; but never swallow it silently.
+                      console.warn('Like submit failed, keeping optimistic UI', err);
+                    }
                     return;
                   }
                   if (feedbackOptions?.requireNameEmail && !savedIdentity) {
@@ -208,7 +237,9 @@ export const CarouselGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                       guest_name: savedIdentity?.name,
                       guest_email: savedIdentity?.email,
                     });
-                  } catch (_) {}
+                  } catch (err) {
+                    console.warn('Like submit failed, keeping optimistic UI', err);
+                  }
                 }}
                 className={`bg-black/30 hover:bg-black/50 rounded-full border border-white/40 ${likedIds.has(currentPhoto.id) ? 'text-red-400' : 'text-white'}`}
                 title="Like photo"

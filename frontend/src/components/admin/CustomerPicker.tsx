@@ -49,11 +49,13 @@
  * preferredLanguage so the doc renders in their locale by default).
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { Button, Input } from '../common';
 import { InlineCustomerCreate } from './InlineCustomerCreate';
+import { CustomerGroupChipList } from './CustomerGroupChips';
+import { PermissionsContext } from '../../contexts/PermissionsContext';
 import {
   customerAdminService,
   type CustomerAccountDetail,
@@ -125,13 +127,28 @@ export const CustomerPicker: React.FC<CustomerPickerProps> = ({
     enabled: !readOnly && !value && !creating && debouncedSearch.trim().length >= 2,
   });
 
+  // The selected customer's groups (#1443), so the editor shows the segment
+  // without opening the record. The editors are guarded by their own
+  // permissions, so this is only asked for with customers.view. Read from
+  // the context directly: some editors render outside a PermissionsProvider
+  // in tests, and no provider means no permission.
+  const canViewCustomers = !!useContext(PermissionsContext)?.hasPermission('customers.view');
+  const { data: selectedDetail } = useQuery({
+    queryKey: ['admin-customer', value],
+    queryFn: () => customerAdminService.get(value as number),
+    enabled: !!value && canViewCustomers,
+  });
+
   if (value) {
     return (
-      <div className="flex items-center justify-between bg-neutral-50 dark:bg-neutral-800 rounded-md px-3 py-2">
+      <div className="flex items-center justify-between bg-subtle rounded-md px-3 py-2">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm">{label || `#${value}`}</span>
+          {selectedDetail?.groups && selectedDetail.groups.length > 0 && (
+            <CustomerGroupChipList groups={selectedDetail.groups} max={2} />
+          )}
           {isPassive && (
-            <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-700 text-neutral-700 dark:text-neutral-300">
+            <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-inset text-body">
               {t('customers.passive.badge', 'Passive — admin only')}
             </span>
           )}
@@ -166,7 +183,7 @@ export const CustomerPicker: React.FC<CustomerPickerProps> = ({
         onChange={(e) => setSearch(e.target.value)}
       />
       {options.length > 0 && (
-        <ul className="mt-2 rounded-md border border-neutral-200 dark:border-neutral-700 divide-y divide-neutral-200 dark:divide-neutral-700">
+        <ul className="mt-2 rounded-md border border-line divide-y divide-line">
           {options.map((c) => {
             // F.6 — gate badge for the calendar's hour-entry create
             // modal. Selecting a customer with feature_hours_logging
@@ -180,14 +197,19 @@ export const CustomerPicker: React.FC<CustomerPickerProps> = ({
                 <button
                   type="button"
                   onClick={() => onSelect(c)}
-                  className="w-full text-left px-3 py-2 hover:bg-neutral-50 dark:hover:bg-neutral-800 text-sm"
+                  className="w-full text-left px-3 py-2 hover:bg-hover-soft text-sm"
                 >
                   <span className="font-medium">
                     {c.companyName || c.displayName || c.email}
                   </span>
                   <span className="text-neutral-500 ml-2">{c.email}</span>
+                  {c.groups && c.groups.length > 0 && (
+                    <span className="ml-2 inline-flex align-middle">
+                      <CustomerGroupChipList groups={c.groups} max={2} expandable={false} />
+                    </span>
+                  )}
                   {c.isPassive && (
-                    <span className="ml-2 inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-700 text-neutral-700 dark:text-neutral-300">
+                    <span className="ml-2 inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-inset text-body">
                       {t('customers.passive.badge', 'Passive — admin only')}
                     </span>
                   )}

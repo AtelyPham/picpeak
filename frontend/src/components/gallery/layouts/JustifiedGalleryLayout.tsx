@@ -6,11 +6,13 @@ import { useLocalizedDate } from '../../../hooks/useLocalizedDate';
 import { useTheme } from '../../../contexts/ThemeContext';
 import { AuthenticatedImage } from '../../common';
 import { PhotoCard } from '../PhotoCard';
+import { firstLookAboveChips } from '../GalleryTileBadges';
 import { FeedbackIdentityModal } from '../../gallery/FeedbackIdentityModal';
 import { feedbackService } from '../../../services/feedback.service';
 import { buildResourceUrl } from '../../../utils/url';
 import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import type { Photo } from '../../../types';
+import { useLazyBands } from './lazyBands';
 import {
   calculateJustifiedLayout,
   createJustifiedPhotos,
@@ -50,6 +52,7 @@ interface JustifiedPhotoProps {
   };
   savedIdentity?: { name: string; email: string } | null;
   onRequireIdentity?: (action: 'like', photoId: number) => void;
+  onIdentitySaved?: (identity: { name: string; email: string }) => void;
   onQuickComment?: () => void;
   onFeedbackChange?: () => void;
   liked?: boolean;
@@ -71,11 +74,13 @@ const JustifiedPhoto: React.FC<JustifiedPhotoProps> = ({
   feedbackOptions,
   savedIdentity,
   onRequireIdentity,
+  onIdentitySaved,
   onQuickComment,
   onFeedbackChange,
   liked = false,
   onLikeSuccess,
 }) => {
+  const bands = useLazyBands();
   const animationClass =
     animationType === 'scale'
       ? 'transition-transform duration-300 hover:scale-[1.02]'
@@ -92,9 +97,14 @@ const JustifiedPhoto: React.FC<JustifiedPhotoProps> = ({
     (photo.mime_type && photo.mime_type.startsWith('video/')) ||
     photo.type === 'video';
 
+  // Same corner rule as the grid: above the feedback indicators (issue 1562).
+  const hasIndicators = commentCount > 0 || averageRating > 0 || likeCount > 0 || liked;
+  const firstLookRows = hasIndicators ? (photo.type === 'collage' ? 2 : 1) : 0;
+
   return (
     <PhotoCard
       photo={photo}
+      firstLookClassName={firstLookAboveChips(firstLookRows)}
       isSelected={isSelected}
       isSelectionMode={isSelectionMode}
       onClick={onClick}
@@ -106,6 +116,11 @@ const JustifiedPhoto: React.FC<JustifiedPhotoProps> = ({
         left: layoutItem.x,
         width: layoutItem.width,
         height: layoutItem.height,
+        // Issue 1733: skip style/layout/paint for far-off tiles. The box is
+        // the layout's own px result, so the intrinsic size is exact and the
+        // skipped tile occupies precisely what the rendered one would.
+        contentVisibility: 'auto',
+        containIntrinsicSize: `${layoutItem.width}px ${layoutItem.height}px`,
       }}
       containerProps={{
         role: 'button',
@@ -120,6 +135,10 @@ const JustifiedPhoto: React.FC<JustifiedPhotoProps> = ({
       }}
       lazy
       inViewRootMargin="100px"
+      // Release far-off tiles like Grid (issue 1733). The absolute px box
+      // above holds the tile whether or not the image is mounted, so
+      // unmounting shifts nothing; same outer band as Grid, see there.
+      releaseRootMargin={bands.keep}
       fadeInWhenVisible={animationType === 'fade'}
       skeletonClassName="skeleton w-full h-full rounded-lg"
       imageProps={{
@@ -144,6 +163,7 @@ const JustifiedPhoto: React.FC<JustifiedPhotoProps> = ({
       onLikeSuccess={onLikeSuccess}
       savedIdentity={savedIdentity}
       onRequireIdentity={onRequireIdentity}
+      onIdentitySaved={onIdentitySaved}
       checkboxTestId
     >
       {/* Feedback Indicators */}
@@ -519,6 +539,7 @@ export const JustifiedGalleryLayout: React.FC<JustifiedGalleryLayoutProps> = ({
               feedbackEnabled={feedbackEnabled}
               feedbackOptions={feedbackOptions}
               savedIdentity={savedIdentity}
+              onIdentitySaved={setSavedIdentity}
               onRequireIdentity={(action, photoId) => {
                 setPendingAction({ type: action, photoId });
                 setShowIdentityModal(true);

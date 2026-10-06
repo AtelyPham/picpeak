@@ -15,6 +15,12 @@ const RULES_V2 = [
   [['POST'], /^\/customers\/(?:invite|[^/]+\/send-invite)\/?$/, ['customer_portal']],
   [WRITE, /^\/deals\/[^/]+\/installment-plan\/?$/, ['crm', 'crm_installments']],
   [WRITE, /^\/(?:quotes\/presets|contracts\/blocks)(?:\/|$)/, ['document_templates']],
+  [WRITE, /^\/contract-templates(?:\/|$)/, ['document_templates']],
+  [WRITE, /^\/document-attachments(?:\/|$)/, ['document_templates']],
+  // Quote catalogue + templates (#1451): creating a quote from a template is
+  // quote use, maintaining the catalogue is template use.
+  [['POST'], /^\/quote-catalog\/templates\/[^/]+\/quotes\/?$/, ['crm', 'crm_quotes']],
+  [WRITE, /^\/quote-catalog(?:\/|$)/, ['document_templates']],
   [WRITE, /^\/expenses\/inbound(?:\/|$)/, ['accounting', 'accounting_incoming_invoices']],
   [WRITE, /^\/expenses(?:\/(?!inbound(?:\/|$))|$)/, ['accounting', 'accounting_expenses']],
   [WRITE, /^\/ledger(?:\/|$)/, ['accounting', 'accounting_ledger']],
@@ -36,7 +42,7 @@ const RULES_V2 = [
   [['GET'], /^\/archives\/[^/]+\/download\/?$/, ['archive_management', 'photo_exports']],
   [WRITE, /^\/(?:events|photos)\/[^/]+\/photos(?:\/|$)/, ['photo_management']],
   [['POST'], /^\/photos\/photos\/[^/]+\/retry\/?$/, ['photo_processing']],
-  [['POST'], /^\/photos\/repair-(?:dimensions|capture-dates|orientation)\/?$/, ['photo_processing']],
+  [['POST'], /^\/photos\/repair-(?:dimensions|capture-dates|orientation|credits)\/?$/, ['photo_processing']],
   [['POST', 'PUT'], /^\/thumbnails\/(?:settings|regenerate|regenerate-previews)\/?$/, ['photo_processing']],
   [['POST'], /^\/photo-export\/[^/]+\/export\/?$/, ['photo_exports']],
   [['GET'], /^\/(?:events|photos)\/[^/]+\/photos\/[^/]+\/download\/?$/, ['photo_exports']],

@@ -3,11 +3,25 @@
  *
  * The whole point of the feature: a foldered photo is ABSENT from the root grid
  * and only appears inside its folder. A filter category keeps today's behaviour.
+ *
+ * The suites below the "nested folders" heading cover issue 1786, where a
+ * photo's folder lives in `folder_id`. The older suites use the issue 1160
+ * payload (a folder as `category_id`, no `folder_id` field at all), which the
+ * helpers still read as a fallback for an older backend.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import {
+  childFolders,
   filterCategories,
+  folderAncestors,
+  folderSubtreeIds,
+  folderTree,
+  photoFolderId,
+  photosInSubtree,
+  photosInView,
+  readViewParam,
+  writeViewParam,
   peopleInScope,
   SELECTED_DOWNLOAD_LIMIT,
   findFolderByKey,
@@ -82,11 +96,11 @@ describe('photosInScope', () => {
 });
 
 describe('folderTiles', () => {
-  it('builds one tile per non-empty folder with its count', () => {
+  it('builds one tile per non-empty folder with its count, sorted by name', () => {
     const tiles = folderTiles(CATEGORIES, PHOTOS);
     expect(tiles.map((t) => [t.category.slug, t.count])).toEqual([
-      ['selects', 3],
       ['bw', 1],
+      ['selects', 3],
     ]);
   });
 
@@ -251,5 +265,213 @@ describe('URL round-trip', () => {
     writeFolderParam(null);
     expect(readFolderParam()).toBeNull();
     expect(new URLSearchParams(window.location.search).get('token')).toBe('abc');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Nested folders (issue 1786)
+// ---------------------------------------------------------------------------
+
+const folder = (id: number, name: string, parent_id: number | null = null, over: Partial<PhotoCategory> = {}): PhotoCategory =>
+  ({ id, name, slug: name.toLowerCase().replace(/\s+/g, '-'), is_global: false, is_folder: true, parent_id, ...over });
+
+const inFolder = (id: number, folder_id: number | null, category_id: number | null = null): Photo =>
+  ({ id, filename: `${id}.jpg`, folder_id, category_id } as unknown as Photo);
+
+// Friday (10) › Activity A (11)
+// Saturday (20) › Activity B (21) › Part 1 (22)
+// Day 10 (30), Day 2 (31) — natural order check
+// Portraits (1) is a filter category.
+const TREE: PhotoCategory[] = [
+  cat({ id: 1, slug: 'portraits' }),
+  folder(20, 'Saturday'),
+  folder(21, 'Activity B', 20),
+  folder(22, 'Part 1', 21),
+  folder(10, 'Friday'),
+  folder(11, 'Activity A', 10),
+  folder(30, 'Day 10'),
+  folder(31, 'Day 2'),
+];
+
+const TREE_PHOTOS: Photo[] = [
+  inFolder(100, null),
+  inFolder(101, null, 1),
+  inFolder(110, 10),
+  inFolder(111, 11, 1),
+  inFolder(112, 11),
+  inFolder(200, 20),
+  inFolder(210, 21),
+  inFolder(220, 22, 1),
+  inFolder(221, 22),
+  inFolder(300, 30),
+  inFolder(310, 31),
+];
+
+const ids = (photos: Photo[]) => photos.map((p) => p.id);
+
+describe('nested folders: tree helpers', () => {
+  it('lists the direct children of a level, sorted naturally by name', () => {
+    expect(childFolders(TREE, null).map((f) => f.name)).toEqual(['Day 2', 'Day 10', 'Friday', 'Saturday']);
+    expect(childFolders(TREE, 20).map((f) => f.name)).toEqual(['Activity B']);
+    expect(childFolders(TREE, 22)).toEqual([]);
+  });
+
+  it('never lists a filter category as a folder', () => {
+    expect(childFolders(TREE, null).map((f) => f.id)).not.toContain(1);
+  });
+
+  it('builds the breadcrumb trail from the top down', () => {
+    expect(folderAncestors(TREE, 22).map((f) => f.name)).toEqual(['Saturday', 'Activity B', 'Part 1']);
+    expect(folderAncestors(TREE, 10).map((f) => f.name)).toEqual(['Friday']);
+    expect(folderAncestors(TREE, null)).toEqual([]);
+    expect(folderAncestors(TREE, 999)).toEqual([]);
+  });
+
+  it('collects a folder and everything below it', () => {
+    expect([...folderSubtreeIds(TREE, 20)].sort()).toEqual(['20', '21', '22']);
+    expect([...folderSubtreeIds(TREE, 22)]).toEqual(['22']);
+  });
+
+  // A parent missing from the payload would strand its children out of reach.
+  it('hangs a folder whose parent is missing off the root', () => {
+    const orphaned = [folder(5, 'Orphan', 404)];
+    expect(childFolders(orphaned, null).map((f) => f.id)).toEqual([5]);
+  });
+
+  it('survives a parent cycle without hanging', () => {
+    const cyclic = [folder(1, 'A', 2), folder(2, 'B', 1)];
+    expect(folderAncestors(cyclic, 1).length).toBeLessThanOrEqual(2);
+    expect([...folderSubtreeIds(cyclic, 1)].sort()).toEqual(['1', '2']);
+  });
+
+  it('resolves a nested folder key at any depth', () => {
+    expect(findFolderByKey(TREE, 'part-1-22')?.name).toBe('Part 1');
+  });
+});
+
+describe('nested folders: scope', () => {
+  it('shows only loose photos at the root', () => {
+    expect(ids(photosInScope(TREE_PHOTOS, TREE, null))).toEqual([100, 101]);
+  });
+
+  it('shows only the photos DIRECTLY in an open folder', () => {
+    expect(ids(photosInScope(TREE_PHOTOS, TREE, 20))).toEqual([200]);
+    expect(ids(photosInScope(TREE_PHOTOS, TREE, 21))).toEqual([210]);
+    expect(ids(photosInScope(TREE_PHOTOS, TREE, 22))).toEqual([220, 221]);
+  });
+
+  // The whole point of the own slot: a filter category no longer hides a
+  // photo from its folder.
+  it('keys containment on folder_id, not on the filter category', () => {
+    expect(ids(photosInScope(TREE_PHOTOS, TREE, 11))).toEqual([111, 112]);
+    expect(ids(photosInScope(TREE_PHOTOS, TREE, null))).toContain(101);
+  });
+
+  it('turns containment off in "All photos"', () => {
+    const all = photosInView(TREE_PHOTOS, TREE, null, true);
+    expect(ids(all)).toEqual(ids(TREE_PHOTOS));
+    expect(all).not.toBe(TREE_PHOTOS);
+    expect(ids(photosInView(TREE_PHOTOS, TREE, 20, false))).toEqual([200]);
+  });
+
+  it('collects a whole subtree for the folder download', () => {
+    expect(ids(photosInSubtree(TREE_PHOTOS, TREE, 20))).toEqual([200, 210, 220, 221]);
+    expect(ids(photosInSubtree(TREE_PHOTOS, TREE, 22))).toEqual([220, 221]);
+  });
+
+  it('puts a photo whose folder is not in the payload at the root', () => {
+    const stray = [inFolder(900, 404)];
+    expect(ids(photosInScope(stray, TREE, null))).toEqual([900]);
+  });
+});
+
+describe('nested folders: legacy payload fallback', () => {
+  const folderIds = new Set(['2', '3']);
+
+  it('reads category_id as the folder when folder_id is absent', () => {
+    expect(photoFolderId({ category_id: 2 }, folderIds)).toBe('2');
+    expect(photoFolderId({ category_id: 1 }, folderIds)).toBeNull();
+  });
+
+  it('trusts folder_id once the field is there, even when null', () => {
+    expect(photoFolderId({ folder_id: null, category_id: 2 }, folderIds)).toBeNull();
+    expect(photoFolderId({ folder_id: 3, category_id: 1 }, folderIds)).toBe('3');
+  });
+});
+
+describe('nested folders: tiles', () => {
+  it('counts recursively and counts direct subfolders', () => {
+    const root = folderTiles(TREE, TREE_PHOTOS, null);
+    const saturday = root.find((t) => t.category.id === 20);
+    expect(saturday?.count).toBe(4);
+    expect(saturday?.subfolderCount).toBe(1);
+    const friday = root.find((t) => t.category.id === 10);
+    expect(friday?.count).toBe(3);
+    expect(friday?.subfolderCount).toBe(1);
+    expect(root.find((t) => t.category.id === 30)?.subfolderCount).toBe(0);
+  });
+
+  it('shows the subfolders of an open folder', () => {
+    expect(folderTiles(TREE, TREE_PHOTOS, 20).map((t) => [t.category.name, t.count])).toEqual([['Activity B', 3]]);
+    expect(folderTiles(TREE, TREE_PHOTOS, 22)).toEqual([]);
+  });
+
+  it('covers with the hero when it is anywhere in the subtree, else the first photo there', () => {
+    const withHero = TREE.map((c) => (c.id === 20 ? { ...c, hero_photo_id: 221 } : c));
+    expect(folderTiles(withHero, TREE_PHOTOS).find((t) => t.category.id === 20)?.coverPhoto?.id).toBe(221);
+    const staleHero = TREE.map((c) => (c.id === 20 ? { ...c, hero_photo_id: 100 } : c));
+    expect(folderTiles(staleHero, TREE_PHOTOS).find((t) => t.category.id === 20)?.coverPhoto?.id).toBe(200);
+  });
+
+  it('follows the order the photos arrive in for the fallback cover', () => {
+    const reordered = [...TREE_PHOTOS].reverse();
+    expect(folderTiles(TREE, reordered).find((t) => t.category.id === 20)?.coverPhoto?.id).toBe(221);
+  });
+
+  it('drops a parent whose subtree holds no photos', () => {
+    const empty = [...TREE, folder(40, 'Sunday'), folder(41, 'Empty child', 40)];
+    expect(folderTiles(empty, TREE_PHOTOS).map((t) => t.category.id)).not.toContain(40);
+  });
+
+  it('builds the sidebar tree with recursive counts', () => {
+    const tree = folderTree(TREE, TREE_PHOTOS);
+    const saturday = tree.find((n) => n.category.id === 20);
+    expect(saturday?.count).toBe(4);
+    expect(saturday?.children.map((n) => [n.category.id, n.count])).toEqual([[21, 3]]);
+    expect(saturday?.children[0].children.map((n) => [n.category.id, n.count])).toEqual([[22, 2]]);
+  });
+});
+
+describe('view param round-trip', () => {
+  const original = window.location.href;
+
+  beforeEach(() => window.history.replaceState({}, '', '/gallery/wed?token=abc&folder=saturday-20'));
+  afterEach(() => window.history.replaceState({}, '', original));
+
+  it('switches to All photos, leaving the folder and keeping the token', () => {
+    writeViewParam('all');
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get('view')).toBe('all');
+    expect(params.get('folder')).toBeNull();
+    expect(params.get('token')).toBe('abc');
+    expect(readViewParam()).toBe('all');
+  });
+
+  it('reads anything but "all" as the folders view', () => {
+    window.history.replaceState({}, '', '/gallery/wed?view=nonsense');
+    expect(readViewParam()).toBe('folders');
+  });
+
+  it('leaves All photos when a folder is opened', () => {
+    writeViewParam('all');
+    writeFolderParam('friday-10');
+    expect(readViewParam()).toBe('folders');
+    expect(readFolderParam()).toBe('friday-10');
+  });
+
+  it('drops the param on the way back to folders', () => {
+    writeViewParam('all');
+    writeViewParam('folders');
+    expect(new URLSearchParams(window.location.search).get('view')).toBeNull();
   });
 });

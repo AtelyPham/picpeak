@@ -8,7 +8,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Check, X } from 'lucide-react';
+import { Check, X } from 'lucide-react';
 import { Button, Card, Loading } from '../../../components/common';
 import { workflowsService, type WorkflowApproval } from '../../../services/workflows.service';
 import { useLocalizedDate } from '../../../hooks/useLocalizedDate';
@@ -46,29 +46,24 @@ export const WorkflowApprovalsPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Button variant="ghost" size="sm" onClick={() => navigate('/admin/workflows')} aria-label={t('common.back', 'Back') as string}>
-          <ArrowLeft className="w-4 h-4" />
-        </Button>
-        <div>
-          <h1 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">{t('workflows.approvals.title', 'Approvals')}</h1>
-          <p className="text-sm text-neutral-600 dark:text-neutral-400">{t('workflows.approvals.subtitle', 'Workflow runs waiting on your confirmation.')}</p>
-        </div>
+      <div>
+        <h1 className="text-xl font-semibold text-heading">{t('workflows.approvals.title', 'Approvals')}</h1>
+        <p className="text-sm text-soft">{t('workflows.approvals.subtitle', 'Workflow runs waiting on your confirmation.')}</p>
       </div>
 
       <Card padding="none">
         {isLoading ? (
           <div className="p-10"><Loading /></div>
         ) : !approvals || approvals.length === 0 ? (
-          <div className="p-10 text-center text-neutral-500 dark:text-neutral-400">{t('workflows.approvals.empty', 'Nothing waiting for you right now.')}</div>
+          <div className="p-10 text-center text-muted">{t('workflows.approvals.empty', 'Nothing waiting for you right now.')}</div>
         ) : (
-          <ul className="divide-y divide-neutral-200 dark:divide-neutral-700">
+          <ul className="divide-y divide-line">
             {approvals.map((a) => {
               const href = entityHref(a);
               const meta = (
                 <>
-                  <div className="text-sm text-neutral-900 dark:text-neutral-100">{promptOf(a)}</div>
-                  <div className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
+                  <div className="text-sm text-heading">{promptOf(a)}</div>
+                  <div className="text-xs text-muted mt-0.5">
                     {a.workflow_name}
                     {a.entity_type ? ` · ${a.entity_type} #${a.entity_id}` : ''}
                     {a.created_at ? ` · ${formatDateTime(a.created_at)}` : ''}

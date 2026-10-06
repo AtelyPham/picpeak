@@ -1,12 +1,35 @@
 const express = require('express');
+const net = require('net');
 const { db } = require('../database/db');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
+const { requireEventOwnership, scopeEventsQuery } = require('../middleware/ownership');
 const secureImageMiddleware = require('../middleware/secureImageMiddleware');
 const logger = require('../utils/logger');
+const { rateLimitKey } = require('../utils/rateLimitKey');
 const { decodeSettingValue } = require('./adminEvents/helpers');
 
 const router = express.Router();
+
+// Image logs inherit the event's action scope, not the wider event-list scope.
+function accessLogsFor(admin) {
+  const query = db('image_access_logs');
+  if (admin.roleName !== 'super_admin') {
+    query.whereIn('image_access_logs.event_id', scopeEventsQuery(db('events').select('id'), admin));
+  }
+  return query;
+}
+
+// System security records have no trustworthy event owner. Only super admins
+// may inspect them; keep the response shape for scoped monitoring clients.
+function securityLogsFor(admin) {
+  const query = db('security_logs');
+  return admin.roleName === 'super_admin' ? query : query.whereRaw('1 = 0');
+}
+
+function parseJson(value) {
+  return typeof value === 'string' ? JSON.parse(value) : (value ?? null);
+}
 
 /**
  * Get image security settings
@@ -46,7 +69,7 @@ router.get('/settings', adminAuth, requirePermission(['settings.view', 'image_se
     res.json(config);
   } catch (error) {
     logger.error('Error getting image security settings', { error: error.message, stack: error.stack });
-    res.status(500).json({ error: 'Failed to get security settings', details: error.message });
+    res.status(500).json({ error: 'Failed to get security settings' });
   }
 });
 
@@ -123,21 +146,21 @@ router.get('/dashboard', adminAuth, requirePermission(['settings.view', 'image_s
     }
 
     // Get image access statistics
-    const accessStats = await db('image_access_logs')
+    const accessStats = await accessLogsFor(req.admin)
       .where('accessed_at', '>', timeFilter.toISOString())
       .select('access_type')
       .count('* as count')
       .groupBy('access_type');
 
     // Get security events
-    const securityEvents = await db('security_logs')
+    const securityEvents = await securityLogsFor(req.admin)
       .where('timestamp', '>', timeFilter.toISOString())
       .select('event_type')
       .count('* as count')
       .groupBy('event_type');
 
     // Get top suspicious IPs
-    const suspiciousIPs = await db('security_logs')
+    const suspiciousIPs = await securityLogsFor(req.admin)
       .where('timestamp', '>', timeFilter.toISOString())
       .where('event_type', 'like', '%suspicious%')
       .select('client_ip')
@@ -147,7 +170,7 @@ router.get('/dashboard', adminAuth, requirePermission(['settings.view', 'image_s
       .limit(10);
 
     // Get most accessed photos
-    const topPhotos = await db('image_access_logs')
+    const topPhotos = await accessLogsFor(req.admin)
       .join('photos', 'image_access_logs.photo_id', 'photos.id')
       .join('events', 'photos.event_id', 'events.id')
       .where('image_access_logs.accessed_at', '>', timeFilter.toISOString())
@@ -158,14 +181,14 @@ router.get('/dashboard', adminAuth, requirePermission(['settings.view', 'image_s
       .limit(10);
 
     // Get middleware status
-    const middlewareStatus = secureImageMiddleware.getSecurityStatus();
+    const middlewareStatus = req.admin.roleName === 'super_admin' ? secureImageMiddleware.getSecurityStatus() : null;
 
     // Calculate totals
     const totalAccess = accessStats.reduce((sum, stat) => sum + parseInt(stat.count), 0);
     const totalSecurityEvents = securityEvents.reduce((sum, stat) => sum + parseInt(stat.count), 0);
 
     // Get unique visitors
-    const uniqueVisitors = await db('image_access_logs')
+    const uniqueVisitors = await accessLogsFor(req.admin)
       .where('accessed_at', '>', timeFilter.toISOString())
       .countDistinct('client_fingerprint as count')
       .first();
@@ -232,7 +255,7 @@ router.get('/logs', adminAuth, requirePermission(['settings.view', 'image_securi
       timeFilter = new Date(Date.now() - 86400000);
     }
 
-    let query = db('security_logs')
+    let query = securityLogsFor(req.admin)
       .where('timestamp', '>', timeFilter.toISOString())
       .orderBy('timestamp', 'desc');
 
@@ -244,7 +267,7 @@ router.get('/logs', adminAuth, requirePermission(['settings.view', 'image_securi
     const logs = await query.limit(parseInt(limit)).offset(offset);
 
     // Get total count for pagination
-    let countQuery = db('security_logs')
+    let countQuery = securityLogsFor(req.admin)
       .where('timestamp', '>', timeFilter.toISOString())
       .count('* as total');
 
@@ -258,7 +281,7 @@ router.get('/logs', adminAuth, requirePermission(['settings.view', 'image_securi
     res.json({
       logs: logs.map(log => ({
         ...log,
-        details: log.details ? JSON.parse(log.details) : null
+        details: parseJson(log.details)
       })),
       pagination: {
         page: parseInt(page),
@@ -277,14 +300,14 @@ router.get('/logs', adminAuth, requirePermission(['settings.view', 'image_securi
 /**
  * Get image access logs for a specific event
  */
-router.get('/events/:eventId/access-logs', adminAuth, requirePermission(['settings.view', 'image_security.view']), async (req, res) => {
+router.get('/events/:eventId/access-logs', adminAuth, requirePermission(['settings.view', 'image_security.view']), requireEventOwnership, async (req, res) => {
   try {
     const { eventId } = req.params;
     const { page = 1, limit = 50 } = req.query;
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    const logs = await db('image_access_logs')
+    const logs = await accessLogsFor(req.admin)
       .join('photos', 'image_access_logs.photo_id', 'photos.id')
       .where('image_access_logs.event_id', eventId)
       .select(
@@ -295,7 +318,7 @@ router.get('/events/:eventId/access-logs', adminAuth, requirePermission(['settin
       .limit(parseInt(limit))
       .offset(offset);
 
-    const totalResult = await db('image_access_logs')
+    const totalResult = await accessLogsFor(req.admin)
       .where('event_id', eventId)
       .count('* as total')
       .first();
@@ -305,7 +328,7 @@ router.get('/events/:eventId/access-logs', adminAuth, requirePermission(['settin
     res.json({
       logs: logs.map(log => ({
         ...log,
-        metadata: log.metadata ? JSON.parse(log.metadata) : null
+        metadata: parseJson(log.metadata)
       })),
       pagination: {
         page: parseInt(page),
@@ -335,9 +358,28 @@ router.post('/block-ip', adminAuth, requirePermission('image_security.manage'), 
       return res.status(400).json({ error: 'IP address required' });
     }
 
+    // The middleware checks the list against rateLimitKey (issue 1564), so
+    // an entry has to be stored in that form: blocking an IPv6 address blocks
+    // its /64, and an IPv4-mapped address is stored as the dotted IPv4 one.
+    // Unblocking normalises the same way, so either spelling removes it.
+    // A /64 in CIDR form (as the list stores it) is accepted too; anything
+    // else that is not an address would be stored and never match, so it is
+    // refused instead of reported as blocked.
+    // A proxy-forwarded IPv6 address can be logged in URI form
+    // ([2001:db8::1] or [2001:db8::1]:443); rateLimitKey accepts that too.
+    const raw = typeof ip === 'string' ? ip.trim() : '';
+    const bracketed = raw.match(/^\[([^\]]+)\](?::\d+)?$/);
+    const text = bracketed ? bracketed[1] : raw;
+    const cidr = text.match(/^(.+)\/64$/);
+    const address = cidr ? cidr[1] : text;
+    if (net.isIP(address) === 0 || (cidr && net.isIPv6(address) === false)) {
+      return res.status(400).json({ error: 'Invalid IP address' });
+    }
+    const listKey = rateLimitKey({ ip: address });
+
     if (action === 'block') {
       // Add to blocked IPs in middleware
-      secureImageMiddleware.suspiciousIPs.add(ip);
+      secureImageMiddleware.suspiciousIPs.add(listKey);
       
       logger.warn('IP manually blocked by admin', {
         ip,
@@ -346,7 +388,7 @@ router.post('/block-ip', adminAuth, requirePermission('image_security.manage'), 
       });
     } else if (action === 'unblock') {
       // Remove from blocked IPs
-      secureImageMiddleware.suspiciousIPs.delete(ip);
+      secureImageMiddleware.suspiciousIPs.delete(listKey);
       
       logger.info('IP manually unblocked by admin', {
         ip,
@@ -450,12 +492,12 @@ router.get('/export', adminAuth, requirePermission(['settings.view', 'image_secu
     }
 
     // Get security logs
-    const securityLogs = await db('security_logs')
+    const securityLogs = await securityLogsFor(req.admin)
       .where('timestamp', '>', timeFilter.toISOString())
       .orderBy('timestamp', 'desc');
 
     // Get image access logs
-    const accessLogs = await db('image_access_logs')
+    const accessLogs = await accessLogsFor(req.admin)
       .where('accessed_at', '>', timeFilter.toISOString())
       .orderBy('accessed_at', 'desc');
 
@@ -464,11 +506,11 @@ router.get('/export', adminAuth, requirePermission(['settings.view', 'image_secu
       timeframe,
       securityLogs: securityLogs.map(log => ({
         ...log,
-        details: log.details ? JSON.parse(log.details) : null
+        details: parseJson(log.details)
       })),
       accessLogs: accessLogs.map(log => ({
         ...log,
-        metadata: log.metadata ? JSON.parse(log.metadata) : null
+        metadata: parseJson(log.metadata)
       }))
     };
 
@@ -507,14 +549,7 @@ router.get('/export', adminAuth, requirePermission(['settings.view', 'image_secu
 /**
  * Helper function to convert data to CSV
  */
-const { neutralizeSpreadsheetFormula } = require('../utils/spreadsheetSafe');
-
-function csvCell(value) {
-  // Formula-neutralize, then RFC-4180 quote (the previous join('') did
-  // neither — GHSA-37p4).
-  const s = neutralizeSpreadsheetFormula(value);
-  return /[,"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
+const { csvCell } = require('../utils/spreadsheetSafe');
 
 function convertToCSV(data) {
   // Simplified CSV conversion for security logs

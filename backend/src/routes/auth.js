@@ -1,5 +1,7 @@
 const { isGalleryAvailable } = require('../utils/galleryLifecycle');
+const { publicThemeFields } = require('../services/galleryTheme');
 const express = require('express');
+const { toDateOnly } = require('../utils/dateOnly');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -39,9 +41,7 @@ const { getClientIp } = require('../utils/requestIp');
 const { sanitizePasswordInput } = require('../utils/passwordInput');
 const {
   validatePasswordInContext,
-  MAX_PASSWORD_LENGTH,
-  getBcryptRounds,
-  logPasswordValidationFailure
+  MAX_PASSWORD_LENGTH
 } = require('../utils/passwordValidation');
 const router = express.Router();
 
@@ -148,8 +148,10 @@ router.post('/admin/login', [
       return res.status(403).json({ error: 'Local login is disabled — sign in through SSO', code: 'LOCAL_LOGIN_DISABLED' });
     }
 
-    // Check account lockout first
-    const lockoutStatus = await checkAccountLockout(username);
+    // Check account lockout first. Scoped to identifier + source IP like the
+    // gallery/client paths: anonymous failures from one address must not
+    // deny a correct login from every other address.
+    const lockoutStatus = await checkAccountLockout(username, ipAddress);
     if (lockoutStatus.isLocked) {
       logger.warn('Login attempt on locked account', { username, ipAddress });
       return res.status(423).json({ 
@@ -207,9 +209,10 @@ router.post('/admin/login', [
     // Second factor: if this admin has TOTP enabled, do NOT complete the login
     // yet. Issue a short-lived, single-purpose mfa_pending token and require the
     // code via /admin/login/mfa. We deliberately don't reset the lockout counter
-    // (trackSuccessfulLogin) or stamp last_login until the second factor passes,
-    // so MFA brute-force is still gated by the account lockout. `loginId` carries
-    // the typed identifier so the verify step tracks the same lockout bucket.
+    // (trackSuccessfulLogin) or stamp last_login until the second factor passes.
+    // MFA guessing is gated by the verify step's own account-wide bucket
+    // (`mfa:<id>`); `loginId` carries the typed identifier for the success
+    // record once the second factor passes.
     if (mfaService.isEnrolled(admin)) {
       const mfaToken = jwt.sign({
         id: admin.id,
@@ -276,7 +279,14 @@ router.post('/admin/login/mfa', [
     }
 
     const lockoutKey = decoded.loginId || decoded.username;
-    const lockoutStatus = await checkAccountLockout(lockoutKey);
+    // The second factor has a bucket of its own, counted across every source
+    // address. Per-IP (like the password step) would hand a holder of the
+    // mfa_pending token a fresh batch of six-digit guesses for each address
+    // they rotate to; sharing the password step's bucket would let anonymous
+    // password failures lock the owner out of this step. Only someone who
+    // already passed the password can add to it.
+    const mfaLockoutKey = `mfa:${decoded.id}`;
+    const lockoutStatus = await checkAccountLockout(mfaLockoutKey);
     if (lockoutStatus.isLocked) {
       return res.status(423).json({
         error: 'Account temporarily locked due to too many failed attempts',
@@ -327,15 +337,29 @@ router.post('/admin/login/mfa', [
     }
 
     if (!ok) {
-      await trackFailedAttempt(lockoutKey, ipAddress, userAgent);
+      await trackFailedAttempt(mfaLockoutKey, ipAddress, userAgent);
       return res.status(401).json({ error: 'Invalid verification code', code: 'MFA_INVALID' });
     }
 
     if (usedRecovery) {
-      await db('admin_users').where('id', admin.id).update({
-        two_factor_recovery_codes: JSON.stringify(remainingHashes),
-        updated_at: new Date()
-      });
+      // Compare-and-set against the list this request read. Two requests
+      // carrying the same captured code both passed the bcrypt compare and
+      // both overwrote the list, so both got a session and a code was
+      // redeemable twice; concurrent redemption of two different codes let
+      // the last writer restore the other one. Only the writer that still
+      // sees the list it read consumes the code (Codex security audit
+      // 2026-09-30) — the same rule persistTotpStep applies to TOTP.
+      const consumed = await db('admin_users')
+        .where('id', admin.id)
+        .where('two_factor_recovery_codes', admin.two_factor_recovery_codes)
+        .update({
+          two_factor_recovery_codes: JSON.stringify(remainingHashes),
+          updated_at: new Date()
+        });
+      if (consumed !== 1) {
+        await trackFailedAttempt(mfaLockoutKey, ipAddress, userAgent);
+        return res.status(401).json({ error: 'Invalid verification code', code: 'MFA_INVALID' });
+      }
       await logActivity('admin_mfa_recovery_used',
         { admin_id: admin.id, remaining: remainingHashes.length },
         null,
@@ -377,7 +401,7 @@ router.post('/logout', async (req, res) => {
       endSession(token);
 
       try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'], issuer: 'picpeak-auth' });
         logger.info('User logged out', { 
           userId: decoded.id,
           username: decoded.username,
@@ -535,9 +559,9 @@ router.post('/gallery/verify', [
         id: event.id,
         event_name: event.event_name,
         event_type: event.event_type,
-        event_date: event.event_date,
+        event_date: toDateOnly(event.event_date),
         welcome_message: event.welcome_message,
-        color_theme: event.color_theme,
+        color_theme: (await publicThemeFields(event)).color_theme,
         expires_at: event.expires_at,
         allow_user_uploads: event.allow_user_uploads,
         upload_category_id: event.upload_category_id,
@@ -613,9 +637,9 @@ router.post('/gallery/:slug/client-login', [
         id: event.id,
         event_name: event.event_name,
         event_type: event.event_type,
-        event_date: event.event_date,
+        event_date: toDateOnly(event.event_date),
         welcome_message: event.welcome_message,
-        color_theme: event.color_theme,
+        color_theme: (await publicThemeFields(event)).color_theme,
         expires_at: event.expires_at,
         allow_user_uploads: event.allow_user_uploads,
         upload_category_id: event.upload_category_id,
@@ -712,9 +736,9 @@ router.post('/gallery/share-login', [
         id: event.id,
         event_name: event.event_name,
         event_type: event.event_type,
-        event_date: event.event_date,
+        event_date: toDateOnly(event.event_date),
         welcome_message: event.welcome_message,
-        color_theme: event.color_theme,
+        color_theme: (await publicThemeFields(event)).color_theme,
         expires_at: event.expires_at,
         allow_user_uploads: event.allow_user_uploads,
         upload_category_id: event.upload_category_id,
@@ -773,6 +797,7 @@ router.get('/session', async (req, res) => {
       // every protected endpoint rejected them with 401, producing a
       // /admin/login → /admin/dashboard → /admin/login redirect loop).
       const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+        algorithms: ['HS256'],
         issuer: 'picpeak-auth'
       });
 
@@ -833,87 +858,6 @@ router.get('/session', async (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ error: 'Session check failed' });
-  }
-});
-
-// Admin password change with validation
-router.post('/admin/change-password', [
-  body('currentPassword').notEmpty(),
-  body('newPassword').notEmpty(),
-  body('confirmPassword').notEmpty()
-    .custom((value, { req }) => value === req.body.newPassword)
-    .withMessage('Passwords do not match')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: safeValidationErrors(errors) });
-    }
-
-    const { currentPassword, newPassword } = req.body;
-    const ipAddress = getClientIp(req);
-
-    // Get admin from request (should be set by auth middleware)
-    if (!req.admin) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    const adminId = req.admin.id;
-
-    // Get admin user
-    const admin = await db('admin_users').where({ id: adminId }).first();
-    if (!admin) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    // Verify current password
-    const validPassword = await bcrypt.compare(currentPassword, admin.password_hash);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Current password is incorrect' });
-    }
-
-    // Validate new password
-    const passwordValidation = validatePasswordInContext(newPassword, 'admin', {
-      username: admin.username,
-      email: admin.email
-    });
-
-    if (!passwordValidation.valid) {
-      logPasswordValidationFailure('admin_password_change', passwordValidation.errors, {
-        userId: adminId,
-        username: admin.username
-      });
-
-      return res.status(400).json({
-        error: 'Password does not meet security requirements',
-        details: passwordValidation.errors,
-        score: passwordValidation.score,
-        feedback: passwordValidation.feedback
-      });
-    }
-
-    // Hash new password with configurable rounds
-    const hashedPassword = await bcrypt.hash(newPassword, getBcryptRounds());
-
-    // Update password and track change time
-    await db('admin_users').where('id', adminId).update({
-      password_hash: hashedPassword,
-      password_changed_at: new Date(),
-      must_change_password: false
-    });
-
-    // Log password change
-    logger.info('Admin password changed', {
-      userId: adminId,
-      username: admin.username,
-      ip: ipAddress
-    });
-
-    res.json({
-      message: 'Password changed successfully',
-      score: passwordValidation.score
-    });
-  } catch (error) {
-    errorResponse(res, error, 500, 'Failed to change password');
   }
 });
 
@@ -1052,7 +996,7 @@ router.get('/admin/sso/callback', async (req, res) => {
 
   let stash;
   try {
-    stash = jwt.verify(stashCookie, process.env.JWT_SECRET, { issuer: 'picpeak-auth' });
+    stash = jwt.verify(stashCookie, process.env.JWT_SECRET, { algorithms: ['HS256'], issuer: 'picpeak-auth' });
     if (stash.type !== 'oidc_state') throw new Error('wrong token type');
   } catch (_) {
     return fail('state');
@@ -1112,6 +1056,8 @@ router.get('/admin/sso/callback', async (req, res) => {
       OIDC_NOT_PROVISIONED: 'not_provisioned',
       OIDC_NO_EMAIL: 'no_email',
       OIDC_NO_ROLE: 'no_role',
+      OIDC_EMAIL_UNVERIFIED: 'email_unverified',
+      OIDC_EMAIL_AMBIGUOUS: 'email_ambiguous',
       OIDC_BAD_CLAIMS: 'idp',
     };
     const key = codeMap[error.code] || 'idp';

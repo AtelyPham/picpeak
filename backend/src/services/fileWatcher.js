@@ -2,6 +2,7 @@ const chokidar = require('chokidar');
 const path = require('path');
 const fs = require('fs').promises;
 const sharp = require('sharp');
+const { resolveCredit } = require('./photoCredit');
 const pLimit = require('p-limit');
 const { db } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
@@ -11,7 +12,7 @@ const { isVideoMimeType } = require('./videoProcessor');
 const mime = require('mime-types');
 const downloadZipService = require('./downloadZipService');
 
-const getStoragePath = () => process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
+const { getStoragePath } = require('../config/storage');
 const WATCH_PATH = () => path.join(getStoragePath(), 'events/active');
 
 // Bound concurrent watcher work. chokidar fires 'add' once per file — with no
@@ -27,6 +28,25 @@ const watcherConcurrency = Number.isFinite(configuredConcurrency)
   ? Math.max(1, configuredConcurrency)
   : 2;
 const processLimit = pLimit(watcherConcurrency);
+
+// chokidar waits for a file to stop growing before it fires 'add'. The
+// defaults suit a local disk; a slow NAS or a camera tether that flushes in
+// bursts needs a longer quiet window, and a very fast SSD can use a shorter
+// one. Same parsing rule as the concurrency bound: a positive integer, or the
+// default with a warning.
+function positiveIntEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  // Strict: "2s" must not become a 2 ms window.
+  const parsed = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    logger.warn(`[fileWatcher] ${name}=${JSON.stringify(raw)} is not a positive integer; using ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+const writeFinishStabilityMs = positiveIntEnv('FILE_WATCHER_STABILITY_MS', 2000);
+const writeFinishPollIntervalMs = positiveIntEnv('FILE_WATCHER_POLL_INTERVAL_MS', 100);
 
 let watcher = null;
 const pending = new Set();
@@ -57,8 +77,8 @@ function startFileWatcher() {
     ignored: /(^|[/\\])\../, // ignore dotfiles
     persistent: true,
     awaitWriteFinish: {
-      stabilityThreshold: 2000,
-      pollInterval: 100
+      stabilityThreshold: writeFinishStabilityMs,
+      pollInterval: writeFinishPollIntervalMs
     }
   });
 
@@ -177,6 +197,14 @@ async function processNewPhoto(filePath) {
   const existingPhoto = await findExistingPhoto(event.id, path.basename(filePath), relativePath);
 
   if (!existingPhoto) {
+    // Credit from the file's EXIF (#1561). Only for a row about to be created,
+    // so a re-sweep of an imported folder reads nothing.
+    const credit = await resolveCredit({ localPath: filePath, isVideo });
+    // Browser-playable copy (issue 1430): a video the watcher picks up is
+    // queued like an uploaded one while the setting is on; otherwise it would
+    // wait for the next switch-on backfill. No transaction is open here.
+    const webCopyEnabled = isVideo && await require('./videoRenditionService').isEnabled();
+
     // Add to database
     const insertResult = await db('photos').insert({
       event_id: event.id,
@@ -190,7 +218,9 @@ async function processNewPhoto(filePath) {
       type: isVideo ? 'video' : photoType,
       size_bytes: stats.size,
       mime_type: mimeType,
-      ...(dimensions && { width: dimensions.width, height: dimensions.height })
+      ...(dimensions && { width: dimensions.width, height: dimensions.height }),
+      ...(webCopyEnabled ? { web_status: 'pending' } : {}),
+      ...credit
     }).returning('id');
     const photoId = insertResult[0]?.id || insertResult[0];
 

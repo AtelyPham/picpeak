@@ -1,8 +1,6 @@
 import React from 'react';
 import {
   ToggleRight,
-  Save,
-  AlertCircle,
   Images,
   BellRing,
   MessageSquare,
@@ -22,6 +20,7 @@ import {
   ScanLine,
   Wallet,
   FolderKanban,
+  FolderOpen,
   MonitorPlay,
   Send,
   Workflow,
@@ -29,12 +28,20 @@ import {
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Button, Card } from '../../../components/common';
+import { SettingsSaveBar } from '../../../components/admin/SettingsSaveBar';
+import { Card } from '../../../components/common';
 import { api } from '../../../config/api';
 import { FeatureCard } from '../components/FeatureCard';
 import { SidebarPreview } from '../components/SidebarPreview';
-import { useFeatureFlags } from '../../../contexts/FeatureFlagsContext';
+import { useFeatureFlags, type FeatureKey } from '../../../contexts/FeatureFlagsContext';
+import { usePermissions } from '../../../contexts/PermissionsContext';
+import {
+  SETTINGS_TAB_PERMISSIONS,
+  settingsTabHref,
+  type SettingsTab,
+} from '../settingsNav';
 import type { FeatureStatus } from '../components/StatusBadge';
+import { SectionPageHeader } from '../../../components/admin/SectionPageHeader';
 
 interface SectionProps {
   title: string;
@@ -43,7 +50,7 @@ interface SectionProps {
 
 const Section: React.FC<SectionProps> = ({ title, children }) => (
   <section className="mt-6 first:mt-0">
-    <h3 className="px-1 mb-3 text-[11px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+    <h3 className="px-1 mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted">
       {title}
     </h3>
     <ul className="space-y-3">{children}</ul>
@@ -63,7 +70,29 @@ export const FeaturesTab: React.FC = () => {
   const isSingleContainer = systemVersion?.single_container === true;
 
   const { t } = useTranslation();
-  const { staged, setFlag, save, reset, isDirty, isSaving } = useFeatureFlags();
+  const { staged, flags, setFlag, save, reset, isDirty, isSaving } = useFeatureFlags();
+  const { hasPermission, hasAnyPermission } = usePermissions();
+
+  // A "Configure" link is only worth showing if this admin can open what it
+  // points at. Enabling a feature and configuring it are different
+  // permissions: `users` deliberately does not carry the `settings.view`
+  // baseline, so an admin with `settings.features` alone would click through
+  // and be snapped silently to an unrelated tab; the Automation pages would
+  // greet them with "enable Workflows under Settings > Features" — the thing
+  // they just did. No link is better than a link that lies.
+  //
+  // It also follows the SAVED flag, not the staged one. The destination is
+  // gated on what is saved (`settingsTabGatedOff`, and the section hooks read
+  // `flags`), so offering the link the moment a toggle flips would land the
+  // admin on a tab that snaps straight back out from under them.
+  const configurable = (flag: FeatureKey) => flags[flag];
+  const settingsTabLink = (flag: FeatureKey, tab: SettingsTab) =>
+    (configurable(flag) && hasAnyPermission(SETTINGS_TAB_PERMISSIONS[tab])
+      ? settingsTabHref(tab) : undefined);
+  // Section pages are gated by their section hook; mirror the permission it
+  // filters on rather than restating a set.
+  const sectionPageLink = (flag: FeatureKey, permission: string, href: string) =>
+    (configurable(flag) && hasPermission(permission) ? href : undefined);
 
   // The localized label shown in StatusBadge — short, uppercased internally.
   const statusLabel = (status: FeatureStatus): string => {
@@ -77,7 +106,18 @@ export const FeaturesTab: React.FC = () => {
     return map[status];
   };
 
-  // Localized "no sidebar item" caption used by the Reminder Emails card.
+  // One label for every "where do I set this up?" link on the cards below.
+  const configureLabel = t('settings.features.configure', 'Configure');
+
+  // Caption for features that have no sidebar entry because they are
+  // configured from inside Settings (User management, since the navigation
+  // cleanup moved it out of the main menu).
+  const settingsOnlyLabel = t(
+    'settings.features.sidebarInSettings',
+    'No sidebar item — lives in Settings',
+  );
+
+  // Localized "no sidebar item" caption used by background-only features.
   const sidebarHiddenLabel = t(
     'settings.features.sidebarHidden',
     'No sidebar item — runs in the background',
@@ -92,27 +132,13 @@ export const FeaturesTab: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <SectionPageHeader
+        icon={ToggleRight}
+        title={t('settings.features.title', 'Features')}
+        description={t('settings.features.intro', 'Turn product surfaces on or off. Enabled features appear in the left navigation and become available to your team. Some features are still in beta — turn them on to try them, or off to hide them.')}
+        className=""
+      />
       <Card padding="md">
-        {/* Header */}
-        <div className="mb-6 pb-4 border-b border-neutral-200 dark:border-neutral-700">
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-lg bg-accent-soft text-on-accent-soft flex items-center justify-center">
-              <ToggleRight className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
-                {t('settings.features.title', 'Features')}
-              </h2>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400 mt-0.5 max-w-2xl">
-                {t(
-                  'settings.features.intro',
-                  'Turn product surfaces on or off. Enabled features appear in the left navigation and become available to your team. Some features are still in beta — flip them on to try them, off to hide them.',
-                )}
-              </p>
-            </div>
-          </div>
-        </div>
-
         {/* Core */}
         <Section title={t('settings.features.sections.core', 'Core')}>
           <FeatureCard
@@ -147,6 +173,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarHiddenLabel={sidebarHiddenLabel}
             enabled={staged.slideshow}
             onToggle={(next) => setFlag('slideshow', next)}
+            configureHref={settingsTabLink('slideshow', 'slideshow')}
+            configureLabel={configureLabel}
           />
 
           <FeatureCard
@@ -206,6 +234,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarLabel={t('settings.features.workflows.sidebar', 'Workflows')}
             enabled={staged.workflows}
             onToggle={(next) => setFlag('workflows', next)}
+            configureHref={sectionPageLink('workflows', 'workflows.view', '/admin/automation/workflows')}
+            configureLabel={configureLabel}
           />
         </Section>
 
@@ -233,6 +263,24 @@ export const FeaturesTab: React.FC = () => {
             enabled={staged.customerPortal}
             onToggle={(next) => setFlag('customerPortal', next)}
           />
+          {/* Customer documents (#1444). Lives inside the customer portal and
+              on the customer record, so it has no sidebar entry of its own. */}
+          <FeatureCard
+            icon={FolderOpen}
+            title={t('settings.features.documents.title', 'Customer documents')}
+            description={t(
+              'settings.features.documents.description',
+              'Share documents with a customer in their portal and receive documents from them. Customer uploads stay unavailable until you mark them clean on the customer record. PDF by default; more file types, size and storage limits under Settings → CRM.',
+            )}
+            status="new"
+            statusLabel={statusLabel('new')}
+            sidebarHidden
+            sidebarHiddenLabel={sidebarHiddenLabel}
+            enabled={staged.documents}
+            onToggle={(next) => setFlag('documents', next)}
+            configureHref={settingsTabLink('documents', 'crm')}
+            configureLabel={configureLabel}
+          />
           {/* Future sub-features (Calendar / Quotes / Bills / Messaging)
               slot in here as FeatureCard entries when they ship. No
               placeholder cards today — the Clients section just shows
@@ -246,14 +294,15 @@ export const FeaturesTab: React.FC = () => {
             title={t('settings.features.reminderEmails.title', 'Reminder Emails')}
             description={t(
               'settings.features.reminderEmails.description',
-              'Automatic pre-event nudge to customers N days before their event date. Per-category templates (concert, corporate, wedding, …) editable in Settings → Reminder templates; per-event override on the event detail page.',
+              'Automatic pre-event nudge to customers N days before their event date. Per-category templates (concert, corporate, wedding, …) editable under Automation → Reminder emails; per-event override on the event detail page.',
             )}
             status="beta"
             statusLabel={statusLabel('beta')}
-            sidebarHidden
-            sidebarHiddenLabel={sidebarHiddenLabel}
+            sidebarLabel={t('settings.reminderTemplates.title', 'Reminder emails')}
             enabled={staged.reminderEmails}
             onToggle={(next) => setFlag('reminderEmails', next)}
+            configureHref={sectionPageLink('reminderEmails', 'email.view', '/admin/automation/reminder-templates')}
+            configureLabel={configureLabel}
           />
 
           <FeatureCard
@@ -284,6 +333,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarHiddenLabel={sidebarHiddenLabel}
             enabled={staged.whatsapp}
             onToggle={(next) => setFlag('whatsapp', next)}
+            configureHref={settingsTabLink('whatsapp', 'whatsapp')}
+            configureLabel={configureLabel}
           />
 
           <FeatureCard
@@ -354,6 +405,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarLabel={t('settings.features.quotes.sidebar', 'Quotes')}
             enabled={staged.quotes}
             onToggle={(next) => setFlag('quotes', next)}
+            configureHref={settingsTabLink('quotes', 'crm')}
+            configureLabel={configureLabel}
           />
 
           <FeatureCard
@@ -368,6 +421,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarLabel={t('settings.features.contracts.sidebar', 'Contracts')}
             enabled={staged.contracts}
             onToggle={(next) => setFlag('contracts', next)}
+            configureHref={settingsTabLink('contracts', 'contracts')}
+            configureLabel={configureLabel}
           />
 
           <FeatureCard
@@ -382,6 +437,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarLabel={t('settings.features.bills.sidebar', 'Invoices')}
             enabled={staged.bills}
             onToggle={(next) => setFlag('bills', next)}
+            configureHref={settingsTabLink('bills', 'crm')}
+            configureLabel={configureLabel}
           />
 
           {/* Newsletter campaigns (#1264). Clients child. Mass marketing mail
@@ -445,6 +502,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarLabel={t('settings.features.accounting.sidebar', 'Accounting')}
             enabled={staged.accounting}
             onToggle={(next) => setFlag('accounting', next)}
+            configureHref={settingsTabLink('accounting', 'accounting')}
+            configureLabel={configureLabel}
             // Invoices force-enable Accounting (invoice VAT settings live here),
             // so the master can't be turned off while Bills is on.
             disabled={staged.bills}
@@ -526,6 +585,8 @@ export const FeaturesTab: React.FC = () => {
             sidebarLabel={t('admin.analytics', 'Analytics')}
             enabled={staged.analytics}
             onToggle={(next) => setFlag('analytics', next)}
+            configureHref={settingsTabLink('analytics', 'analytics')}
+            configureLabel={configureLabel}
           />
 
           <FeatureCard
@@ -537,9 +598,12 @@ export const FeaturesTab: React.FC = () => {
             )}
             status="stable"
             statusLabel={statusLabel('stable')}
-            sidebarLabel={t('navigation.users', 'Users')}
+            sidebarHidden
+            sidebarHiddenLabel={settingsOnlyLabel}
             enabled={staged.userManagement}
             onToggle={(next) => setFlag('userManagement', next)}
+            configureHref={settingsTabLink('userManagement', 'users')}
+            configureLabel={configureLabel}
             warning={t(
               'settings.features.userManagement.warning',
               'Existing user accounts stay valid; the admin UI for managing them will be hidden until you re-enable this.',
@@ -564,27 +628,7 @@ export const FeaturesTab: React.FC = () => {
 
       <SidebarPreview staged={staged} />
 
-      {/* Save bar */}
-      <div className="flex items-center justify-end gap-2 pt-2">
-        {isDirty && (
-          <span className="mr-auto text-xs text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
-            <AlertCircle className="w-3.5 h-3.5" />
-            {t('settings.features.unsavedChanges', 'You have unsaved changes')}
-          </span>
-        )}
-        <Button variant="outline" disabled={!isDirty || isSaving} onClick={reset}>
-          {t('common.discard', 'Discard')}
-        </Button>
-        <Button
-          variant="primary"
-          disabled={!isDirty || isSaving}
-          isLoading={isSaving}
-          onClick={() => { void save(); }}
-          leftIcon={<Save className="w-4 h-4" />}
-        >
-          {t('common.saveChanges', 'Save changes')}
-        </Button>
-      </div>
+      <SettingsSaveBar isDirty={isDirty} isSaving={isSaving} onSave={() => { void save(); }} onDiscard={reset} />
     </div>
   );
 };

@@ -3,6 +3,7 @@ const { db } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
 const { isMissingRolesSchema } = require('../utils/dbErrors');
 const logger = require('../utils/logger');
+const { roleEventScope } = require('./permissions');
 
 const TOKEN_PREFIX = 'pp_live_';
 const VALID_SCOPES = ['read', 'write', 'admin'];
@@ -79,6 +80,7 @@ async function apiTokenAuth(req, res, next) {
           'admin_users.id',
           'admin_users.username',
           'admin_users.email',
+          'admin_users.must_change_password',
           'roles.id as role_id',
           'roles.name as role_name'
         )
@@ -89,14 +91,28 @@ async function apiTokenAuth(req, res, next) {
       // not become a free privilege upgrade. Rethrow → outer catch → 500.
       if (!isMissingRolesSchema(joinError)) throw joinError;
       logger.debug('Roles table not available in apiTokenAuth', { error: joinError.message });
+      // No role_id in the projection. isMissingRolesSchema() treats
+      // "no such column: admin_users.role_id" as a legitimate fallback state
+      // (dbErrors.js:44, the post-054/pre-057 window), and selecting the very
+      // column whose absence sent us here throws again — straight out to the
+      // outer catch as a 500. sessionAccessService's fallback omits it for the
+      // same reason and nulls the field afterwards.
       admin = await db('admin_users')
         .where({ id: row.created_by, is_active: formatBoolean(true) })
-        .select('id', 'username', 'email', 'role_id')
+        .select('id', 'username', 'email', 'must_change_password')
         .first();
-      if (admin) admin.role_name = 'super_admin'; // upgrade-path parity with adminAuth
+      if (admin) {
+        admin.role_id = null;
+        admin.role_name = 'super_admin'; // upgrade-path parity with adminAuth
+      }
     }
     if (!admin) {
       return res.status(401).json({ error: 'Token owner unavailable', code: 'OWNER_INACTIVE' });
+    }
+    if ([true, 1, '1', 'true'].includes(admin.must_change_password)) {
+      return res.status(403).json({
+        error: 'Change your password before using the API.', code: 'MUST_CHANGE_PASSWORD'
+      });
     }
 
     // Touch last_used_at — async, don't block the request.
@@ -110,7 +126,8 @@ async function apiTokenAuth(req, res, next) {
       username: admin.username,
       email: admin.email,
       roleId: admin.role_id,
-      roleName: admin.role_name
+      roleName: admin.role_name,
+      eventScope: await roleEventScope(admin.role_name)
     };
     req.apiToken = {
       id: row.id,

@@ -6,6 +6,7 @@ const path = require('path');
 const logger = require('../utils/logger');
 const { AppError } = require('../utils/errors');
 const { formatBoolean } = require('../utils/dbCompat');
+const { parseExpiresAtText } = require('../utils/expiresAtText');
 const { slugify } = require('../utils/slug');
 const { validatePasswordInContext, getBcryptRounds } = require('../utils/passwordValidation');
 const { buildShareLinkVariants } = require('./shareLinkService');
@@ -22,6 +23,11 @@ const { getStoragePath, getEventFieldRequirements, readBooleanSetting, getDownlo
   getCustomerEmailFromPayload, getCustomerPhoneFromPayload, isPhoneFieldEnabled, hasCustomerContactColumns,
   SLIDESHOW_TRANSITIONS, SLIDESHOW_COLORFILTERS } = require('./eventSettings');
 const { validateCreationInput } = require('./eventCreationValidation');
+const { normaliseDownloadLimit } = require('./downloadQuota');
+const { guestNameModeOf } = require('./photoCredit');
+const { resolveExternalPath } = require('./externalMediaService');
+const { importExternalFolder } = require('./externalImportService');
+const { userHasAllPermissions } = require('../middleware/permissions');
 function creationError(body) {
   const error = new AppError(body.error || 'Invalid event', 400, 'EVENT_INVALID');
   error.responseBody = body;
@@ -55,6 +61,9 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     expiration_days = 30,
     allow_user_uploads = false,
     upload_category_id = null,
+    // Uploader names (#1561). undefined = take the Event Defaults value.
+    guest_name_mode: guestNameModeInput,
+    show_credits_to_guests: showCreditsInput,
     allow_downloads = true,
     disable_right_click = false,
     enable_devtools_protection: enableDevtoolsProtectionInput,
@@ -96,6 +105,8 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     hero_image_anchor = 'center',
     // Photo cap
     photo_cap = null,
+    // Download limit (issue 1560). undefined = take the Event Defaults value.
+    download_limit: downloadLimitInput,
     // Client access settings (#172)
     client_access_enabled = false,
     client_password = null,
@@ -107,8 +118,37 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     promo_mode = 'inherit',
     promo_markdown = null,
     info_mode = 'inherit',
-    info_markdown = null
+    info_markdown = null,
+    // Photo source: upload, or reference an external folder. With
+    // import_now the folder's first import starts right after the insert,
+    // so a gallery is ready from the create form alone.
+    source_mode = 'managed',
+    external_path = null,
+    external_watch = false,
+    import_now = false,
   } = input;
+
+  // Custom styling (services/galleryTheme). Callers that do not send the
+  // switch (the v1 API, older clients) keep the old meaning: a theme or CSS
+  // template sent with the gallery is the gallery's own.
+  const customThemeEnabled = input.custom_theme_enabled !== undefined && input.custom_theme_enabled !== null
+    ? parseBooleanInput(input.custom_theme_enabled, false)
+    : Boolean(color_theme) || (css_template_id !== undefined && css_template_id !== null);
+
+  const photoSource = await resolveCreationSource({
+    source_mode, external_path, external_watch, import_now, actor,
+  });
+
+  // Folder structure (issue 1786): mirror the subfolders of uploads and
+  // external imports. New galleries follow Settings → Event defaults (on
+  // unless turned off); an explicit body value wins. Existing galleries were
+  // pinned off by migration 265.
+  let folderStructureFallback = true;
+  if (input.folder_structure === undefined) {
+    const setting = await readBooleanSetting('event_default_folder_structure');
+    if (setting !== undefined) folderStructureFallback = setting;
+  }
+  const folderStructure = parseBooleanInput(input.folder_structure, folderStructureFallback);
 
   const customerName = getCustomerNameFromPayload(input);
   const customerEmail = getCustomerEmailFromPayload(input);
@@ -158,6 +198,26 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     if (setting !== undefined) feedbackEnabledFallback = setting;
   }
   const feedback_enabled = parseBooleanInput(feedbackEnabledInput, feedbackEnabledFallback);
+
+  // Default download limit from Settings > Event Defaults when the body omits
+  // it (issue 1560). An explicit null still means unlimited.
+  const download_limit = downloadLimitInput === undefined
+    ? normaliseDownloadLimit(await getAppSetting('event_default_download_limit', null))
+    : normaliseDownloadLimit(downloadLimitInput);
+
+  // Uploader-name defaults from Settings > Event Defaults (#1561); an
+  // explicitly-sent body value still wins.
+  const guest_name_mode = guestNameModeOf({
+    guest_name_mode: guestNameModeInput === undefined
+      ? await getAppSetting('event_default_guest_name_mode', 'off')
+      : guestNameModeInput,
+  });
+  let showCreditsFallback = false;
+  if (showCreditsInput === undefined) {
+    const setting = await readBooleanSetting('event_default_show_credits_to_guests');
+    if (setting !== undefined) showCreditsFallback = setting;
+  }
+  const show_credits_to_guests = parseBooleanInput(showCreditsInput, showCreditsFallback);
 
   // Sub-toggle defaults from the global Settings > Events values (#1044).
   // One batched read; an explicitly-sent body value still wins.
@@ -221,7 +281,19 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
   // Calculate expiration date (days after event date)
   // If expiration is not required, expires_at will be null (never expires)
   // If event_date is not provided, use current date as base for expiration
-  let expires_at = input.expires_at ? new Date(input.expires_at) : null;
+  // A text value goes through the same parser as the update path: a
+  // zone-less date-time is UTC there (what SQLite's julianday() reads the
+  // stored row as), where `new Date()` would read it in the server's zone
+  // and POST and PUT would store different instants for the same input.
+  let expires_at = null;
+  if (input.expires_at) {
+    expires_at = typeof input.expires_at === 'string'
+      ? parseExpiresAtText(input.expires_at)
+      : new Date(input.expires_at);
+    if (!expires_at || Number.isNaN(expires_at.getTime())) {
+      throw new AppError('expires_at must be an ISO 8601 date-time such as 2026-10-06T12:00:00Z', 400);
+    }
+  }
   if (!expires_at && fieldRequirements.require_expiration) {
     const baseDate = event_date || new Date().toISOString().split('T')[0];
     // Parse YYYY-MM-DD format as local date to avoid timezone issues
@@ -365,6 +437,8 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     created_by: actor.id,
     allow_user_uploads: formatBoolean(allow_user_uploads),
     upload_category_id,
+    guest_name_mode,
+    show_credits_to_guests: formatBoolean(show_credits_to_guests),
     allow_downloads: formatBoolean(allow_downloads !== undefined ? allow_downloads : true),
     disable_right_click: formatBoolean(disable_right_click !== undefined ? disable_right_click : false),
     enable_devtools_protection: formatBoolean(effectiveEnableDevtoolsProtection),
@@ -393,6 +467,7 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     hero_divider_style: effectiveDividerStyle || 'wave',
     hero_image_anchor: hero_image_anchor || 'center',
     photo_cap: photo_cap || null,
+    download_limit,
     is_draft: formatBoolean(parseBooleanInput(is_draft, true)),
     default_photo_sort: default_photo_sort || 'upload_date_desc',
     // Client access (#172)
@@ -405,6 +480,11 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     // false on create — admin opts in from the event detail page once
     // they've picked a hero they're comfortable surfacing publicly.
     og_image_share_enabled: formatBoolean(input.og_image_share_enabled === true),
+    custom_theme_enabled: formatBoolean(customThemeEnabled),
+    source_mode: photoSource.source_mode,
+    external_path: photoSource.external_path,
+    external_watch: formatBoolean(photoSource.external_watch),
+    folder_structure: formatBoolean(folderStructure),
   };
     
   // The gallery row and its feedback configuration commit together.
@@ -532,8 +612,10 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
         email_type: 'gallery_created',
         email_data: JSON.stringify(emailData),
         status: 'pending',
-        created_at: new Date()
-        // scheduled_at will use default value
+        created_at: new Date(),
+        // Explicit NULL, not the column default: on SQLite the default is
+        // text and the processor never picks the row up (issue 1670).
+        scheduled_at: null
       });
     } catch (queueError) {
       logger.warn('Failed to queue gallery_created email on create', { eventId, error: queueError.message });
@@ -595,6 +677,8 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     }).catch(error => logger.warn('Failed to emit gallery.published', { eventId, error: error.message }));
   }
 
+  if (photoSource.import_now) startInitialImport(eventId, photoSource.external_path, actor);
+
   return {
     id: eventId,
     slug,
@@ -604,12 +688,68 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     customer_email: customerEmail,
     require_password: requirePassword,
     photo_cap: photo_cap || null,
+    download_limit,
     is_draft: isDraft,
     share_link: shareUrl,
     share_token: shareToken,
     expires_at: expires_at ? expires_at.toISOString() : null,
-    created_at: new Date().toISOString()
+    created_at: new Date().toISOString(),
+    source_mode: photoSource.source_mode,
+    import_started: photoSource.import_now,
   };
+}
+
+/**
+ * The photo source a new gallery starts with, held to the rules the edit route
+ * applies (routes/adminEvents/crud.js PUT /:id): a referenced folder needs a
+ * path that resolves under EXTERNAL_MEDIA_ROOT, and anything that makes the
+ * server import on the creator's behalf (watching, or importing right away)
+ * needs photos.upload, like the manual import endpoint.
+ */
+async function resolveCreationSource({ source_mode, external_path, external_watch, import_now, actor }) {
+  if (source_mode !== 'reference') {
+    return { source_mode: 'managed', external_path: null, external_watch: false, import_now: false };
+  }
+  const relPath = typeof external_path === 'string' ? external_path.trim().replace(/^\/+/, '') : '';
+  // '', '.', './' and 'a/..' all name EXTERNAL_MEDIA_ROOT itself: a gallery
+  // gets a folder under the root, never the whole mount.
+  if (!relPath || ['.', ''].includes(path.posix.normalize(relPath).replace(/\/+$/, ''))) {
+    throw new AppError('external_path is required when source_mode is reference', 400, 'EXTERNAL_PATH_REQUIRED');
+  }
+  let resolved;
+  try {
+    resolved = resolveExternalPath({ external_path: relPath }, '');
+  } catch (_) {
+    throw new AppError('Invalid external media path', 400, 'EXTERNAL_PATH_INVALID');
+  }
+  const stat = await fs.stat(resolved).catch(() => null);
+  if (!stat || !stat.isDirectory()) {
+    throw new AppError('The external folder does not exist', 400, 'EXTERNAL_PATH_NOT_FOUND');
+  }
+  const watch = parseBooleanInput(external_watch, false);
+  const importNow = parseBooleanInput(import_now, false);
+  if ((watch || importNow) && !(await userHasAllPermissions(actor.id, ['photos.upload']))) {
+    throw new AppError('The photos.upload permission is required to import from this folder', 403, 'FORBIDDEN');
+  }
+  return { source_mode: 'reference', external_path: relPath, external_watch: watch, import_now: importNow };
+}
+
+/**
+ * Starts the first import of a new gallery's folder without holding up the
+ * create response. The Photos tab follows it through the import status
+ * endpoint; a failure is logged and the admin can press Rescan.
+ */
+function startInitialImport(eventId, externalPath, actor) {
+  setImmediate(() => {
+    importExternalFolder({
+      eventId,
+      externalPath,
+      recursive: true,
+      actor: { type: 'admin', id: actor?.id, name: actor?.username },
+    }).catch((error) => {
+      logger.error('Initial external import failed', { eventId, error: error.message });
+    });
+  });
 }
 
 module.exports = { createEvent };

@@ -4,6 +4,8 @@ const fsSync = require('fs');
 const crypto = require('crypto');
 const childProcess = require('child_process');
 const os = require('os');
+const { Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 
 const cron = require('node-cron');
 const cronParser = require('cron-parser');
@@ -13,7 +15,9 @@ const logger = require('../utils/logger');
 const { formatBytes } = require('../utils/formatBytes');
 const { formatBoolean } = require('../utils/dbCompat');
 const backupManifest = require('./backupManifest');
+const { collectLegacyStoredFiles, storedPathMap, storedPathChecksums } = require('../utils/legacyStoredFiles');
 const S3StorageAdapter = require('./storage/s3Storage');
+const { backupS3Access } = require('../utils/s3EndpointPolicy');
 const packageJson = require('../../package.json');
 
 const service = {};
@@ -121,9 +125,8 @@ async function resolveConfigWithFallback() {
   return config;
 }
 
-function getStoragePath() {
-  return process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
-}
+const { getStoragePath } = require('../config/storage');
+const { localDestinationHint } = require('../utils/localBackupDestination');
 
 function normalizeBoolean(value) {
   if (typeof value === 'boolean') {
@@ -382,6 +385,20 @@ async function getDatabaseBackupInfoInternal() {
   }
 }
 
+function isExcludedName(name, excludePatterns) {
+  return excludePatterns.some(pattern => {
+    if (pattern.includes('*')) {
+      // Escape regex metacharacters before expanding the glob star — the
+      // raw replace turned '.nfs*' into /^.nfs.*$/ whose leading dot
+      // matched any character (e.g. 'anfs-photo.jpg' was excluded too).
+      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+      const regex = new RegExp(`^${escaped}$`);
+      return regex.test(name);
+    }
+    return name === pattern;
+  });
+}
+
 async function scanDirectory(dirPath, fileList, basePath, excludePatterns = []) {
   try {
     const entries = await fs.readdir(dirPath, { withFileTypes: true });
@@ -389,19 +406,7 @@ async function scanDirectory(dirPath, fileList, basePath, excludePatterns = []) 
       const fullPath = path.join(dirPath, entry.name);
       const relativePath = path.relative(basePath, fullPath);
 
-      const isExcluded = excludePatterns.some(pattern => {
-        if (pattern.includes('*')) {
-          // Escape regex metacharacters before expanding the glob star — the
-          // raw replace turned '.nfs*' into /^.nfs.*$/ whose leading dot
-          // matched any character (e.g. 'anfs-photo.jpg' was excluded too).
-          const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-          const regex = new RegExp(`^${escaped}$`);
-          return regex.test(entry.name);
-        }
-        return entry.name === pattern;
-      });
-
-      if (isExcluded) {
+      if (isExcludedName(entry.name, excludePatterns)) {
         continue;
       }
 
@@ -441,6 +446,7 @@ const LEGACY_BACKUP_PATHS = [
   { path: 'heroes',           feature_flag: null },
   { path: 'uploads',          feature_flag: null },
   { path: 'business-docs',    feature_flag: null },
+  { path: 'videos',           feature_flag: null },
 ];
 
 // "What to Backup" opt-OUT toggles written by BackupConfiguration.tsx.
@@ -676,6 +682,40 @@ async function getFilesToBackupInternal(configOrIncludeArchived = true) {
     await scanDirectory(path.join(storagePath, target.path), files, storagePath, excludePatterns);
   }
 
+  // Documents a row names in the legacy root (<cwd>/storage) when that is not
+  // the storage root: the walk above never sees them. Each is backed up under
+  // the storage-relative path the manifest's stored_path_map points its rows
+  // at, when a selected backup path covers that path.
+  // A failure here must not cost the rest of the backup.
+  let legacyFiles = [];
+  try {
+    legacyFiles = await collectLegacyStoredFiles(db);
+  } catch (error) {
+    logger.warn(`Could not list documents stored outside the storage root: ${error.message}`);
+  }
+  for (const legacy of legacyFiles) {
+    const target = targets.find((t) => legacy.rel === t.path || legacy.rel.startsWith(`${t.path}/`));
+    if (!target) continue;
+    // The walker's exclusions apply to every name below the backup path.
+    const below = legacy.rel.slice(target.path.length).split('/').filter(Boolean);
+    if (below.some((name) => isExcludedName(name, excludePatterns))) continue;
+    let stats;
+    try {
+      stats = await fs.stat(legacy.abs);
+    } catch (error) {
+      logger.warn(`Skipping a document stored outside the storage root that is no longer readable: ${error.code || error.message}`);
+      continue;
+    }
+    files.push({
+      path: legacy.abs,
+      relativePath: legacy.rel.split('/').join(path.sep),
+      size: stats.size,
+      modified: stats.mtime,
+      legacyValues: legacy.values,
+      legacySha256: legacy.sha256,
+    });
+  }
+
   return files;
 }
 
@@ -717,7 +757,18 @@ async function updateFileState(filePath, checksum, size, modified) {
 
 async function performLocalBackup(config, files) {
   const destinationRoot = config.backup_destination_path || path.join(getStoragePath(), 'backups');
-  await fs.mkdir(destinationRoot, { recursive: true });
+  // A bare "EACCES ... mkdir '/home/ubuntu'" did not say that the configured
+  // path is looked up inside the container (issue 1365). Resolved first, so
+  // a ".." in it means here what path.join makes of it for the files below,
+  // and what the connection test probed.
+  try {
+    await fs.mkdir(path.resolve(destinationRoot), { recursive: true });
+  } catch (mkdirError) {
+    throw new Error(
+      `Cannot create the backup directory ${destinationRoot}: ${mkdirError.code || mkdirError.message}. ` +
+      localDestinationHint()
+    );
+  }
 
   const backedUpFiles = [];
   let backedUpSize = 0;
@@ -759,6 +810,70 @@ async function performLocalBackup(config, files) {
   };
 }
 
+/**
+ * Where the SSH host keys of the rsync destination are recorded. An explicit
+ * BACKUP_SSH_KNOWN_HOSTS wins; otherwise the file sits next to the configured
+ * private key, which the operator already keeps on persistent storage. With
+ * no key configured, ssh uses its own default file.
+ */
+function resolveKnownHostsPath(sshKeyPath) {
+  const fromEnv = process.env.BACKUP_SSH_KNOWN_HOSTS;
+  if (fromEnv) return validateRsyncParam(fromEnv, 'BACKUP_SSH_KNOWN_HOSTS');
+  if (sshKeyPath) return path.join(path.dirname(sshKeyPath), 'known_hosts');
+  return null;
+}
+
+/**
+ * accept-new only protects later connections if the first one could WRITE
+ * the key: OpenSSH warns on stderr when it cannot and still exits 0, so a
+ * key in a read-only secret mount would pass the connection test and every
+ * backup without ever recording trust. Create the file up front and fail
+ * plainly when that is impossible.
+ */
+function ensureKnownHostsWritable(knownHosts) {
+  const fs = require('fs');
+  try {
+    fs.mkdirSync(path.dirname(knownHosts), { recursive: true });
+    fs.closeSync(fs.openSync(knownHosts, 'a'));
+  } catch (err) {
+    throw new Error(`The SSH known_hosts file ${knownHosts} cannot be written (${err.code || err.message}); set BACKUP_SSH_KNOWN_HOSTS to a writable path`);
+  }
+}
+
+/**
+ * SSH options that pin the rsync destination's host key. The first connection
+ * records the key (trust on first use); a later connection to the same host
+ * with a different key fails instead of silently syncing the backup, and the
+ * probe on "test connection", to a host that answers with another key. This
+ * replaced StrictHostKeyChecking=no, which accepted any key every time.
+ *
+ * Every value here has passed validateRsyncParam (no spaces or quotes), so the
+ * same list can be joined into rsync's `-e` string, which rsync splits on
+ * spaces itself, or handed to ssh argv-style.
+ */
+function sshHostKeyOptions(sshKeyPath) {
+  const options = ['-o', 'StrictHostKeyChecking=accept-new'];
+  const knownHosts = resolveKnownHostsPath(sshKeyPath);
+  if (knownHosts) {
+    ensureKnownHostsWritable(knownHosts);
+    options.push('-o', `UserKnownHostsFile=${knownHosts}`);
+  }
+  return options;
+}
+
+/**
+ * The ssh command rsync runs, as argv. Built whether or not a private key is
+ * configured: with an agent or default identity the host-key policy must
+ * still apply, and it must consult the same known_hosts file the connection
+ * test used, or the test can pass while the backup fails verification.
+ */
+function rsyncSshCommand(sshKeyPath) {
+  const cmd = ['ssh'];
+  if (sshKeyPath) cmd.push('-i', sshKeyPath);
+  cmd.push(...sshHostKeyOptions(sshKeyPath));
+  return cmd;
+}
+
 function validateRsyncParam(value, label) {
   if (!value || typeof value !== 'string') return null;
   if (!/^[a-zA-Z0-9._/@:-]+$/.test(value)) {
@@ -787,15 +902,24 @@ function buildRsyncArgs(config, extraExcludes = []) {
   }
 
   const args = ['-avz', '--delete', '--stats'];
+  let sshKey = null;
   if (config.backup_rsync_ssh_key) {
-    const sshKey = validateRsyncParam(config.backup_rsync_ssh_key, 'SSH key path');
+    // The setting is a key FILE path. The form used to ask for the key
+    // itself, so a pasted key can still be stored here; name that plainly
+    // instead of reporting "disallowed characters".
+    if (/PRIVATE KEY|\n/.test(String(config.backup_rsync_ssh_key))) {
+      throw new Error('The rsync SSH key setting holds a pasted key, not a key file path. Enter the absolute path to a private key file.');
+    }
+    sshKey = validateRsyncParam(config.backup_rsync_ssh_key, 'SSH key path');
     const fs = require('fs');
     if (!fs.existsSync(sshKey) || !fs.statSync(sshKey).isFile()) {
       throw new Error('SSH key file not found or is not a file');
     }
-    // Pass SSH options as separate array elements to avoid shell interpretation
-    args.push('-e', `ssh -i ${sshKey} -o StrictHostKeyChecking=no`);
   }
+  // rsync splits the -e command on spaces itself (no shell). The key path
+  // passed validateRsyncParam, so it holds neither, and the host-key options
+  // are fixed strings or a path validated the same way.
+  args.push('-e', rsyncSshCommand(sshKey).join(' '));
 
   // Same noise filters as the walker, plus the de-selected backup paths
   // (extraExcludes) — rsync syncs the whole storage root, so this is the
@@ -854,6 +978,14 @@ async function performRsyncBackup(config, files) {
   // Anchored excludes for the de-selected What-to-Backup paths; rsync
   // otherwise transfers the whole storage root regardless of the walker's
   // file list (which only feeds manifests and file state).
+  // rsync transfers the storage root itself, so a legacy-root document (see
+  // getFilesToBackupInternal) is not in it: leave it out of the manifest
+  // rather than record a file the destination never received.
+  const legacyCount = files.filter((file) => file.legacyValues).length;
+  if (legacyCount) {
+    logger.warn(`rsync backup: ${legacyCount} document(s) stored outside the storage root are not transferred; use a local or S3 destination, or a .picpeak export, to include them`);
+    files = files.filter((file) => !file.legacyValues);
+  }
   const excludedPaths = await resolveExcludedBackupPaths(config);
   const rsyncArgs = buildRsyncArgs(config, excludedPaths.map((row) => `/${row.path}/`));
   const { stdout } = await spawnAsync('rsync', rsyncArgs);
@@ -898,7 +1030,8 @@ async function performS3Backup(config, files) {
       forcePathStyle: normalizeBoolean(config.backup_s3_force_path_style),
       sslEnabled: config.backup_s3_ssl_enabled === undefined ? true : normalizeBoolean(config.backup_s3_ssl_enabled),
       maxRetries: config.backup_s3_max_retries || 3,
-      retryDelay: config.backup_s3_retry_delay || 1000
+      retryDelay: config.backup_s3_retry_delay || 1000,
+      ...backupS3Access(config)
     };
 
     const s3Client = new S3StorageAdapter(s3Config);
@@ -1043,8 +1176,8 @@ async function saveManifestToLocal(manifest, manifestFileName, config) {
   const manifestDir = config.backup_manifest_path
     || path.join(config.backup_destination_path || path.join(getStoragePath(), 'backups'), 'manifests');
   await fs.mkdir(manifestDir, { recursive: true });
-  const manifestPath = path.join(manifestDir, manifestFileName);
-  await backupManifest.saveManifest(manifest, manifestPath, config.backup_manifest_format || 'json');
+  const manifestPath = path.join(manifestDir, path.basename(manifestFileName));
+  await backupManifest.saveManifest(manifest, manifestPath, config.backup_manifest_format === 'yaml' ? 'yaml' : 'json');
   logger.info(`Backup manifest saved to ${manifestPath}`);
   return manifestPath;
 }
@@ -1052,12 +1185,14 @@ async function saveManifestToLocal(manifest, manifestFileName, config) {
 async function saveManifestToS3(manifest, manifestFileName, config, result) {
   const tempDir = path.join(getStoragePath(), 'temp');
   await fs.mkdir(tempDir, { recursive: true });
-  const tempManifestPath = path.join(tempDir, manifestFileName);
-  await backupManifest.saveManifest(manifest, tempManifestPath, config.backup_manifest_format || 'json');
+  const safeName = path.basename(manifestFileName);
+  const tempManifestPath = path.join(tempDir, safeName);
+  const format = config.backup_manifest_format === 'yaml' ? 'yaml' : 'json';
+  await backupManifest.saveManifest(manifest, tempManifestPath, format);
 
-  const manifestKey = path.posix.join(result.s3Prefix, 'manifests', manifestFileName);
+  const manifestKey = path.posix.join(result.s3Prefix, 'manifests', safeName);
   await result.s3Client.upload(tempManifestPath, manifestKey, {
-    contentType: config.backup_manifest_format === 'xml' ? 'application/xml' : 'application/json',
+    contentType: format === 'yaml' ? 'application/yaml' : 'application/json',
     metadata: {
       'backup-type': 'manifest',
       'manifest-version': manifest.version,
@@ -1153,17 +1288,36 @@ async function runBackupInternal(isManual = false) {
       // object; falls back to the verified copy otherwise.
       const databaseInfo = result.databaseInfo || verifiedDatabaseInfo;
 
+      // Rows naming a legacy-root document are pointed at its backed-up path
+      // on restore (restoreService). rsync leaves those documents out.
+      // `file.checksum` (set by performLocalBackup/performS3Backup right
+      // before the copy/upload) reflects the bytes actually archived; prefer
+      // it over `legacySha256`, which collectLegacyStoredFiles computed
+      // earlier during the collection walk and can go stale if the source
+      // file changes between collection and the archive write.
+      const legacyBacked = (destinationType === 'rsync' ? [] : files.filter((file) => file.legacyValues))
+        .map((file) => ({
+          rel: file.relativePath.split(path.sep).join('/'),
+          values: file.legacyValues,
+          sha256: file.checksum || file.legacySha256,
+        }));
+      const legacyMap = storedPathMap(legacyBacked);
       const manifestOptions = {
         backupType: previousBackup ? 'incremental' : 'full',
         backupPath: result.backupPath,
         files: manifestFiles,
         databaseInfo,
         parentBackupId: previousBackup ? previousBackup.manifest_id : null,
-        format: config.backup_manifest_format || 'json',
+        // The format becomes the manifest file extension, so only the two
+        // known values may reach the file name.
+        format: config.backup_manifest_format === 'yaml' ? 'yaml' : 'json',
         customMetadata: {
           backup_run_id: runId,
           destination_type: destinationType,
-          retentionDays: config.backup_retention_days || 30
+          retentionDays: config.backup_retention_days || 30,
+          ...(Object.keys(legacyMap).length
+            ? { stored_path_map: legacyMap, stored_path_sha256: storedPathChecksums(legacyBacked) }
+            : {})
         }
       };
 
@@ -1552,6 +1706,7 @@ async function loadManifestFromAnywhere(manifestPath, config) {
     sslEnabled: cfg && cfg.backup_s3_ssl_enabled !== undefined
       ? normalizeBoolean(cfg.backup_s3_ssl_enabled)
       : true,
+    ...backupS3Access(cfg),
   });
 
   try {
@@ -1559,6 +1714,39 @@ async function loadManifestFromAnywhere(manifestPath, config) {
     return await backupManifest.loadManifest(tempPath);
   } finally {
     await fs.unlink(tempPath).catch(() => {});
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// A manifest stored in S3 is fetched into a temp dir for every status
+// request and read whole into memory by loadManifest(). Bound it: HeadObject
+// first, then a byte counter on the body, and remove whatever landed on
+// disk whether or not the download or the parse succeeded.
+const MAX_S3_MANIFEST_BYTES = 16 * 1024 * 1024;
+
+async function loadManifestFromS3Bounded(s3Client, key, backupRunLabel) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'backup-manifest-'));
+  const tempPath = path.join(tempDir, `manifest-${backupRunLabel}.json`);
+  try {
+    const head = await s3Client.getMetadata(key);
+    const contentLength = Number(head && head.ContentLength);
+    if (Number.isFinite(contentLength) && contentLength > MAX_S3_MANIFEST_BYTES) {
+      throw new Error(`Backup manifest is ${contentLength} bytes, above the ${MAX_S3_MANIFEST_BYTES}-byte limit`);
+    }
+    let seen = 0;
+    const limiter = new Transform({
+      transform(chunk, _enc, cb) {
+        seen += chunk.length;
+        if (seen > MAX_S3_MANIFEST_BYTES) {
+          return cb(new Error(`Backup manifest exceeds the ${MAX_S3_MANIFEST_BYTES}-byte limit`));
+        }
+        cb(null, chunk);
+      },
+    });
+    const body = await s3Client.downloadStream(key);
+    await pipeline(body, limiter, fsSync.createWriteStream(tempPath));
+    return await backupManifest.loadManifest(tempPath);
+  } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -1605,8 +1793,6 @@ async function getBackupManifest(backupRunId) {
   }
 
   const [, bucket, key] = match;
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'backup-manifest-'));
-  const tempPath = path.join(tempDir, `manifest-${backupRunId}.json`);
 
   const s3Client = new S3StorageAdapter({
     bucket,
@@ -1617,13 +1803,11 @@ async function getBackupManifest(backupRunId) {
     forcePathStyle: config ? normalizeBoolean(config.backup_s3_force_path_style) : false,
     sslEnabled: config && config.backup_s3_ssl_enabled !== undefined
       ? normalizeBoolean(config.backup_s3_ssl_enabled)
-      : true
+      : true,
+    ...backupS3Access(config)
   });
 
-  await s3Client.download(key, tempPath);
-  const manifest = await backupManifest.loadManifest(tempPath);
-  await fs.unlink(tempPath).catch(() => {});
-  await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  const manifest = await loadManifestFromS3Bounded(s3Client, key, backupRunId);
 
   return {
     manifest,
@@ -1649,9 +1833,6 @@ async function validateBackupManifest(manifestPath) {
         throw new Error('S3 credentials not configured for manifest validation');
       }
 
-      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'backup-manifest-'));
-      const tempPath = path.join(tempDir, `validate-${Date.now()}.json`);
-
       const s3Client = new S3StorageAdapter({
         bucket,
         region: config.backup_s3_region || 'us-east-1',
@@ -1659,13 +1840,11 @@ async function validateBackupManifest(manifestPath) {
         accessKeyId: config.backup_s3_access_key,
         secretAccessKey: config.backup_s3_secret_key,
         forcePathStyle: normalizeBoolean(config.backup_s3_force_path_style),
-        sslEnabled: config.backup_s3_ssl_enabled === undefined ? true : normalizeBoolean(config.backup_s3_ssl_enabled)
+        sslEnabled: config.backup_s3_ssl_enabled === undefined ? true : normalizeBoolean(config.backup_s3_ssl_enabled),
+        ...backupS3Access(config)
       });
 
-      await s3Client.download(key, tempPath);
-      manifest = await backupManifest.loadManifest(tempPath);
-      await fs.unlink(tempPath).catch(() => {});
-      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      manifest = await loadManifestFromS3Bounded(s3Client, key, `validate-${Date.now()}`);
     } else {
       manifest = await backupManifest.loadManifest(manifestPath);
     }
@@ -1687,10 +1866,15 @@ service.runBackup = runBackupInternal;
 service.startBackupService = startBackupService;
 service.stopBackupService = stopBackupService;
 service.triggerManualBackup = triggerManualBackup;
+service.sshHostKeyOptions = sshHostKeyOptions;
+service.rsyncSshCommand = rsyncSshCommand;
+service.resolveKnownHostsPath = resolveKnownHostsPath;
 service.getBackupStatus = getBackupStatus;
 service.cleanupOldBackupRuns = cleanupOldBackupRuns;
 service.getBackupManifest = getBackupManifest;
 service.validateBackupManifest = validateBackupManifest;
+service.loadManifestFromS3Bounded = loadManifestFromS3Bounded;
+service.MAX_S3_MANIFEST_BYTES = MAX_S3_MANIFEST_BYTES;
 service.resolveBackupPaths = resolveBackupPaths;
 service.resolveExcludedBackupPaths = resolveExcludedBackupPaths;
 service.backupPathIncluded = backupPathIncluded;

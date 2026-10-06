@@ -1,15 +1,23 @@
 /**
  * Public → Transfer upload routes (PicTransfer client uploads, #997).
  *
- * Mounted at /api/public/transfer-upload. NO authentication — a short (6-char)
- * upload token in the link is the only secret. This lets a photographer send a
- * client "here's a code, upload your logo / files here". Because the token is
- * low-entropy, brute force is mitigated by a tight per-route rate limiter plus
- * the shared per-IP bad-attempt lockout, and the guard runs BEFORE multer so a
- * bad token never costs a disk write.
+ * Mounted at /api/public/transfer-upload. NO authentication — the token in the
+ * link is the only secret. Since #1544 a file request is a first-class thing
+ * (kind='request', migration 257) and its PRIMARY link carries the 64-hex
+ * token, the same entropy as a recipient download link. The short read-aloud
+ * code stays as an optional alternative for "here's a code, type it in".
+ *
+ * Both are accepted here, and they are guarded differently on purpose: the
+ * short code keeps the per-network bad-attempt lockout that its ~50 bits of
+ * alphabet-limited entropy needs, while a 64-hex miss is not worth locking a
+ * whole /64 out over. Either way the guard runs BEFORE multer, so a bad token
+ * never costs a disk write.
+ *
+ * Only kind='request' rows resolve here — a send's download token is a 404, so
+ * the split cannot leak one flow into the other.
  *
  * Surface:
- *   GET  /:token   metadata (transfer title, allowed types, size limit)
+ *   GET  /:token   metadata (title, allowed types, size limit)
  *   POST /:token   multipart upload (field name: files)
  */
 
@@ -18,14 +26,19 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
+const { rateLimitKey } = require('../utils/rateLimitKey');
 const { param } = require('express-validator');
 const { handleAsync, validateRequest, successResponse } = require('../utils/routeHelpers');
 const { requireFeatureFlag } = require('../middleware/requireFeatureFlag');
 const { clientIpForAudit } = require('../utils/clientIp');
-const { validateFileType } = require('../utils/fileSecurityUtils');
 const { sanitizeFilename } = require('../utils/filenameSanitizer');
-const { getAppSetting } = require('../utils/appSettings');
 const { getStorage } = require('../services/storage');
+const {
+  getTransferUploadPolicy,
+  validateTransferFileType,
+  allowedMimeList,
+  allowedExtensionList,
+} = require('../services/transferUploadPolicy');
 const transferService = require('../services/transferService');
 const { _internal: tokenLock } = require('../utils/publicTokenGuards');
 const logger = require('../utils/logger');
@@ -36,31 +49,55 @@ const router = express.Router();
 // probed) once an admin disables the feature under Settings → Features.
 router.use(requireFeatureFlag('transfers'));
 
-const getStoragePath = () => process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
+const { getStoragePath } = require('../config/storage');
 const MAX_FILES_PER_UPLOAD = 25;
-const DEFAULT_ALLOWED = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff', 'application/pdf', 'application/zip'];
 
-const infoLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
-const uploadLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+// S3 parity with the download routes: an object written for a transfer says it
+// is opaque and should be saved, so a presigned URL — or a bucket someone makes
+// public — behaves exactly like fetching it through PicPeak (#1544).
+const TRANSFER_OBJECT_OPTIONS = {
+  contentType: 'application/octet-stream',
+  contentDisposition: 'attachment',
+};
 
-// Upload tokens are drawn from an unambiguous alphabet (see transferService).
-// Accept a small range of lengths so a future longer token still validates.
-const TOKEN_RE = /^[A-Za-z0-9]{4,16}$/;
+const infoLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false, keyGenerator: rateLimitKey });
+const uploadLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, keyGenerator: rateLimitKey });
+
+// Two token shapes reach this route (see the header):
+//   SHORT_TOKEN_RE  the read-aloud code, drawn from an unambiguous alphabet
+//                   (see transferService). A range of lengths so codes issued
+//                   by older releases still validate.
+//   LONG_TOKEN_RE   the request's primary 64-hex token.
+// TOKEN_RE is the union, used by the express-validator param check.
+const SHORT_TOKEN_RE = /^[A-Za-z0-9]{4,16}$/;
+const LONG_TOKEN_RE = /^[a-f0-9]{64}$/;
+const TOKEN_RE = /^([A-Za-z0-9]{4,16}|[a-f0-9]{64})$/;
 
 async function loadUploadTransfer(req, res) {
-  const ip = clientIpForAudit(req);
-  if (tokenLock.isIpLocked(ip)) {
-    res.status(429).json({ error: 'Too many invalid attempts. Try again later.', code: 'TOKEN_LOOKUP_LOCKED' });
-    return null;
-  }
+  // Keyed like the limiters above: an IPv6 /64 counts as one client, so a
+  // guesser rotating addresses inside one allocation does not reset the
+  // count. The audit log keeps the full address (clientIpForAudit).
+  const ip = rateLimitKey(req);
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
     res.status(400).json({ error: 'Invalid token format', code: 'BAD_TOKEN' });
     return null;
   }
-  const transfer = await transferService.getTransferByUploadToken(token);
+  // A 64-hex request token is as strong as the recipient download links and
+  // needs no lockout; the short read-aloud code keeps the pre-lookup lockout
+  // its smaller keyspace requires, isolated from the high-entropy document
+  // links so one surface cannot disable the other.
+  const isShortCode = !LONG_TOKEN_RE.test(token) && SHORT_TOKEN_RE.test(token);
+  if (isShortCode && tokenLock.isIpLocked(ip, 'transfer_uploads')) {
+    res.status(429).json({ error: 'Too many invalid attempts. Try again later.', code: 'TOKEN_LOOKUP_LOCKED' });
+    return null;
+  }
+  // Both lookups filter on kind='request', so a send's download token 404s.
+  const transfer = isShortCode
+    ? await transferService.getTransferByUploadToken(token)
+    : await transferService.getRequestByToken(token);
   if (!transfer) {
-    tokenLock.recordBadAttempt(ip);
+    if (isShortCode) tokenLock.recordBadAttempt(ip, 'transfer_uploads');
     res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
     return null;
   }
@@ -77,19 +114,35 @@ router.get('/:token', infoLimiter, [param('token').matches(TOKEN_RE)], handleAsy
   validateRequest(req);
   const transfer = await loadUploadTransfer(req, res);
   if (!transfer) return;
-  const maxSizeMb = Number(await getAppSetting('transfer_max_upload_size_mb', 50)) || 50;
-  const allowed = await getAppSetting('transfer_upload_allowed_mime', DEFAULT_ALLOWED);
+  const policy = await getTransferUploadPolicy();
   return successResponse(res, {
     transfer: {
       title: transfer.title || 'Upload',
       message: transfer.message || null,
       expires_at: transfer.upload_expires_at || transfer.expires_at,
-      max_size_mb: maxSizeMb,
+      max_size_mb: policy.maxSizeMb,
       max_files: MAX_FILES_PER_UPLOAD,
-      allowed_mime: Array.isArray(allowed) ? allowed : DEFAULT_ALLOWED,
+      // The page filters on these before uploading, so an unsupported file is
+      // named and dropped client-side instead of failing the whole batch.
+      accept_all: policy.acceptAll,
+      allowed_mime: allowedMimeList(policy),
+      allowed_extensions: allowedExtensionList(policy),
     },
   });
 }));
+
+// The row as it is NOW. preUploadGuard decided before the body arrived; a slow
+// or large upload can cross the request's expiry, or an admin's disable or
+// delete, while the bytes are still coming in. Lookup by token, which both
+// getters filter to live request rows, then the same eligibility predicate.
+async function reloadUploadTransfer(token) {
+  const isShortCode = !LONG_TOKEN_RE.test(token) && SHORT_TOKEN_RE.test(token);
+  const transfer = isShortCode
+    ? await transferService.getTransferByUploadToken(token)
+    : await transferService.getRequestByToken(token);
+  const gate = transferService.assertUploadable(transfer);
+  return gate.ok ? { transfer } : { gate };
+}
 
 // Pre-multer guard: validates the token + upload eligibility BEFORE any bytes
 // touch disk, and stashes the transfer for the destination/handler.
@@ -119,27 +172,39 @@ const tempStorage = multer.diskStorage({
   },
 });
 
-function buildUploader(maxSizeBytes, allowed) {
+function buildUploader(maxSizeBytes, policy) {
   return multer({
     storage: tempStorage,
     // CVE-2026-82333: files arrive as repeated `files` parts via .array(),
     // not bracket-indexed field names like `files[0]`, and this route is
     // unauthenticated (token-only) — no legitimate field name uses
     // array-index syntax at all. Reject any that do.
-    limits: { fileSize: maxSizeBytes, files: MAX_FILES_PER_UPLOAD, fieldArrayIndexLimit: 0 },
+    // This route reads no text fields at all, so a handful is plenty. Without
+    // fields/parts caps busboy accepts an unbounded number of ~1 MiB text
+    // parts and multer keeps every one in memory before the handler ever
+    // runs (Codex security audit 2026-09-30).
+    limits: {
+      fileSize: maxSizeBytes, files: MAX_FILES_PER_UPLOAD, fieldArrayIndexLimit: 0,
+      fields: 5, fieldSize: 1024, parts: MAX_FILES_PER_UPLOAD + 5,
+    },
     fileFilter: (req, file, cb) => {
-      if (validateFileType(file.originalname, file.mimetype, allowed)) return cb(null, true);
-      return cb(new Error('This file type is not allowed'));
+      // The transfer policy, not the media registry — these bytes are stored
+      // and handed back untouched, never decoded. See transferUploadPolicy.
+      if (validateTransferFileType(file.originalname, file.mimetype, policy)) return cb(null, true);
+      // Skip rather than throw: one unsupported file in a batch must not
+      // reject the good ones with it. The names come back in the response so
+      // the page can say exactly what was dropped.
+      req.rejectedFiles = req.rejectedFiles || [];
+      req.rejectedFiles.push(file.originalname);
+      return cb(null, false);
     },
   }).array('files', MAX_FILES_PER_UPLOAD);
 }
 
 router.post('/:token', uploadLimiter, [param('token').matches(TOKEN_RE)], preUploadGuard, handleAsync(async (req, res) => {
-  const transfer = req.transferRow;
-  const maxSizeMb = Number(await getAppSetting('transfer_max_upload_size_mb', 50)) || 50;
-  const allowedSetting = await getAppSetting('transfer_upload_allowed_mime', DEFAULT_ALLOWED);
-  const allowed = Array.isArray(allowedSetting) ? allowedSetting : DEFAULT_ALLOWED;
-  const uploader = buildUploader(maxSizeMb * 1024 * 1024, allowed);
+  const policy = await getTransferUploadPolicy();
+  const maxSizeMb = policy.maxSizeMb;
+  const uploader = buildUploader(maxSizeMb * 1024 * 1024, policy);
 
   try {
     await new Promise((resolve, reject) => {
@@ -147,25 +212,70 @@ router.post('/:token', uploadLimiter, [param('token').matches(TOKEN_RE)], preUpl
     });
   } catch (err) {
     // Translate multer errors to a clean 4xx.
+    // Multer's own message is not echoed: a filesystem failure inside the
+    // temp-file destination carries the server path (EACCES /app/storage/...),
+    // and this route is unauthenticated. The size case is the only one worth
+    // naming, because it tells the client something actionable.
     const msg = err && err.code === 'LIMIT_FILE_SIZE'
       ? `Each file must be ${maxSizeMb} MB or smaller`
-      : (err && err.message) || 'Upload failed';
+      : 'Upload failed';
+    if (err && err.code !== 'LIMIT_FILE_SIZE') {
+      logger.warn('transfer upload rejected', { code: err.code, error: err.message });
+    }
     if (!res.headersSent) res.status(400).json({ error: msg, code: 'UPLOAD_REJECTED' });
     return;
   }
 
+  const rejected = req.rejectedFiles || [];
   if (!req.files || !req.files.length) {
+    // Every file was dropped by the type filter: say which, rather than the
+    // generic "this file type is not allowed" that used to end the request.
+    if (rejected.length) {
+      return res.status(400).json({
+        error: `Not an allowed file type: ${rejected.join(', ')}`,
+        code: 'TYPE_REJECTED',
+        rejected_files: rejected,
+      });
+    }
     return res.status(400).json({ error: 'No files uploaded', code: 'NO_FILES' });
   }
+
+  // Nothing becomes permanent on the strength of the pre-body check. The
+  // body is on disk already, so a refusal — or a database error while
+  // re-reading the row — removes it; otherwise every request during an
+  // outage leaves its temporary files behind.
+  const dropTempFiles = () => {
+    for (const file of req.files) {
+      try { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch (_) { /* noop */ }
+    }
+  };
+  let current;
+  try {
+    current = await reloadUploadTransfer(req.params.token);
+  } catch (error) {
+    dropTempFiles();
+    throw error;
+  }
+  if (!current.transfer) {
+    dropTempFiles();
+    return res.status(current.gate.status).json({ error: 'This upload link is no longer available', code: current.gate.code });
+  }
+  const transfer = current.transfer;
 
   const storage = getStorage();
   const ip = clientIpForAudit(req);
   const saved = [];
+  // A file whose bytes or row fail to land is NOT a success. Without this the
+  // client sees "Uploaded 3 files" for a batch of 5 and has no reason to try
+  // again, while the admin's list quietly shows three.
+  const failed = [];
   for (const file of req.files) {
-    const safeName = sanitizeFilename(path.basename(file.originalname), 120) || 'file';
-    const key = path.posix.join(transferService.uploadDirKey(transfer.id), `${Date.now()}-${saved.length}-${safeName}`);
+    // Opaque key — the client's extension is deliberately dropped so no stored
+    // object can end in .html/.svg/.js/.php on disk or in S3. The real name is
+    // kept on the row and is what the admin downloads it as.
+    const key = transferService.newUploadFileKey(transfer.id);
     try {
-      await storage.putFromFile(key, file.path);
+      await storage.putFromFile(key, file.path, TRANSFER_OBJECT_OPTIONS);
       await transferService.addUpload(transfer.id, {
         originalFilename: file.originalname,
         storedPath: key,
@@ -175,7 +285,10 @@ router.post('/:token', uploadLimiter, [param('token').matches(TOKEN_RE)], preUpl
       });
       saved.push({ filename: file.originalname, size_bytes: file.size });
     } catch (err) {
-      logger.error('transfer upload: failed to store file', { transferId: transfer.id, error: err.message });
+      failed.push(file.originalname);
+      logger.error('transfer upload: failed to store file', {
+        transferId: transfer.id, filename: file.originalname, error: err.message,
+      });
     } finally {
       // Remove the temp copy regardless of outcome.
       try { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch (_) { /* noop */ }
@@ -185,7 +298,27 @@ router.post('/:token', uploadLimiter, [param('token').matches(TOKEN_RE)], preUpl
   if (!saved.length) {
     return res.status(500).json({ error: 'Could not store the uploaded files', code: 'STORE_FAILED' });
   }
-  return successResponse(res, { uploaded: saved.length, files: saved }, 201, 'Files uploaded');
+
+  // Tell the admin their files arrived. Deliberately not awaited into the
+  // response path and it swallows its own errors: the client's upload has
+  // already succeeded and must not be failed by an SMTP problem.
+  transferService.notifyFilesReceived(transfer.id, saved.length).catch(() => { /* logged inside */ });
+
+  const notes = [];
+  if (rejected.length) notes.push(`${rejected.length} were not an allowed type`);
+  if (failed.length) notes.push(`${failed.length} could not be stored — please try those again`);
+
+  return successResponse(
+    res,
+    {
+      uploaded: saved.length,
+      files: saved,
+      rejected_files: rejected,
+      failed_files: failed,
+    },
+    201,
+    notes.length ? `Uploaded ${saved.length} file(s); ${notes.join('; ')}` : 'Files uploaded',
+  );
 }));
 
 module.exports = router;

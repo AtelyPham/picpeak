@@ -8,11 +8,12 @@ const { requirePermission } = require('../../middleware/permissions');
 const bcrypt = require('bcrypt');
 const { queueEmail } = require('../../services/emailProcessor');
 const { galleryPasswordColumns, readGalleryPassword, dropCopiesIfStorageOff } = require('../../utils/galleryPasswordVault');
+const { credentialChangeColumns, sameAsStored } = require('../../utils/galleryCredentialCutoff');
 const { validatePasswordInContext, getBcryptRounds } = require('../../utils/passwordValidation');
 const logger = require('../../utils/logger');
 const { errorResponse } = require('../../utils/routeHelpers');
 const { buildShareLinkVariants } = require('../../services/shareLinkService');
-const { requireEventOwnership } = require('../../middleware/ownership');
+const { requireEventOwnership, scopeEventsQuery } = require('../../middleware/ownership');
 const { getAbsoluteFrontendUrl } = require('../../utils/frontendUrl');
 const { parseBooleanInput } = require('../../utils/parsers');
 
@@ -20,17 +21,14 @@ module.exports = (router) => {
 
 
   // Reset event password
-  router.post('/:id/reset-password', adminAuth, requirePermission('events.edit'), requireEventOwnership, async (req, res) => {
+  router.post('/:id/reset-password', adminAuth, requirePermission(['events.edit', 'events.support']), requireEventOwnership, async (req, res) => {
     try {
       const { id } = req.params;
       const { sendEmail = true, password: clientPassword } = req.body;
 
-      let eventQuery = db('events').where('id', id);
-      // Editor role can only edit their own events
-      if (req.admin.roleName === 'editor') {
-        eventQuery = eventQuery.where('created_by', req.admin.id);
-      }
-      const event = await eventQuery.first();
+      // Ownership: the rule requireEventOwnership already enforced, kept as
+      // defence in depth (issue 1670, §2.4).
+      const event = await scopeEventsQuery(db('events').where('id', id), req.admin).first();
       if (!event) {
         return res.status(404).json({ error: 'Event not found' });
       }
@@ -62,26 +60,32 @@ module.exports = (router) => {
         newPassword = generateReadablePassword();
       }
       const passwordHash = await bcrypt.hash(newPassword, getBcryptRounds());
-
-      // Update event with new password
-      await db('events')
-        .where('id', id)
-        .update({
-          password_hash: passwordHash,
-          // #1271 — same statement as the hash, so a concurrent reset can
-          // never leave a copy that does not match the hash next to it
-          ...(await galleryPasswordColumns({ password: newPassword })),
-        });
+      const copyColumns = await galleryPasswordColumns({ password: newPassword });
+      // An admin-chosen password equal to the current one is not a change; it
+      // keeps the hash only while the stored hash is still the one compared.
+      // A generated password is always new. #1271 — the copy is written in the
+      // same statement as the hash, so it can never disagree with it.
+      const keptHash = newPassword === clientPassword
+        && await sameAsStored(newPassword, event.password_hash)
+        && await db('events').where({ id, password_hash: event.password_hash })
+          .update(Object.keys(copyColumns).length ? copyColumns : { updated_at: new Date().toISOString() });
+      if (!keptHash) {
+        await db('events')
+          .where('id', id)
+          .update({
+            password_hash: passwordHash,
+            ...copyColumns,
+            // Guests who got in with the old password must log in again.
+            ...(await credentialChangeColumns('gallery')),
+          });
+      }
       await dropCopiesIfStorageOff(id);
 
-      // Log activity
-      await logActivity('password_reset',
-        { eventName: event.event_name, emailSent: sendEmail },
-        id,
-        { type: 'admin', id: req.admin.id, name: req.admin.username }
-      );
-
-      // Queue email notification if requested
+      // Queue email notification if requested. The event may have no address
+      // (optional at creation, clearable since issue 1733): then nothing is
+      // queued and the response says so, instead of reporting a mail that
+      // never existed.
+      let emailSent = false;
       if (sendEmail) {
         const recipientEmail = event.customer_email || event.host_email;
         const recipientName = event.customer_name || event.host_name || (recipientEmail ? recipientEmail.split('@')[0] : null);
@@ -89,22 +93,36 @@ module.exports = (router) => {
         // Use the full URL so customers can click straight from the email.
         const { shareUrl } = await buildShareLinkVariants({ slug: event.slug, shareToken: event.share_token });
 
-        await queueEmail(id, recipientEmail, 'gallery_created', {
-          customer_name: recipientName,
-          customer_email: recipientEmail,
-          host_name: recipientName,
-          event_name: event.event_name,
-          event_date: event.event_date,  // Pass raw date - will be formatted by email processor
-          gallery_link: shareUrl,
-          gallery_password: newPassword,
-          expiry_date: event.expires_at  // Pass raw date - will be formatted by email processor
-        });
+        // The password is already changed above; a queue failure must not
+        // turn that into a 500 without the audit row below.
+        try {
+          emailSent = await queueEmail(id, recipientEmail, 'gallery_created', {
+            customer_name: recipientName,
+            customer_email: recipientEmail,
+            host_name: recipientName,
+            event_name: event.event_name,
+            event_date: event.event_date,  // Pass raw date - will be formatted by email processor
+            gallery_link: shareUrl,
+            gallery_password: newPassword,
+            expiry_date: event.expires_at  // Pass raw date - will be formatted by email processor
+          }) === true;
+        } catch (queueError) {
+          logger.error('Password reset: could not queue the notification email', { eventId: id, error: queueError.message });
+          emailSent = false;
+        }
       }
+
+      // Log activity
+      await logActivity('password_reset',
+        { eventName: event.event_name, emailSent },
+        id,
+        { type: 'admin', id: req.admin.id, name: req.admin.username }
+      );
 
       res.json({
         message: 'Password reset successfully',
         newPassword: newPassword,
-        emailSent: sendEmail
+        emailSent
       });
     } catch (error) {
       errorResponse(res, error, 500, 'Failed to reset password');
@@ -112,22 +130,26 @@ module.exports = (router) => {
   });
 
   // Resend creation email
-  router.post('/:id/resend-email', adminAuth, requirePermission('events.edit'), requireEventOwnership, async (req, res) => {
+  router.post('/:id/resend-email', adminAuth, requirePermission(['events.edit', 'events.support']), requireEventOwnership, async (req, res) => {
     try {
       const { id } = req.params;
 
       // Get event details
-      let eventQuery = db('events').where('id', id);
-      // Editor role can only edit their own events
-      if (req.admin.roleName === 'editor') {
-        eventQuery = eventQuery.where('created_by', req.admin.id);
-      }
-      const event = await eventQuery.first();
+      // Ownership: the rule requireEventOwnership already enforced, kept as
+      // defence in depth (issue 1670, §2.4).
+      const event = await scopeEventsQuery(db('events').where('id', id), req.admin).first();
 
       if (!event) {
         return res.status(404).json({ error: 'Event not found' });
       }
-    
+
+      // The email is optional at creation and can be cleared later (issue
+      // 1733), so there may be nobody to send to. Say so instead of
+      // answering "queued" for a row the processor could never deliver.
+      if (!(event.customer_email || event.host_email)) {
+        return res.status(400).json({ error: 'The event has no customer email to send to' });
+      }
+
       // The email processor will determine the language based on:
       // 1. Event language setting
       // 2. App settings general_default_language  

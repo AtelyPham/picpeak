@@ -11,6 +11,7 @@ import Captions from 'yet-another-react-lightbox/plugins/captions';
 import 'yet-another-react-lightbox/styles.css';
 import 'yet-another-react-lightbox/plugins/thumbnails.css';
 import { ColorLabelBadge } from '../ColorLabelBadge';
+import { FirstLookBadge } from '../GalleryTileBadges';
 import 'yet-another-react-lightbox/plugins/captions.css';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Download as DownloadIcon, Heart, Check, Star, MessageSquare, Package, LogOut } from 'lucide-react';
@@ -29,11 +30,16 @@ import { FeedbackIdentityModal } from '../FeedbackIdentityModal';
 import { galleryService } from '../../../services/gallery.service';
 import { analyticsService } from '../../../services/analytics.service';
 import { useDownloadPhoto } from '../../../hooks/useGallery';
+import { useDownloadQuota } from '../../../contexts/DownloadQuotaContext';
+import { DownloadQuotaNotice } from '../DownloadQuotaNotice';
+import { isDownloadLimitError, showDownloadLimitReached } from '../../../utils/downloadLimit';
 import { toast } from 'react-toastify';
 
 import './GalleryPremiumLayout.css';
 import { lightboxImageUrl } from '../imageTiers';
 import { renderPremiumLightboxImage } from './PremiumLightboxImage';
+
+const isVideoPhoto = (photo: Photo) => photo.media_type === 'video' || photo.type === 'video';
 
 interface PhotoCardProps {
   photo: Photo;
@@ -130,6 +136,18 @@ const PhotoCard: React.FC<PhotoCardProps> = ({
       {/* Overlay Gradient */}
       <div className="gallery-premium-photo-overlay" />
 
+      {/* First look (issue 1562): bottom-left like the shared card, lifted
+          above the feedback indicators that own that corner here. No folder
+          hint (issue 1786) on this card: its top corners hold the checkbox and
+          a like button that is always shown on touch. */}
+      <FirstLookBadge
+        photo={photo}
+        className={feedbackEnabled && (likeCount > 0 || averageRating > 0 || commentCount > 0 || isLiked)
+          ? 'bottom-10 left-2'
+          : 'bottom-2 left-2'}
+      />
+
+
       {/* Selection Checkbox */}
       <button
         onClick={onSelect}
@@ -188,6 +206,7 @@ interface GalleryPremiumLayoutProps extends BaseGalleryLayoutProps {
 export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
   // #1160: folder-only root — render the shell, skip the empty message.
   suppressEmptyState = false,
+  afterGrid,
   photos,
   slug,
   onPhotoClick: _onPhotoClick,
@@ -212,6 +231,8 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
   heroPhotoOverride,
   onLogout,
   showOriginalFilename = false,
+  openPhotoId,
+  onLightboxPhotoChange,
 }) => {
   // These props are passed by parent but we use our own lightbox, so mark as intentionally unused
   void _onPhotoClick;
@@ -273,6 +294,48 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
   }, [photos, activeCategory]);
 
   const currentLightboxPhoto = lightboxIndex >= 0 ? filteredPhotos[lightboxIndex] : null;
+
+  // The photo the lightbox is on, by id: `lightboxIndex` is a position in
+  // `filteredPhotos`, which a filter or category change can shift under it.
+  // When that photo leaves the list while others remain, the slide at the
+  // old index is a different photo and YARL fires no `view` for it, so the
+  // URL would keep the old `?photo=`. Clamp onto a neighbour and report the
+  // step, as the standard lightbox does; with no slides left, close.
+  const lightboxPhotoIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (lightboxIndex < 0 || lightboxPhotoIdRef.current === null) return;
+    if (filteredPhotos.some((photo) => photo.id === lightboxPhotoIdRef.current)) return;
+    if (filteredPhotos.length === 0) {
+      lightboxPhotoIdRef.current = null;
+      setLightboxIndex(-1);
+      onLightboxPhotoChange?.(null, 'close');
+      return;
+    }
+    const next = Math.min(lightboxIndex, filteredPhotos.length - 1);
+    lightboxPhotoIdRef.current = filteredPhotos[next].id;
+    setLightboxIndex(next);
+    onLightboxPhotoChange?.(filteredPhotos[next].id, 'step');
+  }, [filteredPhotos, lightboxIndex, onLightboxPhotoChange]);
+
+  // Link to a single photo (issue 1733): open on the photo the URL asks for,
+  // close on null. This layout filters by category on its own, so a linked
+  // photo hidden by that chip clears it first; an id not in `photos` opens
+  // nothing.
+  useEffect(() => {
+    if (openPhotoId === undefined) return;
+    if (openPhotoId === null) {
+      setLightboxIndex(-1);
+      return;
+    }
+    const index = filteredPhotos.findIndex((photo) => photo.id === openPhotoId);
+    if (index >= 0) {
+      lightboxPhotoIdRef.current = openPhotoId;
+      setLightboxIndex(index);
+    } else if (photos.some((photo) => photo.id === openPhotoId)) {
+      setActiveCategory(null);
+    }
+  }, [openPhotoId, filteredPhotos, photos]);
+
   const reactionsActive = feedbackEnabled && !!feedbackOptions?.allowReactions;
 
   // Fetch the current photo's reaction tallies + my selection when the
@@ -332,7 +395,10 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
       // multi-megabyte originals to show a photo on screen. `download` below
       // deliberately stays on photo.url: what a guest saves must be the full
       // original.
-      src: lightboxImageUrl(photo),
+      // A video's original cannot render as an image slide anyway, and on a
+      // gallery with a download limit fetching it takes a slot (issue 1560),
+      // which a neighbour preload must not do: show its poster instead.
+      src: isVideoPhoto(photo) ? (photo.thumbnail_url || photo.url) : lightboxImageUrl(photo),
       // The download handler used to recover the photo by matching slide.src
       // against photo.url. src is a derivative now, so that lookup would find
       // nothing and Download would silently do nothing (#1166 review).
@@ -345,8 +411,16 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
       title: showOriginalFilename
         ? (photo.original_filename || photo.filename)
         : undefined,
+      // Photo credit (#1561), same wording as PhotoLightbox. Only present
+      // when the gallery shows names to this viewer.
+      description: photo.credit_name
+        ? (photo.uploaded_by_guest
+          ? t('gallery.credits.uploadedBy', { name: photo.credit_name })
+          : t('gallery.credits.photoBy', { name: photo.credit_name }))
+        : undefined,
     }));
-  }, [filteredPhotos, allowDownloads, showOriginalFilename, imageDimensions]);
+  }, [filteredPhotos, allowDownloads, showOriginalFilename, imageDimensions, t]);
+  const showCaptions = showOriginalFilename || slides.some((slide) => !!slide.description);
 
   const handleLike = useCallback(async (photo: Photo, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -439,9 +513,21 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
     }
   }, [selectedPhotos, filteredPhotos, onSelectAll, onDeselectAll]);
 
+  // Download limit (issue 1560).
+  const downloadQuota = useDownloadQuota();
+  const selectedPhotoList = useMemo(
+    () => photos.filter((photo) => selectedPhotos.has(photo.id)),
+    [photos, selectedPhotos]
+  );
+  const selectionOverQuota = !downloadQuota.allows(selectedPhotoList);
+
   const handleDownloadSelected = useCallback(async () => {
     if (selectedPhotos.size === 0) return;
     const ids = Array.from(selectedPhotos);
+    if (selectionOverQuota) {
+      showDownloadLimitReached({ remaining: downloadQuota.remaining ?? 0 });
+      return;
+    }
     // #858: hand off to the resolution picker when the gallery offers a choice.
     if (downloadChoices && downloadChoices.length > 1 && onPickResolution) {
       onPickResolution(ids);
@@ -452,10 +538,10 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
     try {
       await galleryService.downloadSelectedPhotos(slug, ids);
       analyticsService.trackGalleryEvent('bulk_download', { gallery: slug, photo_count: ids.length });
-    } catch {
-      toast.error(t('gallery.downloadError'));
+    } catch (error) {
+      if (!isDownloadLimitError(error)) toast.error(t('gallery.downloadError'));
     }
-  }, [selectedPhotos, slug, t, downloadChoices, onPickResolution]);
+  }, [selectedPhotos, slug, t, downloadChoices, onPickResolution, selectionOverQuota, downloadQuota.remaining]);
 
   const handleDownloadFromLightbox = useCallback((slide: { src?: string; photoId?: number }) => {
     if (!allowDownloads || !slide.src) return;
@@ -466,6 +552,10 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
     const photo = slide.photoId != null
       ? filteredPhotos.find(p => p.id === slide.photoId)
       : filteredPhotos.find(p => p.url === slide.src);
+    if (photo && !downloadQuota.canDownload(photo)) {
+      showDownloadLimitReached({ remaining: 0 });
+      return;
+    }
     if (photo) {
       analyticsService.trackDownload(photo.id, slug, false);
       downloadPhotoMutation.mutate({
@@ -474,7 +564,7 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
         filename: photo.filename,
       });
     }
-  }, [allowDownloads, filteredPhotos, slug, downloadPhotoMutation]);
+  }, [allowDownloads, filteredPhotos, slug, downloadPhotoMutation, downloadQuota]);
 
   const formattedDate = eventDate ? new Date(eventDate).toLocaleDateString('en-US', {
     year: 'numeric',
@@ -568,6 +658,15 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
                   <button
                     className="gallery-premium-download-btn"
                     onClick={handleDownloadSelected}
+                    aria-disabled={selectionOverQuota || undefined}
+                    style={selectionOverQuota ? { opacity: 0.5 } : undefined}
+                    title={selectionOverQuota
+                      ? t('gallery.downloadLimit.selectionTooLarge', {
+                        cost: downloadQuota.costOf(selectedPhotoList),
+                        remaining: downloadQuota.remaining ?? 0,
+                        defaultValue: 'Download limit: this selection needs {{cost}} downloads, only {{remaining}} left',
+                      })
+                      : undefined}
                   >
                     <Package className="w-3 h-3 mr-1 inline" />
                     {t('common.download')} ({selectedPhotos.size})
@@ -611,19 +710,32 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
 
       {/* Main Gallery */}
       <main className="gallery-premium-main">
+        {/* Download limit (issue 1560): the client's counter, or a guest's
+            preview-size note. */}
+        {allowDownloads && (downloadQuota.limited || downloadQuota.previewOnly) && (
+          <div className="mb-4 text-center">
+            <DownloadQuotaNotice />
+          </div>
+        )}
         <MasonryPhotoAlbum
           photos={albumPhotos}
           render={{
-            photo: (_props, { photo, width, height }) => {
+            photo: (_props, { photo, index: photoIndex, width, height }) => {
+              // `index` is the position in `albumPhotos`, a 1:1 map of
+              // `filteredPhotos`, so it is the lightbox index too — no
+              // per-tile `findIndex` (issue 1733).
               const originalPhoto = (photo as any)._photo as Photo;
-              const photoIndex = filteredPhotos.findIndex(p => p.id === originalPhoto.id);
 
               return (
                 <PhotoCard
                   photo={originalPhoto}
                   width={width}
                   height={height}
-                  onClick={() => setLightboxIndex(photoIndex)}
+                  onClick={() => {
+                    lightboxPhotoIdRef.current = originalPhoto.id;
+                    setLightboxIndex(photoIndex);
+                    onLightboxPhotoChange?.(originalPhoto.id, 'open');
+                  }}
                   onLike={(e) => handleLike(originalPhoto, e)}
                   onSelect={(e) => {
                     e.stopPropagation();
@@ -654,6 +766,8 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
         />
       </main>
 
+      {afterGrid && <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">{afterGrid}</div>}
+
       {/* Footer */}
       <footer className="gallery-premium-footer">
         <PoweredBy />
@@ -663,7 +777,11 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
       {/* Lightbox */}
       <Lightbox
         open={lightboxIndex >= 0}
-        close={() => setLightboxIndex(-1)}
+        close={() => {
+          lightboxPhotoIdRef.current = null;
+          setLightboxIndex(-1);
+          onLightboxPhotoChange?.(null, 'close');
+        }}
         index={lightboxIndex}
         slides={slides}
         // View beacon (#895): yarl fires `view` on open and on every
@@ -674,7 +792,11 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
             // the slides array; otherwise YARL jumps back to the opening photo.
             setLightboxIndex(index);
             const photo = filteredPhotos[index];
-            if (photo) galleryService.trackPhotoView(slug, photo.id);
+            if (photo) {
+              lightboxPhotoIdRef.current = photo.id;
+              galleryService.trackPhotoView(slug, photo.id);
+              onLightboxPhotoChange?.(photo.id, 'step');
+            }
           },
         }}
         plugins={[
@@ -682,7 +804,7 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
           Zoom,
           Fullscreen,
           ...(allowDownloads ? [Download] : []),
-          ...(showOriginalFilename ? [Captions] : []),
+          ...(showCaptions ? [Captions] : []),
         ]}
         animation={{ fade: 300, swipe: 250 }}
         styles={{

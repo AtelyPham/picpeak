@@ -24,6 +24,7 @@ const base: GeneralSettings = {
   default_expiration_days: 30,
   max_file_size_mb: 50,
   max_video_size_mb: 500,
+  video_web_rendition: false,
   max_files_per_upload: 500,
   allowed_file_types: 'jpg,png',
   max_upload_batch_size_mb: 95,
@@ -48,6 +49,8 @@ function renderTab(overrides: Partial<GeneralSettings>) {
       generalSettings={settings}
       setGeneralSettings={setGeneralSettings as never}
       saveGeneralMutation={{ mutate: vi.fn(), isPending: false }}
+      isDirty
+      onDiscard={() => {}}
       accountForm={{ username: 'a', email: 'a@b.c' }}
       accountErrors={{}}
       handleAccountChange={() => () => {}}
@@ -58,7 +61,7 @@ function renderTab(overrides: Partial<GeneralSettings>) {
   );
   const { rerender } = render(<Tab />);
   return {
-    saveButton: () => screen.getByRole('button', { name: /save general settings|allgemeine/i }),
+    saveButton: () => screen.getByRole('button', { name: /save changes|änderungen speichern/i }),
     urlInput: () => screen.getByPlaceholderText('https://yourdomain.com'),
   };
 }

@@ -1,0 +1,132 @@
+/**
+ * PDF themes (#1445): the look of quote, invoice and contract PDFs.
+ * `default` applies to every document type; the others override it.
+ */
+import { api } from '../config/api';
+
+export type PdfThemeScope = 'default' | 'quote' | 'invoice' | 'contract';
+export type PdfColorKey = 'text' | 'muted' | 'subtle' | 'accent' | 'rule';
+export type PdfFooterMode = 'address' | 'custom' | 'none';
+export type PdfPageNumbers = 'bottom-right' | 'bottom-center' | 'none';
+export type PdfFoldingMarks = 'none' | 'half' | 'third' | 'both';
+export type PdfLogoPosition = 'right' | 'left' | 'center';
+export type PdfLogoStack = 'above' | 'inline';
+/** Millimetres; the top margin is not a setting (the address window sets it). */
+export interface PdfMargins { left?: number; right?: number; bottom?: number }
+
+/** What a scope stores; every key is optional (missing = inherited). */
+export interface PdfThemeSettings {
+  colors?: Partial<Record<PdfColorKey, string>>;
+  titleSize?: number;
+  footer?: { mode: PdfFooterMode; text?: string };
+  pageNumbers?: PdfPageNumbers;
+  foldingMarks?: PdfFoldingMarks;
+  fontFamily?: string;
+  layout?: { margins?: PdfMargins; addressWindow?: boolean };
+  logo?: { position?: PdfLogoPosition; stack?: PdfLogoStack };
+  /** 9–12 pt. */
+  bodySize?: number;
+  /** 1.2–1.6. */
+  lineHeight?: number;
+}
+
+/** The theme a scope actually renders with. */
+export interface ResolvedPdfTheme {
+  scope: PdfThemeScope;
+  fontFamily: string | null;
+  colors: Record<PdfColorKey, string>;
+  titleSize: number;
+  footer: { mode: PdfFooterMode; text: string };
+  pageNumbers: PdfPageNumbers;
+  foldingMarks: PdfFoldingMarks;
+  layout: { margins: PdfMargins | null; addressWindow: boolean };
+  logo: { position: PdfLogoPosition; stack: PdfLogoStack };
+  bodySize: number;
+  lineHeight: number | null;
+}
+
+/** A readability warning — shown, never enforced. */
+export interface PdfThemeWarning {
+  code: 'CONTRAST_LOW' | 'BODY_SIZE_SMALL' | 'LINE_HEIGHT_TIGHT' | 'LINE_TOO_LONG';
+  key?: PdfColorKey;
+  value: number;
+  limit: number;
+}
+
+export interface PdfThemeRow {
+  scope: PdfThemeScope;
+  settings: PdfThemeSettings;
+  updatedAt: string | null;
+  resolved: ResolvedPdfTheme;
+  warnings?: PdfThemeWarning[];
+}
+
+export interface PdfThemeList {
+  themes: PdfThemeRow[];
+  /** Bundled font directory names, e.g. "Jost", "Playfair-Display". */
+  fontFamilies: string[];
+  /** Active uploaded fonts a theme may use. */
+  uploadedFonts?: Array<{ family: string; name: string }>;
+}
+
+/** An uploaded PDF font (#1445). */
+export interface UploadedPdfFont {
+  id: number;
+  /** What a theme stores: `upload-<id>`. */
+  family: string;
+  name: string;
+  licenceNote: string;
+  licenceAcknowledgedAt: string | null;
+  isActive: boolean;
+  createdAt: string;
+  files: Array<{ style: '400' | '700' | '400i'; sha256: string; bytes: number }>;
+}
+
+export interface FontUpload {
+  name: string;
+  licenceNote: string;
+  regular: File;
+  bold?: File | null;
+  italic?: File | null;
+}
+
+export const pdfThemesService = {
+  async list(): Promise<PdfThemeList> {
+    const { data } = await api.get('/admin/pdf-themes');
+    return data.data || data;
+  },
+  async fonts(): Promise<{
+    fonts: UploadedPdfFont[];
+    /** Why the font set before this update could not be moved, if it couldn't. */
+    legacyMoveFailure?: { reason: string; path: string; at: string } | null;
+  }> {
+    const { data } = await api.get('/admin/pdf-themes/fonts');
+    return data.data || data;
+  },
+  /** Checked by content on the server; the admin has confirmed the right to embed it. */
+  async uploadFont(upload: FontUpload): Promise<{ font: UploadedPdfFont }> {
+    const form = new FormData();
+    form.append('name', upload.name);
+    form.append('licenceNote', upload.licenceNote);
+    form.append('licenceAcknowledged', 'true');
+    form.append('regular', upload.regular);
+    if (upload.bold) form.append('bold', upload.bold);
+    if (upload.italic) form.append('italic', upload.italic);
+    const { data } = await api.post('/admin/pdf-themes/fonts', form);
+    return data.data || data;
+  },
+  async archiveFont(id: number): Promise<{ font: UploadedPdfFont }> {
+    const { data } = await api.post(`/admin/pdf-themes/fonts/${id}/archive`);
+    return data.data || data;
+  },
+  /** Replace a scope's settings; `{}` clears it back to inherited. */
+  async save(scope: PdfThemeScope, settings: PdfThemeSettings): Promise<PdfThemeList> {
+    const { data } = await api.put(`/admin/pdf-themes/${scope}`, { settings });
+    return data.data || data;
+  },
+  /** A sample PDF rendered with these (unsaved) settings, as an object URL. */
+  async previewUrl(scope: PdfThemeScope, settings: PdfThemeSettings): Promise<string> {
+    const res = await api.post(`/admin/pdf-themes/${scope}/preview`, { settings }, { responseType: 'blob' });
+    return URL.createObjectURL(res.data);
+  },
+};

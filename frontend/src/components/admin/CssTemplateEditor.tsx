@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-toastify';
-import { Save, RotateCcw, AlertTriangle, Check } from 'lucide-react';
+import { RotateCcw, AlertTriangle, Check } from 'lucide-react';
 import { Button, Card, Loading } from '../common';
+import { useConfirm } from '../common/ConfirmDialog';
+import { SettingsSaveBar } from './SettingsSaveBar';
 import { cssTemplatesService, CssTemplate } from '../../services/cssTemplates.service';
 import { useLocalizedDate } from '../../hooks/useLocalizedDate';
 import { useMutationWithToast } from '../../hooks';
@@ -14,7 +16,7 @@ export const CssTemplateEditor: React.FC = () => {
   const queryClient = useQueryClient();
   const [activeSlot, setActiveSlot] = useState(1);
   const [localTemplates, setLocalTemplates] = useState<CssTemplate[]>([]);
-  const [hasChanges, setHasChanges] = useState(false);
+  const confirmDialog = useConfirm();
 
   // Fetch templates
   const { data: templates, isLoading } = useQuery({
@@ -26,7 +28,6 @@ export const CssTemplateEditor: React.FC = () => {
   useEffect(() => {
     if (templates) {
       setLocalTemplates(templates);
-      setHasChanges(false);
     }
   }, [templates]);
 
@@ -44,7 +45,6 @@ export const CssTemplateEditor: React.FC = () => {
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['css-templates'] });
-      setHasChanges(false);
 
       if (result.warnings.length > 0) {
         toast.warning(t('cssTemplates.sanitizationWarning', 'Some CSS patterns were blocked for security'));
@@ -66,6 +66,10 @@ export const CssTemplateEditor: React.FC = () => {
   });
 
   const activeTemplate = localTemplates.find(t => t.slot_number === activeSlot);
+  // Dirty per slot: the local copy against what the server sent. Save writes
+  // the active slot only, so the bar follows that slot.
+  const savedTemplate = templates?.find(t => t.slot_number === activeSlot);
+  const isDirty = JSON.stringify(activeTemplate) !== JSON.stringify(savedTemplate);
 
   const updateLocalTemplate = (updates: Partial<CssTemplate>) => {
     setLocalTemplates(prev =>
@@ -73,7 +77,30 @@ export const CssTemplateEditor: React.FC = () => {
         t.slot_number === activeSlot ? { ...t, ...updates } : t
       )
     );
-    setHasChanges(true);
+  };
+
+  const discardActive = () => {
+    if (!savedTemplate) return;
+    setLocalTemplates(prev =>
+      prev.map(t => (t.slot_number === activeSlot ? savedTemplate : t))
+    );
+  };
+  // The bar and the leave guard follow the active slot, so a slot may not
+  // be left with edits in it: switching asks first and discards them.
+  const pickSlot = async (slot: number) => {
+    if (slot === activeSlot) return;
+    if (isDirty) {
+      const ok = await confirmDialog({
+        title: t('settings.saveBar.leaveTitle', 'Discard unsaved changes?'),
+        message: t('settings.saveBar.leaveMessage', 'You have unsaved changes on this page. Leaving now discards them.'),
+        confirmLabel: t('settings.saveBar.leaveConfirm', 'Discard and leave'),
+        cancelLabel: t('settings.saveBar.leaveCancel', 'Stay'),
+        variant: 'warning',
+      });
+      if (!ok) return;
+      discardActive();
+    }
+    setActiveSlot(slot);
   };
 
   const handleReset = () => {
@@ -96,17 +123,17 @@ export const CssTemplateEditor: React.FC = () => {
             stacked directly under it (QA warning). */}
 
         {/* Tab Navigation */}
-        <div className="flex border-b border-neutral-200 dark:border-neutral-700 mb-6">
+        <div className="flex border-b border-line mb-6">
           {[1, 2, 3].map(slot => {
             const template = localTemplates.find(t => t.slot_number === slot);
             return (
               <button
                 key={slot}
-                onClick={() => setActiveSlot(slot)}
+                onClick={() => { void pickSlot(slot); }}
                 className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                   activeSlot === slot
                     ? 'border-accent text-accent'
-                    : 'border-transparent text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:border-neutral-300 dark:hover:border-neutral-600'
+                    : 'border-transparent text-soft hover:text-heading hover:border-line-strong'
                 }`}
               >
                 {t('cssTemplates.template', 'Template')} {slot}
@@ -135,7 +162,7 @@ export const CssTemplateEditor: React.FC = () => {
                 value={activeTemplate.name}
                 onChange={(e) => updateLocalTemplate({ name: e.target.value })}
                 maxLength={50}
-                className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+                className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
               />
             </div>
 
@@ -148,11 +175,11 @@ export const CssTemplateEditor: React.FC = () => {
                   onChange={(e) => updateLocalTemplate({ is_enabled: e.target.checked })}
                   className="rounded border-neutral-300 text-accent focus:ring-primary-500"
                 />
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('cssTemplates.enableTemplate', 'Enable this template')}
                 </span>
               </label>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1 ml-6">
+              <p className="text-xs text-muted mt-1 ml-6">
                 {t('cssTemplates.enableHint', 'Enabled templates can be selected when creating events')}
               </p>
             </div>
@@ -174,7 +201,7 @@ export const CssTemplateEditor: React.FC = () => {
                   {(activeTemplate.css_content?.length || 0).toLocaleString()} / 102,400 {t('common.characters', 'characters')}
                 </div>
               </div>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-2">
+              <p className="text-xs text-muted mt-2">
                 {t('cssTemplates.cssHint', 'Use .gallery-page to scope styles to the gallery. Available variables: --gallery-bg, --gallery-text, --gallery-accent')}
               </p>
             </div>
@@ -188,49 +215,37 @@ export const CssTemplateEditor: React.FC = () => {
               </div>
             </div>
 
-            {/* Action Buttons */}
-            <div className="flex items-center justify-between pt-4 border-t border-neutral-100 dark:border-neutral-700">
-              <div className="flex items-center gap-3">
-                {activeSlot === 1 && activeTemplate.is_default && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleReset}
-                    disabled={resetMutation.isPending}
-                    leftIcon={<RotateCcw className="w-4 h-4" />}
-                  >
-                    {t('cssTemplates.resetToDefault', 'Reset to Default')}
-                  </Button>
-                )}
-              </div>
-
-              <div className="flex items-center gap-3">
-                {hasChanges && (
-                  <span className="text-sm text-amber-600">
-                    {t('cssTemplates.unsavedChanges', 'Unsaved changes')}
-                  </span>
-                )}
+            {/* Reset to default — Save lives in the bar below */}
+            {activeSlot === 1 && activeTemplate.is_default && (
+              <div className="flex items-center pt-4 border-t border-line">
                 <Button
-                  variant="primary"
-                  onClick={() => saveMutation.mutate()}
-                  disabled={saveMutation.isPending || !hasChanges}
-                  isLoading={saveMutation.isPending}
-                  leftIcon={<Save className="w-4 h-4" />}
+                  variant="outline"
+                  size="sm"
+                  onClick={handleReset}
+                  disabled={resetMutation.isPending}
+                  leftIcon={<RotateCcw className="w-4 h-4" />}
                 >
-                  {t('cssTemplates.saveTemplate', 'Save Template')}
+                  {t('cssTemplates.resetToDefault', 'Reset to Default')}
                 </Button>
               </div>
-            </div>
+            )}
 
             {/* Last Updated */}
             {activeTemplate.updated_at && (
-              <p className="text-xs text-neutral-400 dark:text-neutral-500 text-right">
+              <p className="text-xs text-faint text-right">
                 {t('cssTemplates.lastUpdated', 'Last updated')}: {fmtDateTime(activeTemplate.updated_at)}
               </p>
             )}
           </div>
         )}
       </div>
+
+      <SettingsSaveBar
+        isDirty={isDirty}
+        isSaving={saveMutation.isPending}
+        onSave={() => saveMutation.mutate()}
+        onDiscard={discardActive}
+      />
     </Card>
   );
 };

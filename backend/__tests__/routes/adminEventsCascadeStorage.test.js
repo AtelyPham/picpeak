@@ -117,12 +117,20 @@ function mockMakeDb() {
   // #1132 guards the merge-dismissals delete behind a hasTable check.
   table.schema = { hasTable: async (t) => t === 'download_jobs' };
   table.transaction = async (cb) => cb(table);
+  // The cascade reads the engine to decide whether to take the event row lock.
+  table.client = { config: { client: 'sqlite3' } };
   return table;
 }
 
 jest.mock('../../src/database/db', () => ({
   db: mockMakeDb(),
   logActivity: jest.fn().mockResolvedValue(undefined),
+}));
+
+// This suite checks storage cleanup; reference history is exercised against
+// real databases in accountingHistoryReferences.test.js.
+jest.mock('../../src/services/accountingHistory', () => ({
+  deleteWithAccountingHistory: (conn, table, where) => conn(table).where(where).del(),
 }));
 
 jest.mock('../../src/services/storage', () => ({
@@ -164,6 +172,25 @@ describe('deleteEventCascade — storage cleanup', () => {
       'watermarked/wm_aaa_photo_one.jpg',
       'archives/other-demo-2026-01-01.zip',
     ]));
+  });
+
+  it('never unlinks a file outside storage for a row whose archive key climbs out', async () => {
+    // A raw path.join(STORAGE_PATH, '../x') reaches the parent directory; the
+    // storage backend is the only thing allowed to remove an archive, and it
+    // refuses such a key.
+    const fs = require('fs');
+    const outside = path.join(process.env.STORAGE_PATH, '..', 'cascade-outside.zip');
+    fs.mkdirSync(path.dirname(outside), { recursive: true });
+    fs.writeFileSync(outside, 'zip');
+    const original = mockEvent.archive_path;
+    mockEvent.archive_path = '../cascade-outside.zip';
+    try {
+      await deleteEventCascade(42, { id: 1, username: 'admin' });
+      expect(fs.existsSync(outside)).toBe(true);
+    } finally {
+      mockEvent.archive_path = original;
+      fs.rmSync(outside, { force: true });
+    }
   });
 
   it('deletes the download caches, which only fs.rm ever covered', async () => {

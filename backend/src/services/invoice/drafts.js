@@ -6,7 +6,10 @@ const { db, logActivity } = require('../../database/db');
 const { AppError } = require('../../utils/errors');
 const businessProfileService = require('../businessProfileService');
 const { ensureInt, ensureNumber } = require('../../utils/numericHelpers');
+const { renumberLineItemPositions } = require('../../utils/lineItemPositions');
+const { extendedLineColumns, lineItemFieldsToApi } = require('../../utils/lineItemTotals');
 const { computeMonthlyCadenceDate, getHierarchyHelpers, nextInvoiceNumber } = require('./helpers');
+const { auditedInsert, auditedUpdate } = require('../accountingHistory');
 
 
 /**
@@ -77,11 +80,13 @@ async function getOrCreateMonthlyDraft(customer, adminId, trx) {
 
   // None yet — mint one with zero line items + zero totals. The
   // caller appends items + recomputes immediately after.
-  const profile = (await businessProfileService.getProfile()).profile;
+  // Reuse the caller's connection: conversions and re-bills can already
+  // hold SQLite's only connection inside their transaction.
+  const profile = (await businessProfileService.getProfile(trx)).profile;
   const currency = (customer.preferred_currency || profile?.default_currency || 'CHF').toUpperCase();
   const language = customer.preferred_language || profile?.default_locale || 'de';
   const invoiceNumber = await nextInvoiceNumber(trx);
-  const bank = await businessProfileService.resolveBankAccountForCurrency(currency, null);
+  const bank = await businessProfileService.resolveBankAccountForCurrency(currency, null, trx);
 
   const row = {
     invoice_number: invoiceNumber,
@@ -115,7 +120,7 @@ async function getOrCreateMonthlyDraft(customer, adminId, trx) {
     updated_at: new Date(),
   };
   try {
-    const inserted = await trx('invoices').insert(row).returning('id');
+    const inserted = await auditedInsert(trx, 'invoices', row, { actor: adminId, source: 'invoice.monthly.createDraft' });
     const id = typeof inserted[0] === 'object' ? inserted[0].id : inserted[0];
     return { id, row: { ...row, id }, created: true };
   } catch (err) {
@@ -170,29 +175,35 @@ async function appendToMonthlyDraft(payload, customer, adminId, trx) {
     ? Math.max(...existing.map((li) => ensureInt(li.position))) + 1
     : 1;
 
-  const incoming = Array.isArray(payload.lineItems) ? payload.lineItems : [];
-  const newItems = incoming.map((li, idx) => {
+  // Incoming positions are the caller's row ids, not slots in this draft.
+  // Renumber them to 1..n (validating the parent references against the
+  // original ids first), then shift the whole block past the draft's existing
+  // lines, so every sub-item keeps pointing at its own parent (#1452).
+  const incoming = renumberLineItemPositions(Array.isArray(payload.lineItems) ? payload.lineItems : []);
+  const offset = nextPosition - 1;
+  const newItems = incoming.map((li) => {
     const qty = ensureNumber(li.quantity, 1);
     const unit = ensureInt(li.unit_price_minor);
     const discount = ensureNumber(li.discount_percent, 0);
     const lineTotal = Math.round(Math.round(qty * unit) * (1 - discount / 100));
-    const isSubItem = li.parent_position != null && li.parent_position !== '';
     return {
-      position: nextPosition + idx,
+      position: li.position + offset,
       quantity: qty,
       description: String(li.description || ''),
       unit_price_minor: unit,
       discount_percent: discount,
       line_total_minor: lineTotal,
-      parent_position: isSubItem ? ensureInt(li.parent_position) : null,
+      parent_position: li.parent_position == null ? null : li.parent_position + offset,
       details_text: li.details_text || null,
+      ...extendedLineColumns(li, { invoice: true }),
     };
   });
 
   if (newItems.length > 0) {
     const { validateLineItemHierarchy, insertLineItemsHierarchical } = getHierarchyHelpers();
     validateLineItemHierarchy(newItems);
-    await insertLineItemsHierarchical(trx, 'invoice_line_items', 'invoice_id', draft.id, newItems);
+    await insertLineItemsHierarchical(trx, 'invoice_line_items', 'invoice_id', draft.id, newItems,
+      { actor: adminId, source: 'invoice.monthly.appendItems' });
   }
 
   // Recompute totals across the entire draft so the running figures
@@ -209,18 +220,18 @@ async function appendToMonthlyDraft(payload, customer, adminId, trx) {
   const shippingMinor = ensureInt(draft.row.shipping_amount_minor);
   const totalMinor = netMinor + vatMinor + shippingMinor;
 
-  await trx('invoices').where({ id: draft.id }).update({
+  await auditedUpdate(trx, 'invoices', { id: draft.id }, {
     net_amount_minor: netMinor,
     vat_rate: vatRate,
     vat_amount_minor: vatMinor,
     total_amount_minor: totalMinor,
     updated_at: new Date(),
-  });
+  }, { actor: adminId, source: 'invoice.monthly.appendItems' });
 
   try {
     await logActivity('monthly_billing_items_queued',
       { invoiceId: draft.id, customerId: customer.id, itemsAdded: newItems.length },
-      null, `admin:${adminId}`);
+      null, `admin:${adminId}`, trx);
   } catch (_) { /* non-fatal */ }
 
   return draft.id;
@@ -323,6 +334,7 @@ async function getMonthlyDraft(customerId) {
       lineTotalMinor: ensureInt(li.line_total_minor),
       parentPosition: li.parent_position == null ? null : ensureInt(li.parent_position),
       detailsText: li.details_text || '',
+      ...lineItemFieldsToApi(li),
     })),
   };
 }

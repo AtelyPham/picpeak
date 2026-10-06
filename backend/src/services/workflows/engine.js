@@ -60,6 +60,20 @@ function computeWakeAt(config = {}, vars = {}) {
   return new Date(base.getTime() + ms).toISOString();
 }
 
+/**
+ * Master kill-switch, read fail-closed: an unreadable flag counts as off.
+ * Shared by every path that creates or moves a run.
+ */
+async function workflowsEnabled() {
+  try {
+    const { isFeatureEnabled } = require('../../middleware/requireFeatureFlag');
+    return await isFeatureEnabled('workflows');
+  } catch (e) {
+    logger.warn('[workflow] flag check failed — treating workflows as disabled', { error: e.message });
+    return false;
+  }
+}
+
 function gateTimeout(config = {}) {
   const days = Number((config || {}).timeoutDays || 0);
   return days > 0 ? new Date(Date.now() + days * 86400000).toISOString() : null;
@@ -234,6 +248,12 @@ async function startRun(runId) {
  * pass decisionHandle = 'confirm' | 'deny' so the matching edge is taken.
  */
 async function resumeRun(runId, { decisionHandle = null } = {}) {
+  // The scheduler and recovery sweeps check the flag before calling in, but a
+  // gate decision from the public approval link does not pass through them;
+  // the kill-switch has to hold at the one transition every resume shares.
+  // Returns 'disabled' so a caller that already recorded a decision can undo
+  // it instead of leaving the run waiting with nothing left to wake it.
+  if (!(await workflowsEnabled())) return 'disabled';
   const run = await db('workflow_runs').where({ id: runId }).first();
   if (!run || run.status !== 'waiting') return;
   const { edges } = await loadGraph(run.workflow_id, run.version);
@@ -253,7 +273,13 @@ async function resumeRun(runId, { decisionHandle = null } = {}) {
     e = outEdge(edges, run.current_node, null);
   }
   const nextKey = e ? e.to_node : null;
-  await db('workflow_runs').where({ id: runId }).update({ status: 'running', current_node: nextKey, wake_at: null, updated_at: db.fn.now() });
+  // Claim the run: only one caller moves a waiting run on. The scheduler and a
+  // gate decision, or two decisions, could otherwise both read 'waiting' and
+  // both advance it.
+  const claimed = await db('workflow_runs')
+    .where({ id: runId, status: 'waiting', current_node: run.current_node })
+    .update({ status: 'running', current_node: nextKey, wake_at: null, updated_at: db.fn.now() });
+  if (!claimed) return;
   if (!nextKey) { await finishRun(runId); return; }
   await advanceRun(runId);
 }
@@ -610,6 +636,7 @@ module.exports = {
   resumeRun,
   finishRun,
   failRun,
+  workflowsEnabled,
   // exported for tests / introspection
   loadGraph,
   outEdge,

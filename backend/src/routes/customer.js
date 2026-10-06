@@ -19,13 +19,27 @@ const crypto = require('crypto');
 const { body, param, validationResult } = require('express-validator');
 const { db, logActivity } = require('../database/db');
 const { getBcryptRounds, MAX_PASSWORD_LENGTH } = require('../utils/passwordValidation');
-const { assertContractPdfPath } = require('../utils/safePath');
+const { resolveStoredPathStrict, contractPdfRoots } = require('../utils/safePath');
+const { buildContentDisposition } = require('../utils/filenameSanitizer');
 const logger = require('../utils/logger');
 const { errorResponse, safeValidationErrors } = require('../utils/routeHelpers');
 const { getClientIp } = require('../utils/requestIp');
 const { customerAuth } = require('../middleware/customerAuth');
 const { setGalleryAuthCookies } = require('../utils/tokenUtils');
+const rateLimit = require('express-rate-limit');
+const { receiveDocumentUpload, discardTempFile, sendDocumentAttachment } = require('../middleware/customerDocumentUpload');
+const documentFormats = require('../services/documentFormats');
 const customerAccountsService = require('../services/customerAccountsService');
+const customerDocumentsService = require('../services/customerDocumentsService');
+const customerDocumentNotifications = require('../services/customerDocumentNotifications');
+const customerDocumentAbuse = require('../services/customerDocumentAbuse');
+const customerDocumentRequestsService = require('../services/customerDocumentRequestsService');
+const customerPortalService = require('../services/customerPortalService');
+const publicDocumentViews = require('../services/publicDocumentViews');
+const { clientIpForAudit } = require('../utils/clientIp');
+const contractSignedPdfUpload = require('../utils/contractSignedPdfUpload');
+const { auditedUpdate } = require('../services/accountingHistory');
+const { neverFrozen } = require('../services/contract/helpers');
 
 // Gate a customer-facing route on BOTH the global master flag AND the
 // per-customer override — getEffectiveFeaturesForCustomer combines them, so an
@@ -114,18 +128,9 @@ const GALLERY_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 router.get('/events', customerAuth, async (req, res) => {
   try {
     const events = await customerAccountsService.listEventsForCustomer(req.customer.id);
-    res.json({
-      events: events.map((e) => ({
-        id: e.id,
-        slug: e.slug,
-        eventName: e.event_name,
-        eventType: e.event_type,
-        eventDate: e.event_date,
-        expiresAt: e.expires_at,
-        isActive: e.is_active,
-        assignedAt: e.assigned_at,
-      })),
-    });
+    // shapeEvent adds `availability` (active | expired | unavailable), decided
+    // server-side so the portal never works out expiry from the browser clock.
+    res.json({ events: events.map(customerPortalService.shapeEvent) });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to load events');
   }
@@ -187,9 +192,19 @@ router.get('/events/:slug/access-token', [
     }
 
     const ipAddress = getClientIp(req);
+    // customerAuth already verified this token; its iat (and jti, if any) is
+    // the portal session's revocation key, so logging out ends this token too.
+    const portalSession = jwt.decode(req.token) || {};
+    // Never outlive the portal session: its revocation row is cleaned up at
+    // its own exp, after which a longer-lived gallery token would work again.
+    const portalSecondsLeft = Number.isFinite(portalSession.exp)
+      ? portalSession.exp - Math.floor(Date.now() / 1000) : GALLERY_TOKEN_TTL_SECONDS;
+    const galleryTtlSeconds = Math.max(1, Math.min(GALLERY_TOKEN_TTL_SECONDS, portalSecondsLeft));
     // Same shape as /api/auth/gallery/verify — keep them in sync so the
     // gallery middleware (verifyGalleryAccess) doesn't need a code change.
     const token = jwt.sign({
+      parentIat: portalSession.iat,
+      ...(portalSession.jti && { parentJti: portalSession.jti }),
       eventId: event.id,
       eventSlug: event.slug,
       type: 'gallery',
@@ -202,7 +217,7 @@ router.get('/events/:slug/access-token', [
       via: 'customer',
       customerId: req.customer.id,
     }, process.env.JWT_SECRET, {
-      expiresIn: GALLERY_TOKEN_TTL_SECONDS,
+      expiresIn: galleryTtlSeconds,
       issuer: 'picpeak-auth',
     });
 
@@ -315,7 +330,10 @@ router.put('/profile', [
     }
     updates.updated_at = new Date();
 
-    await db('customer_accounts').where('id', req.customer.id).update(updates);
+    await auditedUpdate(db, 'customer_accounts', { id: req.customer.id }, updates, {
+      actor: { type: 'customer', id: req.customer.id, name: req.customer.displayName || null },
+      source: 'customer.portal.profile',
+    });
 
     const row = await db('customer_accounts').where('id', req.customer.id).first();
 
@@ -426,11 +444,12 @@ router.post('/profile/password', [
     }
 
     const newHash = await bcrypt.hash(newPassword, getBcryptRounds());
-    await db('customer_accounts').where('id', req.customer.id).update({
+    // Not a billing field, so this leaves no history entry.
+    await auditedUpdate(db, 'customer_accounts', { id: req.customer.id }, {
       password_hash: newHash,
       password_changed_at: new Date(),
       updated_at: new Date(),
-    });
+    }, { actor: { type: 'customer', id: req.customer.id }, source: 'customer.portal.password' });
 
     await logActivity('customer_password_change',
       { customerId: req.customer.id },
@@ -475,24 +494,26 @@ router.get('/quotes', customerAuth, async (req, res) => {
         'net_amount_minor', 'vat_rate', 'vat_amount_minor',
         'shipping_amount_minor', 'total_amount_minor',
         'intro_text', 'outro_text',
+        // What intro / outro {{placeholders}} read (#1451); not returned.
+        'language', 'hours', 'days',
         'sent_at', 'responded_at', 'response_locked_at',
         'accepted_at', 'declined_at',
       );
 
-    // Look up the active accept/decline token for each non-locked
-    // quote so the customer dashboard can deep-link back into the
-    // public response page when the admin already sent it. We avoid
-    // re-issuing tokens here — the dashboard is for review, not
-    // re-sending.
-    const tokensByQuote = new Map();
-    if (rows.length > 0) {
-      const tokens = await dbi('quote_action_tokens')
-        .whereIn('quote_id', rows.map((r) => r.id))
-        .whereNull('used_at')
-        .where('expires_at', '>', new Date())
-        .select('quote_id', 'token');
-      for (const t of tokens) tokensByQuote.set(t.quote_id, t.token);
+    // Intro / outro keep their {{placeholders}}; resolve them for display
+    // (texts without any return as they are, without a lookup).
+    const { resolveQuoteTexts } = require('../services/quoteTemplateService');
+    const textsByQuote = new Map();
+    for (const q of rows) {
+      textsByQuote.set(q.id, await resolveQuoteTexts({ ...q, customer_account_id: req.customer.id }));
     }
+
+    // Whether each quote can still be answered. The list used to carry the
+    // live accept/decline token so the dashboard could link to the public
+    // page, which put a bearer secret — usable with no login and no emailed
+    // code — into every portal response. The portal now answers through
+    // POST /quotes/:id/respond with the customer's session instead.
+    const usableTokens = await publicDocumentViews.usableQuoteTokens(rows.map((r) => r.id));
 
     res.json({
       quotes: rows.map((q) => ({
@@ -509,14 +530,14 @@ router.get('/quotes', customerAuth, async (req, res) => {
         vatAmountMinor: q.vat_amount_minor,
         shippingAmountMinor: q.shipping_amount_minor,
         totalAmountMinor: q.total_amount_minor,
-        introText: q.intro_text,
-        outroText: q.outro_text,
+        introText: textsByQuote.get(q.id).introText,
+        outroText: textsByQuote.get(q.id).outroText,
         sentAt: q.sent_at,
         respondedAt: q.responded_at,
         responseLockedAt: q.response_locked_at,
         acceptedAt: q.accepted_at,
         declinedAt: q.declined_at,
-        responseToken: tokensByQuote.get(q.id) || null,
+        canRespond: publicDocumentViews.quoteAcceptsResponse(q) && usableTokens.has(q.id),
       })),
     });
   } catch (error) {
@@ -631,7 +652,8 @@ router.get('/quotes/:id/pdf', customerAuth, async (req, res) => {
       return res.status(404).json({ error: 'Quote not found' });
     }
     const quoteService = require('../services/quoteService');
-    const buf = await quoteService.renderQuotePdfBuffer(quote.id);
+    // The file the customer was sent, not a re-render from today's data.
+    const buf = await quoteService.getQuotePdfBuffer(quote.id);
     const { buildPdfFilename } = require('../utils/pdfFilename');
     const { buildContentDisposition } = require('../utils/filenameSanitizer');
     const customer = await dbi('customer_accounts').where({ id: req.customer.id }).first();
@@ -663,7 +685,8 @@ router.get('/invoices/:id/pdf', customerAuth, async (req, res) => {
       return res.status(404).json({ error: 'Invoice not found' });
     }
     const invoiceService = require('../services/invoiceService');
-    const buf = await invoiceService.renderInvoicePdfBuffer(invoice.id);
+    // The file the customer was sent, not a re-render from today's data.
+    const buf = await invoiceService.getInvoicePdfBuffer(invoice.id);
     const { buildPdfFilename } = require('../utils/pdfFilename');
     const { buildContentDisposition } = require('../utils/filenameSanitizer');
     const customer = await dbi('customer_accounts').where({ id: req.customer.id }).first();
@@ -704,20 +727,33 @@ router.get('/contracts', customerAuth, async (req, res) => {
         'issue_date', 'valid_until', 'title',
         'sent_at', 'signed_by_customer_at', 'signed_by_admin_at',
         'signed_customer_name', 'signed_admin_name',
-        'pdf_path', 'signed_pdf_path',
+        'pdf_path', 'signed_pdf_path', 'signing_version', 'signing_order', 'data_request',
       );
 
-    // Live tokens for the public sign page so customer dashboard can
-    // deep-link the "Sign now" button on `sent` contracts.
-    const tokensByContract = new Map();
-    if (rows.length > 0 && await dbi.schema.hasTable('contract_action_tokens')) {
-      const tokens = await dbi('contract_action_tokens')
-        .whereIn('contract_id', rows.map((r) => r.id))
-        .whereNull('used_at')
-        .where('expires_at', '>', new Date())
-        .select('contract_id', 'token');
-      for (const tk of tokens) tokensByContract.set(tk.contract_id, tk.token);
+    // Whether each contract can still be signed. The list used to carry the
+    // live signing token for the dashboard's "Sign now" link; the portal
+    // now signs through POST /contracts/:id/sign with the session, so the
+    // token never leaves the server.
+    const liveTokens = await publicDocumentViews.liveContractTokens(rows.map((r) => r.id));
+
+    // Which of them have a signing certificate to download (#1446). One
+    // grouped read rather than a probe per row, and the button is only
+    // offered for a contract that actually has one.
+    const certified = new Set();
+    if (rows.length && await dbi.schema.hasTable('generated_documents')) {
+      const certificates = await dbi('generated_documents')
+        .where({ doc_type: 'contract', kind: 'audit' })
+        .whereIn('doc_id', rows.map((r) => r.id))
+        .distinct('doc_id');
+      for (const row of certificates) certified.add(Number(row.doc_id));
     }
+
+    // For the derived "partly signed (1 of 2)" label (#1446).
+    const progress = await require('../services/contract/signers').customerSignerProgress(rows.map((r) => r.id));
+    // Whether THIS customer may sign a v2 contract now: not once they have
+    // signed, and not before their turn in a sequential one (#1446).
+    const me = await dbi('customer_accounts').where({ id: req.customer.id }).first('email');
+    const mine = await require('../services/contract/signingV2').portalSignerStates(me || {}, rows);
 
     res.json({
       contracts: rows.map((c) => ({
@@ -727,7 +763,8 @@ router.get('/contracts', customerAuth, async (req, res) => {
         language: c.language,
         issueDate: c.issue_date,
         validUntil: c.valid_until,
-        title: c.title,
+        // Before the freeze (#1446) the number is all that is shown.
+        title: neverFrozen(c) ? null : c.title,
         sentAt: c.sent_at,
         signedByCustomerAt: c.signed_by_customer_at,
         signedByAdminAt: c.signed_by_admin_at,
@@ -736,11 +773,42 @@ router.get('/contracts', customerAuth, async (req, res) => {
         // Surface flags only — no paths leaked to the customer.
         hasPdf: !!c.pdf_path,
         hasSignedPdf: !!c.signed_pdf_path,
-        responseToken: tokensByContract.get(c.id) || null,
+        hasCertificate: certified.has(Number(c.id)),
+        // A signatures-v2 contract signs through a signer session, so it has
+        // no action token to look for; one sent before still needs a live one.
+        canSign: c.status === 'sent' && (Number(c.signing_version) === 2
+          ? !!(mine.get(c.id) || {}).canSign
+          : liveTokens.has(c.id)),
+        signerState: (mine.get(c.id) || {}).state || null,
+        waitingFor: (mine.get(c.id) || {}).waitingFor || null,
+        // Collect-then-freeze (#1446): the customer's details come first.
+        canCompleteDetails: c.status === 'awaiting_data' && Number(c.signing_version) === 2,
+        signerProgress: progress.get(Number(c.id)) || null,
       })),
     });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to load contracts');
+  }
+});
+
+// Signing from the portal (#1446): a signing session for the signer with
+// this customer's email — no code needed, they are signed in — or a
+// one-hour link for a contract sent before signatures v2. The list above
+// hands out nothing that opens a contract.
+router.post('/contracts/:id/signing-access', customerAuth, async (req, res) => {
+  try {
+    if (!(await customerFeatureAllowed(req, res, 'contracts', 'Contracts'))) return;
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'Invalid contract id' });
+    const { db: dbi } = require('../database/db');
+    const customer = await dbi('customer_accounts').where({ id: req.customer.id }).first();
+    if (!customer) return res.status(404).json({ error: 'Contract not found' });
+    const result = await require('../services/contract/signingV2').portalSigningAccess(customer, id);
+    return res.json(result);
+  } catch (error) {
+    const status = error.statusCode || error.status;
+    if (status) return res.status(status).json({ error: error.message, code: error.code });
+    return errorResponse(res, error, 500, 'Failed to open the contract for signing');
   }
 });
 
@@ -759,12 +827,19 @@ router.get('/contracts/:id/pdf', customerAuth, async (req, res) => {
     if (contract.status === 'draft') {
       return res.status(404).json({ error: 'Contract not found' });
     }
+    // Collecting the customer's details first (#1446): nothing is frozen, and
+    // rendering on demand would hand out the unfrozen contract.
+    if (neverFrozen(contract)) return sendUnfrozen(res, contract);
     // Prefer the wet-signed PDF when present, otherwise the system-
     // generated PDF (signed in-browser, stamped, or unsigned).
     const path = require('path');
     const fs = require('fs');
-    const filePath = contract.signed_pdf_path || contract.pdf_path;
-    if (!filePath || !fs.existsSync(filePath)) {
+    // Same containment the admin and public contract routes apply, with
+    // symlinks followed: a stored path outside the contract folders is
+    // refused with 403 (a bad row must not become an arbitrary-file read);
+    // only a file that is simply missing falls back to rendering.
+    const filePath = resolveStoredPathStrict(contract.signed_pdf_path || contract.pdf_path, contractPdfRoots());
+    if (!filePath) {
       // Render on-demand so customers who hit the link before the
       // first send still get something usable.
       const contractService = require('../services/contractService');
@@ -773,15 +848,514 @@ router.get('/contracts/:id/pdf', customerAuth, async (req, res) => {
       res.set('Content-Disposition', `inline; filename="${contract.contract_number}.pdf"`);
       return res.send(buf);
     }
-    // Same containment the admin and public contract routes apply: the DB
-    // path is written by the service layer today, but a bad row must not
-    // turn this into an arbitrary-file read.
-    const safePath = assertContractPdfPath(filePath);
     res.set('Content-Type', 'application/pdf');
-    res.set('Content-Disposition', `inline; filename="${path.basename(safePath)}"`);
-    fs.createReadStream(safePath).pipe(res);
+    res.set('Content-Disposition', `inline; filename="${path.basename(filePath)}"`);
+    fs.createReadStream(filePath).pipe(res);
   } catch (error) {
+    if (error && error.statusCode === 403) return res.status(403).json({ error: error.message, code: error.code });
     errorResponse(res, error, 500, 'Failed to render contract PDF');
+  }
+});
+
+// The signing certificate (#1446): the evidence record issued when the
+// contract was completed. Scoped exactly like the PDF route above — the
+// customer's own contract, never a draft.
+router.get('/contracts/:id/certificate', customerAuth, async (req, res) => {
+  try {
+    const { db: dbi } = require('../database/db');
+    if (!(await dbi.schema.hasTable('contracts'))) {
+      return res.status(404).json({ error: 'Contract not found' });
+    }
+    if (!(await customerFeatureAllowed(req, res, 'contracts', 'Contracts'))) return;
+    const contract = await dbi('contracts')
+      .where({ id: parseInt(req.params.id, 10), customer_account_id: req.customer.id })
+      .first();
+    if (!contract || contract.status === 'draft') return res.status(404).json({ error: 'Contract not found' });
+    if (neverFrozen(contract)) return sendUnfrozen(res, contract);
+    const { readCertificate } = require('../services/contract/signatureAssets');
+    const { fileName, buffer } = await readCertificate(contract.id);
+    res.set('Content-Type', 'application/pdf');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Disposition', buildContentDisposition(fileName, 'attachment'));
+    return res.send(buffer);
+  } catch (error) {
+    if (sendServiceRefusal(res, error)) return;
+    return errorResponse(res, error, 500, 'Failed to load the signing certificate');
+  }
+});
+
+// ---- signing and responding from the portal ---------------------------
+// A logged-in customer reads, signs and answers here with their session.
+// The action token that the public pages use is looked up on the server and
+// handed to the same service calls, so the signature evidence and the
+// single-use bookkeeping are identical — but the token itself never reaches
+// the browser.
+
+// Load a document the customer owns, behind the same feature gate as the
+// list. Drafts and other customers' documents are a plain 404.
+async function ownedDocument(req, res, { table, featureKey, label, notFound }) {
+  if (!(await customerFeatureAllowed(req, res, featureKey, label))) return null;
+  const id = Number.parseInt(req.params.id, 10);
+  const row = Number.isInteger(id)
+    ? await db(table).where({ id, customer_account_id: req.customer.id }).first()
+    : null;
+  if (!row || row.status === 'draft') {
+    res.status(404).json({ error: notFound });
+    return null;
+  }
+  // A contract still collecting the customer's details (#1446) has no
+  // frozen content yet: its clauses and price are not shown anywhere.
+  // Nor once it expired or was cancelled before the details came in.
+  if (table === 'contracts' && neverFrozen(row)) {
+    sendUnfrozen(res, row);
+    return null;
+  }
+  return row;
+}
+
+function sendUnfrozen(res, contract) {
+  if (contract.status !== 'awaiting_data') return res.status(404).json({ error: 'Contract not found' });
+  return res.status(409).json({
+    error: 'This contract is being prepared. Complete your details first.', code: 'CONTRACT_NOT_READY',
+  });
+}
+
+const CONTRACT = { table: 'contracts', featureKey: 'contracts', label: 'Contracts', notFound: 'Contract not found' };
+const QUOTE = { table: 'quotes', featureKey: 'quotes', label: 'Quotes', notFound: 'Quote not found' };
+
+// The signed-in customer, as the actor the accounting change history records
+// for a portal signature, upload or response.
+function portalActor(req) {
+  return { type: 'customer', id: req.customer.id, name: req.customer.displayName || null };
+}
+
+function sendValidationErrors(req, res) {
+  const errors = validationResult(req);
+  if (errors.isEmpty()) return false;
+  res.status(400).json({
+    error: 'Validation failed',
+    code: 'VALIDATION_ERROR',
+    details: safeValidationErrors(errors).map((e) => ({ field: e.path || e.param, message: e.msg })),
+  });
+  return true;
+}
+
+// Operational refusals from the services (expired link, already signed,
+// ToS not accepted, ...) go back as they are; anything else is a 500.
+function sendServiceRefusal(res, err) {
+  if (!err || !err.statusCode || err.statusCode >= 500) return false;
+  res.status(err.statusCode).json({ error: err.message, code: err.code });
+  return true;
+}
+
+router.get('/contracts/:id', customerAuth, async (req, res) => {
+  try {
+    const contract = await ownedDocument(req, res, CONTRACT);
+    if (!contract) return;
+    const view = await publicDocumentViews.buildContractView(contract.id);
+    if (!view) return res.status(404).json({ error: CONTRACT.notFound });
+    const liveTokens = await publicDocumentViews.liveContractTokens([contract.id]);
+    // Same rule as the list: a signatures-v2 contract signs through a signer
+    // session — when it is this customer's turn and they haven't answered.
+    const me = await db('customer_accounts').where({ id: req.customer.id }).first('email');
+    const mine = (await require('../services/contract/signingV2').portalSignerStates(me || {}, [contract])).get(contract.id) || {};
+    res.json({
+      contract: view,
+      canSign: contract.status === 'sent'
+        && (Number(contract.signing_version) === 2 ? !!mine.canSign : liveTokens.has(contract.id)),
+      signerState: mine.state || null,
+      waitingFor: mine.waitingFor || null,
+    });
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to load contract');
+  }
+});
+
+router.post(
+  '/contracts/:id/sign',
+  customerAuth,
+  [
+    body('name').isString().isLength({ min: 1, max: 255 }),
+    body('accepted').isBoolean(),
+    body('signatureDataUrl').optional({ nullable: true }).isString(),
+  ],
+  async (req, res) => {
+    try {
+      if (sendValidationErrors(req, res)) return;
+      const contract = await ownedDocument(req, res, CONTRACT);
+      if (!contract) return;
+      const token = (await publicDocumentViews.liveContractTokens([contract.id])).get(contract.id);
+      if (contract.status !== 'sent' || !token) {
+        return res.status(409).json({ error: 'This contract cannot be signed right now.', code: 'NOT_SIGNABLE' });
+      }
+      const contractService = require('../services/contractService');
+      const result = await contractService.recordCustomerSignature({
+        token: token.token,
+        name: req.body.name,
+        signatureDataUrl: req.body.signatureDataUrl,
+        accepted: req.body.accepted === true,
+        // See utils/clientIp.js — the trusted req.ip only.
+        ip: clientIpForAudit(req),
+        actor: portalActor(req),
+      });
+      res.json(result);
+    } catch (error) {
+      if (sendServiceRefusal(res, error)) return;
+      errorResponse(res, error, 500, 'Failed to sign contract');
+    }
+  },
+);
+
+router.post(
+  '/contracts/:id/upload-signed-pdf',
+  customerAuth,
+  // Setting, ownership and signability are all checked BEFORE multer, so a
+  // refused upload never writes to disk.
+  contractSignedPdfUpload.uploadSignedPdfSettingGuard,
+  async (req, res, next) => {
+    try {
+      const contract = await ownedDocument(req, res, CONTRACT);
+      if (!contract) return undefined;
+      const token = (await publicDocumentViews.liveContractTokens([contract.id])).get(contract.id);
+      if (contract.status !== 'sent' || !token) {
+        return res.status(409).json({ error: 'This contract cannot be signed right now.', code: 'NOT_SIGNABLE' });
+      }
+      req.publicTokenRow = token;
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  },
+  contractSignedPdfUpload.signedPdfSingle,
+  async (req, res) => {
+    try {
+      await contractSignedPdfUpload.finishSignedPdfUpload(req, res, { actor: portalActor(req) });
+    } catch (error) {
+      if (sendServiceRefusal(res, error)) return;
+      errorResponse(res, error, 500, 'Failed to upload the signed contract');
+    }
+  },
+);
+
+router.get('/quotes/:id', customerAuth, async (req, res) => {
+  try {
+    const quote = await ownedDocument(req, res, QUOTE);
+    if (!quote) return;
+    const view = await publicDocumentViews.buildQuoteView(quote.id);
+    if (!view) return res.status(404).json({ error: QUOTE.notFound });
+    const usableTokens = await publicDocumentViews.usableQuoteTokens([quote.id]);
+    res.json({
+      quote: view,
+      canRespond: publicDocumentViews.quoteAcceptsResponse(quote) && usableTokens.has(quote.id),
+    });
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to load quote');
+  }
+});
+
+router.post(
+  '/quotes/:id/respond',
+  customerAuth,
+  [
+    body('action').isIn(['accept', 'decline']),
+    body('tosAccepted').optional().isBoolean(),
+    // The total the page showed. A quote offering add-ons is accepted with
+    // its stored choice, and the service refuses a stale total.
+    body('expectedTotalMinor').optional({ nullable: true }).isInt({ min: 0 }).toInt(),
+  ],
+  async (req, res) => {
+    try {
+      if (sendValidationErrors(req, res)) return;
+      const quote = await ownedDocument(req, res, QUOTE);
+      if (!quote) return;
+      const token = (await publicDocumentViews.usableQuoteTokens([quote.id])).get(quote.id);
+      if (!publicDocumentViews.quoteAcceptsResponse(quote) || !token) {
+        return res.status(409).json({ error: 'This quote cannot be answered right now.', code: 'NOT_RESPONDABLE' });
+      }
+      const quoteService = require('../services/quoteService');
+      const result = await quoteService.recordResponse({
+        token: token.token,
+        action: req.body.action,
+        ip: clientIpForAudit(req),
+        tosAccepted: req.body.tosAccepted === true,
+        expectedTotalMinor: req.body.expectedTotalMinor,
+        actor: portalActor(req),
+      });
+      res.json({ status: result.status, lockedAt: result.lockedAt });
+    } catch (error) {
+      if (error && error.code === 'RESPONSE_LOCKED') {
+        return res.status(423).json({
+          error: error.message,
+          code: 'RESPONSE_LOCKED',
+          currentStatus: error.currentStatus,
+          lockedAt: error.lockedAt,
+        });
+      }
+      if (sendServiceRefusal(res, error)) return;
+      errorResponse(res, error, 500, 'Failed to record the response');
+    }
+  },
+);
+
+
+// ---- dashboard + per-event page (#1444) --------------------------------
+
+/**
+ * GET /dashboard
+ *
+ * What needs the customer's attention (quotes awaiting a response, contracts
+ * awaiting their signature, invoices due or overdue) and their galleries,
+ * split into active and expired. Each section follows the customer's
+ * effective features. customerPortalService builds this and the event page
+ * below from the same queries.
+ */
+router.get('/dashboard', customerAuth, async (req, res) => {
+  try {
+    res.json(await customerPortalService.getDashboard(req.customer.id));
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to load dashboard');
+  }
+});
+
+/**
+ * GET /events/:slug/overview
+ *
+ * One event: gallery state, quotes, contracts, invoices and documents.
+ * 404 when the event is unknown, archived or not assigned to this customer —
+ * the three look the same from outside.
+ */
+router.get('/events/:slug/overview', [
+  customerAuth,
+  param('slug').isString().isLength({ min: 1, max: 255 }),
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: safeValidationErrors(errors) });
+    }
+    const overview = await customerPortalService.getEventOverview(req.customer.id, req.params.slug);
+    if (!overview) return res.status(404).json({ error: 'Event not found' });
+    res.json(overview);
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to load event');
+  }
+});
+
+// ---- documents (#1444) ---------------------------------------------------
+// PDFs shared by the studio plus the customer's own uploads. Every query in
+// customerDocumentsService is scoped to req.customer.id.
+
+// Global `documents` flag AND the per-customer override, like the other
+// customer features.
+async function requireDocumentsFeature(req, res, next) {
+  try {
+    if (await customerFeatureAllowed(req, res, 'documents', 'Documents')) next();
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to check document access');
+  }
+}
+
+// Uploads get their own bucket per customer account. Otherwise customers only
+// share the global per-IP limit, which everyone behind one address uses up
+// together.
+const documentUploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `customer-documents:${req.customer.id}`,
+  message: { error: 'Too many uploads. Please wait a few minutes and try again.', code: 'UPLOAD_RATE_LIMITED' },
+  // Counted as an abuse signal (per customer per hour), then answered as usual.
+  handler: (req, res, _next, options) => {
+    customerDocumentAbuse.record(req.customer.id, 'rate_limited')
+      .finally(() => res.status(options.statusCode).json(options.message));
+  },
+});
+
+// A 4xx AppError carries a message written for the customer; anything else is
+// logged and answered generically.
+function sendDocumentError(res, error, fallback) {
+  if (error && error.statusCode && error.statusCode < 500) {
+    return res.status(error.statusCode).json({ error: error.message, code: error.code });
+  }
+  return errorResponse(res, error, 500, fallback);
+}
+
+router.get('/documents', customerAuth, requireDocumentsFeature, async (req, res) => {
+  try {
+    const documents = await customerDocumentsService.listForCustomer(req.customer.id);
+    const limits = await customerDocumentsService.getLimits();
+    const usedBytes = await customerDocumentsService.getUsageBytes(req.customer.id);
+    // Drives the upload control's accept list and copy, so it can't drift
+    // from what the server accepts.
+    const allowedFormats = await documentFormats.getAllowedFormats();
+    res.json({ documents, limits: { ...limits, usedBytes }, allowedFormats });
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to load documents');
+  }
+});
+
+/**
+ * POST /documents  multipart: file (PDF), eventId?, contractId?, requestId?
+ *
+ * The file stays `pending` — not downloadable — until the studio has
+ * reviewed it. Quota is checked before multer (no bytes written when it is
+ * already used up) and again with the real size.
+ */
+router.post('/documents', customerAuth, requireDocumentsFeature, documentUploadLimiter, async (req, res) => {
+  let file = null;
+  try {
+    const limits = await customerDocumentsService.getLimits();
+    const usedBytes = await customerDocumentsService.getUsageBytes(req.customer.id);
+    if (usedBytes >= limits.quotaBytes) {
+      await customerDocumentAbuse.record(req.customer.id, 'quota_exceeded');
+      return res.status(413).json({ error: 'Your document storage is full.', code: 'QUOTA_EXCEEDED' });
+    }
+    file = await receiveDocumentUpload(req, res, {
+      maxBytes: limits.maxUploadBytes,
+      allowedFormats: await documentFormats.getAllowedFormats(),
+    });
+    if (!file) return res.status(400).json({ error: 'No file was uploaded.', code: 'NO_FILE' });
+    // The quota is counted again where the row is written, in the same
+    // transaction: the check above runs before the body arrives, so uploads
+    // landing together would otherwise all measure the same "before".
+    // requestId answers a document request (slice 10): anything that isn't
+    // an open request of this customer is the request's 404.
+    let requestId = null;
+    if (req.body.requestId !== undefined && req.body.requestId !== '') {
+      requestId = /^\d{1,10}$/.test(String(req.body.requestId)) ? Number(req.body.requestId) : -1;
+      if (requestId < 1 || requestId > 2147483647) {
+        return res.status(404).json({ error: 'Document request not found', code: 'DOCUMENT_REQUEST_NOT_FOUND' });
+      }
+    }
+    const row = await customerDocumentsService.createDocument({
+      customerId: req.customer.id,
+      uploaderType: 'customer',
+      uploaderId: req.customer.id,
+      file,
+      requestId,
+      links: { eventId: req.body.eventId, contractId: req.body.contractId },
+      actor: { type: 'customer', id: req.customer.id, name: req.customer.email },
+      quotaBytes: limits.quotaBytes,
+      maxUploadBytes: limits.maxUploadBytes,
+    });
+    // After the row is written; neither can fail the upload.
+    await customerDocumentNotifications.notifyUploaded(row);
+    await customerDocumentNotifications.emitDocumentWorkflow('document.uploaded', row);
+    res.status(201).json({ document: customerDocumentsService.toCustomerDto(row) });
+  } catch (error) {
+    if (error && error.code === 'QUOTA_EXCEEDED') await customerDocumentAbuse.record(req.customer.id, 'quota_exceeded');
+    sendDocumentError(res, error, 'Failed to upload document');
+  } finally {
+    discardTempFile(file);
+  }
+});
+
+// One answer per state, shared by the document page and the download. A 410
+// is only ever given for a document this customer once saw (see
+// getStateForCustomer); everything else — including another customer's id —
+// is the same 404 body.
+const DOCUMENT_GONE = {
+  unshared: { error: 'This document is no longer shared with you.', code: 'DOCUMENT_UNSHARED' },
+  removed: { error: 'This document has been removed.', code: 'DOCUMENT_REMOVED' },
+};
+
+function documentIdParam(req) {
+  const id = Number(req.params.id);
+  return Number.isInteger(id) && id > 0 && id <= 2147483647 ? id : null;
+}
+
+/** The row when visible; otherwise sends the 404/410 and returns null. */
+async function loadCustomerDocument(req, res) {
+  const id = documentIdParam(req);
+  const found = id ? await customerDocumentsService.getStateForCustomer(req.customer.id, id) : null;
+  if (found && found.state === 'visible') return found.row;
+  if (found) {
+    res.status(410).json(DOCUMENT_GONE[found.state]);
+  } else {
+    res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    // Counted only when the id exists and is someone else's (never for an
+    // id that doesn't exist). After the answer and not awaited: the extra
+    // queries a foreign id costs must not show in the response time, or the
+    // latency would tell which ids exist.
+    if (id) customerDocumentAbuse.recordIfForeignLater(req.customer.id, id);
+  }
+  return null;
+}
+
+/**
+ * GET /document-requests — what the studio has asked this customer for and
+ * is still waiting on (slice 10).
+ */
+router.get('/document-requests', customerAuth, requireDocumentsFeature, async (req, res) => {
+  try {
+    res.json({ requests: await customerDocumentRequestsService.listOpenForCustomer(req.customer.id) });
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to load document requests');
+  }
+});
+
+/**
+ * GET /documents/:id — one document's details, for the document page and
+ * the deep link in a notification. Pending and rejected own uploads answer
+ * 200 with their status (no download); unshared and removed ones a 410 with
+ * their own code, so the page can say which.
+ */
+router.get('/documents/:id', customerAuth, requireDocumentsFeature, async (req, res) => {
+  try {
+    const row = await loadCustomerDocument(req, res);
+    if (!row) return undefined;
+    return res.json({ document: customerDocumentsService.toCustomerDto(row) });
+  } catch (error) {
+    return sendDocumentError(res, error, 'Failed to load document');
+  }
+});
+
+/**
+ * DELETE /documents/:id — the customer deletes their own upload. Only their
+ * own uploads (anything else is the portal's usual 404), and not while it is
+ * linked to a contract (409 DOCUMENT_CONTRACT_LINKED). Shares the upload
+ * rate limit.
+ */
+router.delete('/documents/:id', customerAuth, requireDocumentsFeature, documentUploadLimiter, async (req, res) => {
+  try {
+    const id = documentIdParam(req);
+    if (!id) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    await customerDocumentsService.softDeleteByCustomer(req.customer.id, id,
+      { type: 'customer', id: req.customer.id, name: req.customer.email });
+    return res.json({ deleted: true });
+  } catch (error) {
+    if (error && error.code === 'DOCUMENT_NOT_FOUND') {
+      // Answered first, recorded after (see loadCustomerDocument).
+      sendDocumentError(res, error, 'Failed to delete document');
+      const id = documentIdParam(req);
+      if (id) customerDocumentAbuse.recordIfForeignLater(req.customer.id, id);
+      return undefined;
+    }
+    return sendDocumentError(res, error, 'Failed to delete document');
+  }
+});
+
+router.get('/documents/:id/download', customerAuth, requireDocumentsFeature, async (req, res) => {
+  try {
+    const row = await loadCustomerDocument(req, res);
+    if (!row) return undefined;
+    if (row.status === 'pending') {
+      return res.status(409).json({ error: 'This document is still being reviewed.', code: 'DOCUMENT_PENDING_REVIEW' });
+    }
+    if (row.status !== 'clean') {
+      return res.status(409).json({ error: 'This document was rejected and cannot be downloaded.', code: 'DOCUMENT_REJECTED' });
+    }
+    const stream = await customerDocumentsService.openStream(row);
+    await customerDocumentsService.recordView(row.id, 'customer', req.customer.id);
+    await logActivity('customer_document_downloaded',
+      { documentId: row.id, customerId: req.customer.id },
+      row.event_id || null,
+      { type: 'customer', id: req.customer.id, name: req.customer.email }
+    );
+    sendDocumentAttachment(res, stream, row);
+  } catch (error) {
+    sendDocumentError(res, error, 'Failed to download document');
   }
 });
 

@@ -3,6 +3,17 @@ const express = require('express');
 const { safePathJoin, isPathSafe } = require('../utils/fileSecurityUtils');
 const logger = require('../utils/logger');
 
+// The /fonts mounts serve only font formats. STORAGE_PATH/fonts is
+// admin-writable (custom fonts, a restored backup) and sits on the app
+// origin, so an HTML or JS file dropped there would otherwise run as the
+// site under the frontend's `script-src 'self'`. Companion to
+// isPublicUploadImage (safePath.js) for the upload trees.
+const PUBLIC_FONT_EXTENSIONS = ['.woff', '.woff2', '.ttf', '.otf', '.eot'];
+
+function isPublicFontFile(filePath) {
+  return PUBLIC_FONT_EXTENSIONS.includes(path.extname(String(filePath || '')).toLowerCase());
+}
+
 /**
  * Create a secure static file serving middleware that prevents path traversal attacks
  * @param {string} basePath - The base directory to serve files from
@@ -16,6 +27,12 @@ function secureStatic(basePath, options = {}) {
     // Get the requested file path - remove leading slash for validation
     const requestedPath = req.path.startsWith('/') ? req.path.substring(1) : req.path;
     
+    // Trees that only hold images (options.onlyServe) refuse anything else,
+    // e.g. a script or HTML file an older upload left behind.
+    if (typeof options.onlyServe === 'function' && !options.onlyServe(requestedPath)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
     // Validate the path doesn't contain dangerous patterns
     if (!isPathSafe(requestedPath)) {
       logger.warn(`Potential path traversal attempt blocked: ${requestedPath}`);
@@ -28,8 +45,9 @@ function secureStatic(basePath, options = {}) {
       safePathJoin(normalizedBase, requestedPath);
       
       // If validation passes, use express.static
+      const { onlyServe: _onlyServe, ...staticOptions } = options;
       const staticMiddleware = express.static(normalizedBase, {
-        ...options,
+        ...staticOptions,
         // Disable directory listing for security
         index: false,
         // Don't allow dotfiles
@@ -61,3 +79,4 @@ function secureStatic(basePath, options = {}) {
 }
 
 module.exports = secureStatic;
+module.exports.isPublicFontFile = isPublicFontFile;

@@ -1,17 +1,45 @@
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
 
+/**
+ * The admin's reach beyond its own galleries, from the role's permissions
+ * (adminAuth puts it on req.admin): events.manage_all acts on every gallery,
+ * events.view_all lists and reads every gallery. Galleries only: CRM and
+ * transfer code (projects, customers, documents, transfers) reaches events
+ * through filterOwnedEventIds, which keeps the owner rule unless a gallery
+ * route opts in. `eventScope` is null or
+ * missing before migration 259 has run, or on a principal built without it;
+ * the legacy rule applies then: the built-in `admin` role reads everything.
+ */
+function managesAllEvents(admin) {
+  return admin?.roleName === 'super_admin' || admin?.eventScope?.manageAll === true;
+}
+
 function canAccessEvent(admin, event) {
-  return Boolean(admin && event && (admin.roleName === 'super_admin'
+  return Boolean(admin && event && (managesAllEvents(admin)
     || event.created_by == null || Number(event.created_by) === Number(admin.id)));
 }
 
 /**
+ * Whether the admin's event lists and details cover every event, owned or not:
+ * super_admin, and roles holding events.view_all or events.manage_all (the
+ * built-in `admin` role holds view_all as the studio-wide overview). Every
+ * other role sees its own events plus ownerless ones, the rule canAccessEvent
+ * applies per row.
+ */
+function seesAllEvents(admin) {
+  if (managesAllEvents(admin)) return true;
+  if (admin?.eventScope) return admin.eventScope.viewAll === true;
+  return admin?.roleName === 'admin';
+}
+
+/**
  * Middleware to enforce event ownership for non-super_admin users.
- * Super admins bypass the check. Other admins can only access events they created.
+ * Super admins and roles holding events.manage_all bypass the check. Other
+ * admins can only access events they created, plus ownerless ones.
  */
 function requireEventOwnership(req, res, next) {
-  if (req.admin.roleName === 'super_admin') {
+  if (managesAllEvents(req.admin)) {
     return next();
   }
 
@@ -49,10 +77,37 @@ function requireEventOwnership(req, res, next) {
  * per-row.
  */
 function scopeEventsQuery(query, admin, column = 'created_by') {
-  if (admin?.roleName === 'super_admin') {
+  if (managesAllEvents(admin)) {
     return query;
   }
   return query.where((q) => q.whereNull(column).orWhere(column, admin.id));
+}
+
+/**
+ * scopeEventsQuery for event lists (events, archives, dashboard), leaving the
+ * roles that see all events unrestricted. See seesAllEvents.
+ */
+function scopeEventsListQuery(query, admin, column = 'created_by') {
+  return seesAllEvents(admin) ? query : scopeEventsQuery(query, admin, column);
+}
+
+// Columns of an events row that open the gallery on their own: the share link
+// embeds the share token, the client token unlocks client access, the show
+// token opens the slideshow.
+const EVENT_BEARER_SECRET_COLUMNS = ['share_token', 'share_link', 'client_share_token', 'show_share_token'];
+
+/**
+ * An event payload without its gallery links when the admin cannot act on the
+ * event. A role that sees all events still reads the event, but a link that
+ * opens another owner's gallery is that owner's to hand out.
+ * `share_secrets_hidden` tells the UI why the link is missing.
+ */
+function withoutForeignEventSecrets(event, admin) {
+  if (!event || typeof event !== 'object' || canAccessEvent(admin, event)) return event;
+  const copy = { ...event };
+  for (const column of EVENT_BEARER_SECRET_COLUMNS) delete copy[column];
+  copy.share_secrets_hidden = true;
+  return copy;
 }
 
 /**
@@ -64,10 +119,14 @@ function scopeEventsQuery(query, admin, column = 'created_by') {
  * land in `denied` — deliberately indistinguishable, so bulk routes
  * don't become an ownership/existence oracle.
  *
+ * `honourManageAll` lets events.manage_all through as well; only gallery
+ * routes pass it, so the permission never reaches CRM or transfer data
+ * hanging off another owner's event (GHSA-wrg5).
+ *
  * @returns {Promise<{allowed: Array, denied: Array}>}
  */
-async function filterOwnedEventIds(admin, eventIds) {
-  if (admin.roleName === 'super_admin') {
+async function filterOwnedEventIds(admin, eventIds, { honourManageAll = false } = {}) {
+  if (admin.roleName === 'super_admin' || (honourManageAll && managesAllEvents(admin))) {
     return { allowed: [...eventIds], denied: [] };
   }
   const rows = await db('events')
@@ -171,9 +230,14 @@ function requireProjectOwnership(req, res, next) {
 
 module.exports = {
   canAccessEvent,
+  managesAllEvents,
+  seesAllEvents,
   requireEventOwnership,
   filterOwnedEventIds,
   scopeEventsQuery,
+  scopeEventsListQuery,
+  withoutForeignEventSecrets,
+  EVENT_BEARER_SECRET_COLUMNS,
   ownedProjectIds,
   ownedProjectsSubquery,
   requireProjectOwnership,

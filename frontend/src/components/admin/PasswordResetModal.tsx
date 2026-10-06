@@ -28,6 +28,9 @@ export const PasswordResetModal: React.FC<PasswordResetModalProps> = ({
   const [errors, setErrors] = useState<{ password?: string; confirmPassword?: string }>({});
   const [resultPassword, setResultPassword] = useState<string | null>(null);
   const [resultWasGenerated, setResultWasGenerated] = useState(false);
+  // What the server did, not what was asked: the event may have no address,
+  // or the queue write may have failed after the password changed.
+  const [resultEmailSent, setResultEmailSent] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const validate = (): boolean => {
@@ -53,6 +56,7 @@ export const PasswordResetModal: React.FC<PasswordResetModalProps> = ({
       const result = await onConfirm(sendEmail, supplied);
       setResultPassword(result.newPassword);
       setResultWasGenerated(!supplied);
+      setResultEmailSent(result.emailSent === true);
       if (supplied) {
         toast.success(t('events.passwordReset.toastSuccess'));
       }
@@ -87,12 +91,12 @@ export const PasswordResetModal: React.FC<PasswordResetModalProps> = ({
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <Card className="max-w-md w-full">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">
+          <h2 className="text-xl font-semibold text-heading">
             {resultPassword ? t('events.passwordReset.newTitle') : t('events.passwordReset.title')}
           </h2>
           <button
             onClick={onClose}
-            className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300"
+            className="text-neutral-400 hover:text-body"
           >
             <X className="w-5 h-5" />
           </button>
@@ -163,12 +167,12 @@ export const PasswordResetModal: React.FC<PasswordResetModalProps> = ({
                   type="checkbox"
                   checked={sendEmail}
                   onChange={(e) => setSendEmail(e.target.checked)}
-                  className="w-4 h-4 text-accent bg-neutral-100 dark:bg-neutral-700 border-neutral-300 dark:border-neutral-600 rounded focus:ring-primary-500 focus:ring-2"
+                  className="w-4 h-4 text-accent bg-inset border-line-strong rounded focus:ring-primary-500 focus:ring-2"
                 />
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
                     <Mail className="w-4 h-4 text-neutral-500" />
-                    <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                    <span className="text-sm font-medium text-body">
                       {t('events.passwordReset.sendEmail')}
                     </span>
                   </div>
@@ -213,9 +217,14 @@ export const PasswordResetModal: React.FC<PasswordResetModalProps> = ({
                 <CheckCircle className="w-5 h-5 text-green-600" />
                 <p className="font-medium text-green-900">{t('events.passwordReset.successHeading')}</p>
               </div>
-              {sendEmail && (
+              {sendEmail && resultEmailSent && (
                 <p className="text-sm text-green-700">
                   {t('events.passwordReset.emailSentNote')}
+                </p>
+              )}
+              {sendEmail && !resultEmailSent && (
+                <p className="text-sm text-amber-700" role="status">
+                  {t('events.passwordReset.emailNotSentNote')}
                 </p>
               )}
             </div>
@@ -231,7 +240,7 @@ export const PasswordResetModal: React.FC<PasswordResetModalProps> = ({
                       type="text"
                       value={resultPassword}
                       readOnly
-                      className="flex-1 px-3 py-2 bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-neutral-900 dark:text-neutral-100 rounded-lg font-mono text-sm"
+                      className="flex-1 px-3 py-2 bg-subtle border border-line-strong text-heading rounded-lg font-mono text-sm"
                     />
                     <Button
                       variant="outline"

@@ -14,6 +14,7 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { rateLimitKey } = require('../utils/rateLimitKey');
 const { body, param, query } = require('express-validator');
 
 const { db } = require('../database/db');
@@ -37,7 +38,7 @@ const testLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `newsletter-test:${req.admin?.id || req.ip}`,
+  keyGenerator: (req) => `newsletter-test:${req.admin?.id || rateLimitKey(req)}`,
 });
 
 /** DB shape → API shape. Narrow, so a new column can't leak by accident. */
@@ -53,6 +54,9 @@ function transformCampaign(c) {
     status: c.status,
     recipientMode: c.recipient_mode,
     customerIds: parseCustomerIds(c.recipient_filter),
+    // The groups rule (#1443); kept beside the manual selection.
+    groupIds: newsletterService.parseGroupFilter(c).groupIds,
+    groupMatch: newsletterService.parseGroupFilter(c).match,
     recipientCount: Number(c.recipient_count || 0),
     sentCount: Number(c.sent_count || 0),
     failedCount: Number(c.failed_count || 0),
@@ -166,6 +170,9 @@ const campaignBodyValidators = [
   body('language').optional({ values: 'falsy' }).isString().isLength({ max: 8 }),
   body('recipientMode').optional().isIn(newsletterService.VALID_RECIPIENT_MODES),
   body('customerIds').optional().isArray(),
+  body('groupIds').optional().isArray({ max: newsletterService.MAX_RECIPIENT_GROUPS }),
+  body('groupIds.*').isInt({ min: 1 }).toInt(),
+  body('groupMatch').optional().isIn(newsletterService.VALID_GROUP_MATCHES),
   body('sendRatePerMinute').optional().isInt({
     min: newsletterService.MIN_RATE_PER_MINUTE,
     max: newsletterService.MAX_RATE_PER_MINUTE,

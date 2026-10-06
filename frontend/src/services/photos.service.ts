@@ -16,6 +16,14 @@ export interface AdminPhoto {
   uploaded_at: string;
   media_type?: 'photo' | 'video';
   mime_type?: string | null;
+  // Browser-playable copy of a video (issue 1430, item 8); null until the
+  // setting has queued it.
+  web_status?: 'pending' | 'processing' | 'complete' | 'skipped' | 'failed' | null;
+  web_error?: string | null;
+  processing_status?: 'pending' | 'processing' | 'complete' | 'failed';
+  // Set on a complete video that shows the placeholder tile because no
+  // poster frame could be taken (issue 1430, item 6).
+  processing_error?: string | null;
   view_count?: number;
   download_count?: number;
   // Feedback fields
@@ -34,14 +42,45 @@ export interface AdminPhoto {
   // the client's selections above, and never shown in the gallery.
   my_rating?: number | null;
   my_color_label?: string | null;
+  // Photo credit (#1561). The admin always sees it, whatever the event's
+  // show-to-guests switch says.
+  credit_name?: string | null;
+  credit_source?: 'guest' | 'exif' | 'manual' | null;
+  uploaded_by?: 'admin' | 'guest';
+  // Folders (issue 1786): the folder the photo lives in (null = gallery
+  // root), and the open folder request it waits on, if any.
+  folder_id?: number | null;
+  pending_folder_request_id?: number | null;
+  // Delivered as part of a first look (issue 1562).
+  first_look?: boolean;
 }
+
+// Filter value for "photos without a credit" — mirrors CREDIT_NONE in
+// backend/src/services/photoCredit.js.
+export const CREDIT_FILTER_NONE = '__none__';
+
+export interface PhotoCreditSummary {
+  credits: Array<{ name: string; count: number }>;
+  none: number;
+}
+
+/** Sort keys of the admin photo list. `date` is the upload date. */
+export type PhotoSortKey = 'date' | 'name' | 'size' | 'rating' | 'capture_date';
+
+/**
+ * Folder filter of the admin photo list (issue 1786): `root` = photos in no
+ * folder, a number = the photos directly in that folder, `pending` = photos
+ * waiting for a folder request. Absent = every photo.
+ */
+export type PhotoFolderFilter = number | 'root' | 'pending';
 
 export interface PhotoFilters {
   category_id?: number | string | null;
+  folder_id?: PhotoFolderFilter;
   type?: string;
   media_type?: 'photo' | 'video';
   search?: string;
-  sort?: 'date' | 'name' | 'size' | 'rating';
+  sort?: PhotoSortKey;
   order?: 'asc' | 'desc';
   hasLikes?: boolean;
   hasFavorites?: boolean;
@@ -51,7 +90,48 @@ export interface PhotoFilters {
   colorLabels?: string[];
   /** Same, against the caller's own marks. */
   myColorLabels?: string[];
+  /** Exact credit name, or CREDIT_FILTER_NONE (#1561). */
+  credit?: string;
   logic?: 'AND' | 'OR';
+}
+
+/**
+ * Where one upload batch lands (issues 1786 + 1562). The folder fields come
+ * from POST …/folders/resolve; one batch is one placement.
+ */
+export interface UploadPlacement {
+  /** Filter category for every file of the batch. */
+  categoryId?: number | null;
+  /** Target folder; null/absent = gallery root. */
+  folderId?: number | null;
+  /** Open folder request the batch waits on (the server parks it in the request's fallback folder). */
+  folderRequestId?: number | null;
+  /** The batch came from a first-look keyword folder. */
+  firstLook?: boolean;
+}
+
+/** The folder half of a placement, as the chunked-upload helpers take it. */
+export type FolderPlacement = Omit<UploadPlacement, 'categoryId'>;
+
+/**
+ * Placement fields of the chunked complete body. category_id is always sent
+ * (as before); the folder fields only when set, so a plain upload's body is
+ * unchanged.
+ */
+export function uploadPlacementBody(placement: UploadPlacement): Record<string, number | boolean | null> {
+  const body: Record<string, number | boolean | null> = { category_id: placement.categoryId ?? null };
+  if (placement.folderId) body.folder_id = placement.folderId;
+  if (placement.folderRequestId) body.folder_request_id = placement.folderRequestId;
+  if (placement.firstLook) body.first_look = true;
+  return body;
+}
+
+/** The same fields on a multipart upload; only the ones that are set. */
+export function appendUploadPlacement(formData: FormData, placement: UploadPlacement): void {
+  if (placement.categoryId) formData.append('category_id', placement.categoryId.toString());
+  if (placement.folderId) formData.append('folder_id', placement.folderId.toString());
+  if (placement.folderRequestId) formData.append('folder_request_id', placement.folderRequestId.toString());
+  if (placement.firstLook) formData.append('first_look', 'true');
 }
 
 class PhotosService {
@@ -75,6 +155,7 @@ class PhotosService {
       if (filters.category_id !== undefined) {
         params.append('category_id', filters.category_id?.toString() || '');
       }
+      if (filters.folder_id !== undefined) params.append('folder_id', String(filters.folder_id));
       if (filters.type) params.append('type', filters.type);
       if (filters.media_type) params.append('media_type', filters.media_type);
       if (filters.search) params.append('search', filters.search);
@@ -92,6 +173,7 @@ class PhotosService {
       if (filters.myColorLabels && filters.myColorLabels.length > 0) {
         params.append('my_color_label', filters.myColorLabels.join(','));
       }
+      if (filters.credit) params.append('credit', filters.credit);
       if (filters.logic) params.append('logic', filters.logic);
     }
     
@@ -103,6 +185,25 @@ class PhotosService {
     
     // Return photos as-is, URLs are already relative API paths
     return response.data.photos;
+  }
+
+  /** The names on this event's photos with their counts (#1561). */
+  async getPhotoCredits(eventId: number): Promise<PhotoCreditSummary> {
+    const response = await api.get(`/admin/photos/${eventId}/photos/credits`);
+    return response.data;
+  }
+
+  /**
+   * Correct or clear one photo's credit (#1561). null clears it; either way it
+   * becomes a manual credit that no later EXIF read overwrites.
+   */
+  async setPhotoCredit(
+    eventId: number,
+    photoId: number,
+    creditName: string | null
+  ): Promise<{ credit_name: string | null; credit_source: string }> {
+    const response = await api.put(`/admin/photos/${eventId}/photos/${photoId}/credit`, { credit_name: creditName });
+    return response.data;
   }
 
   async deletePhoto(eventId: number, photoId: number): Promise<void> {
@@ -209,11 +310,12 @@ class PhotosService {
   async completeChunkedUpload(
     eventId: number,
     uploadId: string,
-    categoryId?: number | null
+    categoryId?: number | null,
+    folder: FolderPlacement = {}
   ): Promise<{ success: boolean; uploaded: number; photos: AdminPhoto[] }> {
     const response = await api.post(
       `/admin/photos/${eventId}/chunked-upload/${uploadId}/complete`,
-      { category_id: categoryId },
+      uploadPlacementBody({ ...folder, categoryId }),
       // Merge + ffmpeg thumbnail can take a while on large videos.
       { timeout: 0 }
     );
@@ -228,7 +330,8 @@ class PhotosService {
     eventId: number,
     file: File,
     categoryId?: number | null,
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void,
+    folder: FolderPlacement = {}
   ): Promise<AdminPhoto[]> {
     // Initialize upload
     const { uploadId, expectedChunks } = await this.initChunkedUpload(
@@ -253,7 +356,7 @@ class PhotosService {
       }
 
       // Complete upload
-      const result = await this.completeChunkedUpload(eventId, uploadId, categoryId);
+      const result = await this.completeChunkedUpload(eventId, uploadId, categoryId, folder);
       return result.photos;
     } catch (error) {
       // Abort on error

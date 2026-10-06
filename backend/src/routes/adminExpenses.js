@@ -21,9 +21,11 @@ const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
 const { handleAsync, validateRequest, successResponse } = require('../utils/routeHelpers');
 const { getStoragePath } = require('../config/storage');
-const { assertPathInside } = require('../utils/safePath');
+const { assertPathInside, assertStoredPathInside } = require('../utils/safePath');
+const { toStoredPath } = require('../utils/storedPath');
 const { db } = require('../database/db');
 const expenseService = require('../services/expenseService');
+const accountingHistory = require('../services/accountingHistory');
 const expenseCategoriesService = require('../services/expenseCategoriesService');
 const rasterizeService = require('../services/rasterizeService');
 
@@ -65,6 +67,10 @@ const toInt = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n 
 router.get('/categories', requireAccounting, requirePermission('accounting.view'), handleAsync(async (_req, res) =>
   successResponse(res, { items: await expenseCategoriesService.list() })));
 
+router.get('/categories/:id/history', requireAccounting, requirePermission('accounting.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => { validateRequest(req); return successResponse(res, { entries: await accountingHistory.listHistory('expense_category', toInt(req.params.id)) }); }));
+
 router.post('/categories', requireAccounting, requirePermission('accounting.manage'),
   [body('name').isString().isLength({ min: 1, max: 128 }), body('color').optional({ nullable: true }).isString()],
   handleAsync(async (req, res) => {
@@ -76,14 +82,14 @@ router.patch('/categories/:id', requireAccounting, requirePermission('accounting
   [param('id').isInt({ min: 1 })],
   handleAsync(async (req, res) => {
     validateRequest(req);
-    return successResponse(res, { category: await expenseCategoriesService.update(toInt(req.params.id), req.body) });
+    return successResponse(res, { category: await expenseCategoriesService.update(toInt(req.params.id), req.body, req.admin.id) });
   }));
 
 router.delete('/categories/:id', requireAccounting, requirePermission('accounting.manage'),
   [param('id').isInt({ min: 1 })],
   handleAsync(async (req, res) => {
     validateRequest(req);
-    return successResponse(res, await expenseCategoriesService.remove(toInt(req.params.id)));
+    return successResponse(res, await expenseCategoriesService.remove(toInt(req.params.id), req.admin.id));
   }));
 
 // ── Incoming invoices (external) ────────────────────────────────────────────
@@ -111,7 +117,9 @@ router.get('/inbound/pending-summary', requireIncoming, requirePermission('accou
   handleAsync(async (_req, res) => successResponse(res, { items: await expenseService.listPendingRebillSummary() })));
 
 // Bundle a customer's pending re-bills into one invoice (per-event only).
-router.post('/inbound/bill-pending', requireIncoming, requirePermission('accounting.manage'),
+// These three create invoices, so the billing permission is required alongside
+// accounting.manage (Codex security audit 2026-09-30).
+router.post('/inbound/bill-pending', requireIncoming, requirePermission(['accounting.manage', 'bills.manage'], { requireAll: true }),
   [body('customerAccountId').isInt({ min: 1 })],
   handleAsync(async (req, res) => { validateRequest(req); return successResponse(res, await expenseService.billPendingRebills(toInt(req.body.customerAccountId), req.admin.id), 201, 'Re-billed'); }));
 
@@ -128,7 +136,7 @@ router.get('/inbound/:id/file', requireIncoming, requirePermission('accounting.v
     validateRequest(req);
     const row = await db('inbound_documents').where({ id: toInt(req.params.id) }).first('file_path', 'mime_type');
     if (!row || !row.file_path) return res.status(404).json({ error: 'File not found', code: 'NO_FILE' });
-    const safe = assertPathInside(row.file_path, [path.join(getStoragePath(), 'business-docs')]);
+    const safe = assertStoredPathInside(row.file_path, [path.join(getStoragePath(), 'business-docs')]);
     const isPdf = (row.mime_type || '').includes('pdf');
     res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
     res.setHeader('Content-Disposition', isPdf ? 'attachment' : 'inline');
@@ -146,7 +154,7 @@ router.get('/inbound/:id/page/:n', requireIncoming, requirePermission('accountin
     if (!row || !row.file_path) return res.status(404).json({ error: 'File not found', code: 'NO_FILE' });
     if (!(row.mime_type || '').includes('pdf')) return res.status(415).json({ error: 'Not a PDF', code: 'NOT_PDF' });
     const page = Math.min(Math.max(1, toInt(req.params.n)), row.page_count || 1);
-    const srcPdf = assertPathInside(row.file_path, [path.join(getStoragePath(), 'business-docs')]);
+    const srcPdf = assertStoredPathInside(row.file_path, [path.join(getStoragePath(), 'business-docs')]);
     const pngPath = await rasterizeService.getRenderedPagePath(id, srcPdf, page);
     const safePng = assertPathInside(pngPath, [path.join(getStoragePath(), 'business-docs')]);
     res.setHeader('Content-Type', 'image/png');
@@ -155,6 +163,11 @@ router.get('/inbound/:id/page/:n', requireIncoming, requirePermission('accountin
     res.setHeader('Content-Security-Policy', 'default-src \'none\'; img-src \'self\' data:; style-src \'unsafe-inline\'');
     createReadStream(safePng).pipe(res);
   }));
+
+// Change history (migration 219), oldest first.
+router.get('/inbound/:id/history', requireIncoming, requirePermission('accounting.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => { validateRequest(req); return successResponse(res, { entries: await accountingHistory.listHistory('inbound_document', toInt(req.params.id)) }); }));
 
 router.get('/inbound/:id', requireIncoming, requirePermission('accounting.view'),
   [param('id').isInt({ min: 1 })],
@@ -172,7 +185,7 @@ router.post('/inbound/:id/categorize', requireIncoming, requirePermission('accou
     body('markupType').optional().isIn(expenseService.MARKUP_TYPES)],
   handleAsync(async (req, res) => { validateRequest(req); return successResponse(res, { document: await expenseService.categorizeInbound(toInt(req.params.id), req.body, req.admin.id) }, 200, 'Categorized'); }));
 
-router.post('/inbound/:id/rebill', requireIncoming, requirePermission('accounting.manage'),
+router.post('/inbound/:id/rebill', requireIncoming, requirePermission(['accounting.manage', 'bills.manage'], { requireAll: true }),
   [param('id').isInt({ min: 1 }), body('customerAccountId').isInt({ min: 1 }),
     body('eventId').optional({ nullable: true }).isInt({ min: 1 }), body('contractId').optional({ nullable: true }).isInt({ min: 1 }),
     body('markupType').optional().isIn(expenseService.MARKUP_TYPES)],
@@ -205,7 +218,7 @@ router.post('/', requireExpenses, requirePermission('accounting.manage'),
       description: b.description || null,
       taxTreatment: b.taxTreatment,
     };
-    const expense = await expenseService.createExpense(payload, req.admin.id, { receiptPath: req.file ? req.file.path : null });
+    const expense = await expenseService.createExpense(payload, req.admin.id, { receiptPath: req.file ? toStoredPath(req.file.path) : null });
     return successResponse(res, { expense }, 201, 'Expense created');
   }));
 
@@ -215,7 +228,7 @@ router.get('/:id/proof', requireExpenses, requirePermission('accounting.view'),
     validateRequest(req);
     const row = await db('expenses').where({ id: toInt(req.params.id) }).first('receipt_path');
     if (!row || !row.receipt_path) return res.status(404).json({ error: 'No proof', code: 'NO_PROOF' });
-    const safe = assertPathInside(row.receipt_path, [path.join(getStoragePath(), 'business-docs')]);
+    const safe = assertStoredPathInside(row.receipt_path, [path.join(getStoragePath(), 'business-docs')]);
     const isPdf = safe.toLowerCase().endsWith('.pdf');
     res.setHeader('Content-Type', isPdf ? 'application/pdf' : 'application/octet-stream');
     res.setHeader('Content-Disposition', isPdf ? 'attachment' : 'inline');
@@ -223,6 +236,10 @@ router.get('/:id/proof', requireExpenses, requirePermission('accounting.view'),
     if (!isPdf) res.setHeader('Content-Security-Policy', 'default-src \'none\'; img-src \'self\' data:; style-src \'unsafe-inline\'');
     createReadStream(safe).pipe(res);
   }));
+
+router.get('/:id/history', requireExpenses, requirePermission('accounting.view'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => { validateRequest(req); return successResponse(res, { entries: await accountingHistory.listHistory('expense', toInt(req.params.id)) }); }));
 
 router.get('/:id', requireExpenses, requirePermission('accounting.view'),
   [param('id').isInt({ min: 1 })],
@@ -233,12 +250,12 @@ router.patch('/:id', requireExpenses, requirePermission('accounting.manage'),
   [param('id').isInt({ min: 1 })],
   handleAsync(async (req, res) => {
     validateRequest(req);
-    const expense = await expenseService.updateExpense(toInt(req.params.id), req.body, req.admin.id, { receiptPath: req.file ? req.file.path : null });
+    const expense = await expenseService.updateExpense(toInt(req.params.id), req.body, req.admin.id, { receiptPath: req.file ? toStoredPath(req.file.path) : null });
     return successResponse(res, { expense });
   }));
 
 // Add an expense onto a client invoice -> marks it invoiced (locks editing).
-router.post('/:id/invoice', requireExpenses, requirePermission('accounting.manage'),
+router.post('/:id/invoice', requireExpenses, requirePermission(['accounting.manage', 'bills.manage'], { requireAll: true }),
   [param('id').isInt({ min: 1 }), body('customerAccountId').isInt({ min: 1 }),
     body('eventId').optional({ nullable: true }).isInt({ min: 1 }), body('contractId').optional({ nullable: true }).isInt({ min: 1 }),
     body('markupType').optional().isIn(expenseService.MARKUP_TYPES)],

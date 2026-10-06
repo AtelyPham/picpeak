@@ -29,35 +29,41 @@ const {
   EXTENSION_TO_MIME
 } = require('../services/uploadSettings');
 const { resolvePhotoContentType } = require('../utils/photoContentType');
+const { IS_VIDEO_SQL, IS_PHOTO_SQL } = require('../utils/mediaTypeSql');
+const { captureDateOrderSql } = require('../utils/captureDateSql');
 const { processUploadedPhotos } = require('../services/photoProcessor');
 const chunkedUpload = require('../services/chunkedUploadService');
 const watermarkGeneratorService = require('../services/watermarkGeneratorService');
 const downloadZipService = require('../services/downloadZipService');
 const { findReplacementCandidate, replacePhoto } = require('../services/photoReplacementService');
-const { requireEventOwnership } = require('../middleware/ownership');
+const { requireEventOwnership, canAccessEvent } = require('../middleware/ownership');
 const { getStorage } = require('../services/storage');
 const { errorResponse } = require('../utils/routeHelpers');
 const logger = require('../utils/logger');
 const router = express.Router();
 
+// Filename order for the photo list: digit runs compare as numbers.
+const NATURAL_NAME_ORDER = new Intl.Collator('en', { numeric: true });
+
 // Get storage path from environment or default
-const getStoragePath = () => process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
+const { getStoragePath } = require('../config/storage');
 
-// Resolve a numeric category id within the scope of one event: it must belong
-// to that event or be a global category (#500 / #525 — the same contract the
-// public v1 upload route enforces). Returns undefined for an out-of-scope id,
-// which every caller turns into a 400 rather than silently filing the photo
-// under another event's category.
-const findScopedCategory = (eventId, categoryId) => db('photo_categories')
-  .where({ id: categoryId })
-  .andWhere(function () {
-    this.where({ event_id: eventId }).orWhere('is_global', true);
-  })
-  .first();
+// Category ids are resolved within one event's scope (#500 / #525); shared
+// with the gallery upload route.
+const { outOfScopeCategoryError, resolveCategoryAssignment } = require('../utils/categoryScope');
+const { parseBooleanInput } = require('../utils/parsers');
+const { resolveUploadPlacement, placementColumns, afterUploadPlacement } = require('../services/uploadPlacement');
 
-const outOfScopeCategoryError = (categoryId) => ({
-  error: `Unknown or out-of-scope category_id ${categoryId}`
-});
+/** `folder_id` from a request as a photo column: a folder of this event, or null for the root. */
+async function folderIdUpdate(eventId, raw) {
+  const id = parseInt(raw, 10);
+  if (raw === null || raw === undefined || raw === '' || !(id > 0)) return { folder_id: null };
+  const folder = await require('../services/folderTreeService').findEventFolder(eventId, id);
+  if (!folder) return { error: `Unknown folder_id ${id}` };
+  return { folder_id: id };
+}
+const { photoCapOf, countEventPhotos } = require('../services/photoCap');
+const { manualCreditFields, CREDIT_NONE } = require('../services/photoCredit');
 
 // Configure multer for file uploads
 // IMPORTANT: Using synchronous functions to prevent file corruption
@@ -93,7 +99,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const { validateFileType, createFileUploadValidator } = require('../utils/fileSecurityUtils');
+const { validateFileType, createFileUploadValidator, normalizeUploadMimeType, isRawUploadFilename } = require('../utils/fileSecurityUtils');
 
 // Create a multer instance that uses dynamically resolved allowed MIME types.
 // The allowed types are fetched from the database once per request (before multer
@@ -105,13 +111,21 @@ const { validateFileType, createFileUploadValidator } = require('../utils/fileSe
 // was hardcoded to 10GB here, which meant the advertised "max. 50MB per file"
 // in the dropzone was never enforced anywhere server-side. getMaxFileSizeBytes()
 // clamps to MAX_ALLOWED_FILE_SIZE_MB (10GB), so that hard ceiling still applies.
-const createUpload = (maxFileSizeBytes) => multer({
+//
+// The handler reads three short text fields (category_id, replace_by_name,
+// match_mode). Busboy buffers every text part in memory before the handler
+// runs, so without `fields`/`fieldSize`/`parts` sized to that a caller with
+// photos.upload could send thousands of multi-megabyte text parts and hold
+// them all on the heap.
+const UPLOAD_TEXT_FIELDS = 5;
+const createUpload = (maxFileSizeBytes, maxFiles) => multer({
   storage: storage,
   limits: {
     fileSize: maxFileSizeBytes,
-    files: 2000, // Hard safety ceiling; actual limit enforced dynamically
-    fieldSize: 10 * 1024 * 1024, // 10MB for non-file fields
-    parts: 10000,
+    files: maxFiles,
+    fields: UPLOAD_TEXT_FIELDS,
+    fieldSize: 1024,
+    parts: maxFiles + UPLOAD_TEXT_FIELDS,
     headerPairs: 2000,
     // CVE-2026-82333: files arrive as repeated `photos` parts via
     // multer's own .array('photos', N) — not bracket-indexed field names
@@ -122,6 +136,9 @@ const createUpload = (maxFileSizeBytes) => multer({
   fileFilter: (req, file, cb) => {
     // req.allowedMimeTypes is populated by the middleware that runs before multer
     const allowedMimeTypes = req.allowedMimeTypes || ['image/jpeg', 'image/png', 'image/webp'];
+    // Assigned, not just compared: multer copies this object into req.files,
+    // so the content validator and the stored mime_type see the canonical type.
+    file.mimetype = normalizeUploadMimeType(file.originalname, file.mimetype);
 
     if (validateFileType(file.originalname, file.mimetype, allowedMimeTypes)) {
       return cb(null, true);
@@ -232,7 +249,7 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
   const multerLimitBytes = Math.max(maxFileSizeBytes, maxVideoSizeBytes);
   const maxFileSizeMb = Math.floor(multerLimitBytes / (1024 * 1024));
 
-  createUpload(multerLimitBytes).array('photos', maxFilesPerUpload)(req, res, (err) => {
+  createUpload(multerLimitBytes, maxFilesPerUpload).array('photos', maxFilesPerUpload)(req, res, (err) => {
     if (err) {
       logger.error('Multer error:', err);
       if (err instanceof multer.MulterError) {
@@ -264,7 +281,7 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
     const matchMode = match_mode === 'number_token' ? 'number_token' : 'exact';
 
     logger.info('Upload request received for event:', eventId);
-    logger.info('Body:', req.body);
+    logger.info('Body fields:', Object.keys(req.body || {}));
     logger.info('Files:', req.files ? req.files.length : 'none');
     logger.info('File details:', req.files?.map(f => ({ name: f.originalname, size: f.size, mimetype: f.mimetype })));
     logger.info('Category ID received:', category_id);
@@ -323,11 +340,14 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
     // admin upload silently accepts any category id including ones that
     // belong to a different event. The v1 route rejects out-of-scope ids
     // with 400; mirror that here so admin and v1 stay consistent.
+    // Folder, folder request and first-look flag of this batch (issues 1786,
+    // 1562); also maps a folder sent as category_id onto folder_id.
+    const { placement, category: resolvedCategory, error: placementError } = await resolveUploadPlacement(event.id, req.body);
+    if (placementError) {
+      return res.status(400).json(placementError);
+    }
     if (parsedCategoryId && !isNaN(parsedCategoryId)) {
-      const category = await findScopedCategory(event.id, parsedCategoryId);
-      if (!category) {
-        return res.status(400).json(outOfScopeCategoryError(parsedCategoryId));
-      }
+      const category = resolvedCategory;
       categoryName = category.slug || category.name.toLowerCase().replace(/\s+/g, '_');
       // Use category slug for type determination
       if (category.slug === 'collage' || category.slug === 'collages') {
@@ -367,7 +387,7 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
             capabilityEvidence(res, 'photo_replacement');
             acceptedUpload(res, {
               video: isVideoMimeType(file.mimetype),
-              raw: path.extname(file.originalname).toLowerCase() === '.dng',
+              raw: isRawUploadFilename(file.originalname),
               s3: process.env.STORAGE_BACKEND === 's3'
             });
             replacedPhotos.push({
@@ -473,24 +493,29 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
             path: relativePath,
             thumbnail_path: null,
             type: photoType,
-            category_id: parsedCategoryId,
+            ...placementColumns(placement),
             size_bytes: tempStats.size,
             captured_at: null,
             media_type: isVideo ? 'video' : 'image',
             mime_type: file.mimetype,
             processing_status: 'pending',
             upload_id: uploadId,
+            // Explicit rather than the column default (#1561); the worker
+            // reads the EXIF credit for admin rows.
+            uploaded_by: 'admin',
           })
           .returning('id');
         const photoId = inserted[0]?.id || inserted[0];
 
-        acceptedUpload(res, { video: isVideo, raw: extension.toLowerCase() === '.dng', s3: process.env.STORAGE_BACKEND === 's3' });
+        acceptedUpload(res, { video: isVideo, raw: isRawUploadFilename(file.originalname), s3: process.env.STORAGE_BACKEND === 's3' });
 
         uploadedPhotos.push({
           id: photoId,
           filename: newFilename,
           size: tempStats.size,
-          category_id: parsedCategoryId,
+          category_id: placement.category_id,
+          folder_id: placement.folder_id,
+          media_type: isVideo ? 'video' : 'image',
         });
       } catch (err) {
         logger.error(`Error queuing file ${file.originalname}:`, err);
@@ -499,11 +524,23 @@ router.post('/:eventId/upload', adminAuth, requirePermission('photos.upload'), r
     }
     
     // Log activity
+    // The type split lets the activity line say "2 videos" instead of
+    // "2 photos" for a video upload (issue 1430, item 3).
+    const videoCount = uploadedPhotos.filter((p) => p.media_type === 'video').length;
     await logActivity('photos_uploaded',
-      { count: uploadedPhotos.length, replacedCount: replacedPhotos.length, eventName: event.event_name },
+      {
+        count: uploadedPhotos.length,
+        photoCount: uploadedPhotos.length - videoCount,
+        videoCount,
+        replacedCount: replacedPhotos.length,
+        eventName: event.event_name,
+      },
       eventId,
       { type: 'admin', id: req.admin.id, name: req.admin.username }
     );
+
+    await afterUploadPlacement(eventId, placement, uploadedPhotos.length,
+      { type: 'admin', id: req.admin.id, name: req.admin.username });
 
     // Log individual replacements for audit trail
     for (const rp of replacedPhotos) {
@@ -577,12 +614,10 @@ async function loadUploadGroup(req, res) {
   }
 
   const eventId = photos[0].event_id;
-  let eventQuery = db('events').where('id', eventId);
-  if (req.admin.roleName === 'editor') {
-    eventQuery = eventQuery.where('created_by', req.admin.id);
-  }
-  const event = await eventQuery.first();
-  if (!event) {
+  // Upload status lists the event's photo filenames, so it follows the same
+  // rule as the photo routes: 404 unless the admin can act on the event.
+  const event = await db('events').where('id', eventId).first();
+  if (!event || !canAccessEvent(req.admin, event)) {
     res.status(404).json({ error: 'Event not found' });
     return null;
   }
@@ -703,21 +738,21 @@ router.post(
       const photo = await db('photos').where({ id: req.params.photoId }).first();
       if (!photo) return res.status(404).json({ error: 'Photo not found' });
 
-      // Ownership scope: any non-super_admin may only retry photos in events
-      // they own — matching requireEventOwnership (which scopes both the
-      // admin and editor roles; only super_admin bypasses). Previously this
-      // checked the editor role alone, leaving admin-role users able to
+      // Ownership: the rule requireEventOwnership enforces, which can't run
+      // here because the route is keyed by photo, not by event. Previously
+      // this checked the editor role alone, leaving admin-role users able to
       // reprocess another admin's photos.
-      if (req.admin.roleName !== 'super_admin') {
-        const event = await db('events')
-          .where({ id: photo.event_id })
-          .first();
-        if (event && event.created_by && event.created_by !== req.admin.id) {
-          return res.status(404).json({ error: 'Photo not found' });
-        }
+      const event = await db('events').where({ id: photo.event_id }).first();
+      if (event && !canAccessEvent(req.admin, event)) {
+        return res.status(404).json({ error: 'Photo not found' });
       }
 
-      if (photo.processing_status !== 'failed') {
+      // 'failed', or complete with a note: a video that got the placeholder
+      // tile is a usable row whose poster frame is still owed (issue 1430,
+      // item 6). Anything else is in flight or has nothing to redo.
+      const retryable = photo.processing_status === 'failed'
+        || ((photo.processing_status || 'complete') === 'complete' && !!photo.processing_error);
+      if (!retryable) {
         return res.status(409).json({
           error: `Photo is in '${photo.processing_status}' state and cannot be retried`,
         });
@@ -778,6 +813,10 @@ router.delete('/:eventId/photos/:photoId', adminAuth, requirePermission('photos.
     // orphaned files into previews/ that no DB row references.
     if (photo.preview_path) {
       await storage.delete(photo.preview_path).catch(() => {});
+    }
+    // Browser-playable video copy (issue 1430): derived, same semantics.
+    if (photo.web_path) {
+      await storage.delete(photo.web_path).catch(() => {});
     }
     // Outside the preview_path guard on purpose: a responsive tier (#1095) can
     // exist when the canonical rendition never did — they are generated
@@ -914,6 +953,8 @@ router.patch('/:eventId/photos/:photoId', adminAuth, requirePermission('photos.e
     if (category_id === 'individual' || category_id === 'collage') {
       updateData.type = category_id;
       updateData.category_id = null; // Clear legacy category_id
+    } else if (category_id === undefined && Object.prototype.hasOwnProperty.call(req.body, 'folder_id')) {
+      // A folder move alone (issue 1786) leaves the filter category alone.
     } else if (category_id === null || category_id === undefined) {
       // Explicitly clear category
       updateData.category_id = null;
@@ -931,14 +972,25 @@ router.patch('/:eventId/photos/:photoId', adminAuth, requirePermission('photos.e
         // Same scope check the upload route runs: without it any positive id
         // was accepted, so a photo could be moved into another event's
         // category (the grid then never shows it under any filter).
-        const category = await findScopedCategory(parseInt(eventId, 10), numericCategoryId);
-        if (!category) {
+        const assignment = await resolveCategoryAssignment(parseInt(eventId, 10), numericCategoryId);
+        if (!assignment) {
           return res.status(400).json(outOfScopeCategoryError(numericCategoryId));
         }
-        updateData.category_id = numericCategoryId;
+        // A folder sent as category_id (pre-migration-265 client) moves the
+        // photo into that folder and leaves its filter category alone.
+        if (assignment.folder_id) updateData.folder_id = assignment.folder_id;
+        else updateData.category_id = numericCategoryId;
       } else {
         updateData.category_id = null;
       }
+    }
+
+    // Folder (issue 1786): null/0 = gallery root.
+    if (Object.prototype.hasOwnProperty.call(req.body, 'folder_id')) {
+      const folderUpdate = await folderIdUpdate(parseInt(eventId, 10), req.body.folder_id);
+      if (folderUpdate.error) return res.status(400).json({ error: folderUpdate.error });
+      updateData.folder_id = folderUpdate.folder_id;
+      updateData.pending_folder_request_id = null;
     }
 
     // A human just set (or cleared) this category, so it is no longer an
@@ -958,6 +1010,7 @@ router.patch('/:eventId/photos/:photoId', adminAuth, requirePermission('photos.e
     // photos added in between (codex review).
     if (updateData.visibility !== undefined
         || Object.prototype.hasOwnProperty.call(updateData, 'category_id')
+        || Object.prototype.hasOwnProperty.call(updateData, 'folder_id')
         || Object.prototype.hasOwnProperty.call(updateData, 'type')) {
       downloadZipService.invalidate(parseInt(eventId, 10));
     }
@@ -1017,6 +1070,9 @@ router.post('/:eventId/photos/bulk-delete', adminAuth, requirePermission('photos
       // Lightbox preview tier (#492) — bulk delete cleanup.
       if (photo.preview_path) {
         await storage.delete(photo.preview_path).catch(() => {});
+      }
+      if (photo.web_path) {
+        await storage.delete(photo.web_path).catch(() => {});
       }
       // Outside the guard: a tier can exist when the canonical rendition never
       // did, so keying cleanup off preview_path would strand phone-only photos.
@@ -1123,11 +1179,12 @@ router.post('/:eventId/photos/bulk-update', adminAuth, requirePermission('photos
         const numericCategoryId = parseInt(updates.category_id, 10);
         if (numericCategoryId > 0) {
           // Scope check, as on the PATCH and upload routes above.
-          const category = await findScopedCategory(parseInt(eventId, 10), numericCategoryId);
-          if (!category) {
+          const assignment = await resolveCategoryAssignment(parseInt(eventId, 10), numericCategoryId);
+          if (!assignment) {
             return res.status(400).json(outOfScopeCategoryError(numericCategoryId));
           }
-          updateData.category_id = numericCategoryId;
+          if (assignment.folder_id) updateData.folder_id = assignment.folder_id;
+          else updateData.category_id = numericCategoryId;
         } else {
           updateData.category_id = null;
         }
@@ -1140,6 +1197,28 @@ router.post('/:eventId/photos/bulk-update', adminAuth, requirePermission('photos
       updateData.auto_categorized = false;
     }
 
+    // Folder (issue 1786): move many photos at once; null/0 = gallery root.
+    if (Object.prototype.hasOwnProperty.call(updates, 'folder_id')) {
+      const folderUpdate = await folderIdUpdate(parseInt(eventId, 10), updates.folder_id);
+      if (folderUpdate.error) return res.status(400).json({ error: folderUpdate.error });
+      updateData.folder_id = folderUpdate.folder_id;
+      updateData.pending_folder_request_id = null;
+    }
+
+    // Credit (#1561): correct or clear a name on many photos at once — the
+    // joke name a guest used on 40 uploads is the case this exists for.
+    if (Object.prototype.hasOwnProperty.call(updates, 'credit_name')) {
+      const creditFields = manualCreditFields(updates.credit_name);
+      if (creditFields.error) {
+        return res.status(400).json({ error: creditFields.error });
+      }
+      Object.assign(updateData, creditFields);
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No updates provided' });
+    }
+
     await db('photos')
       .whereIn('id', photoIds)
       .where('event_id', eventId)
@@ -1149,6 +1228,7 @@ router.post('/:eventId/photos/bulk-update', adminAuth, requirePermission('photos
     // cached ZIP so it rebuilds fresh (codex review).
     if (updateData.visibility !== undefined
         || Object.prototype.hasOwnProperty.call(updateData, 'category_id')
+        || Object.prototype.hasOwnProperty.call(updateData, 'folder_id')
         || Object.prototype.hasOwnProperty.call(updateData, 'type')) {
       downloadZipService.invalidate(parseInt(eventId, 10));
     }
@@ -1156,6 +1236,57 @@ router.post('/:eventId/photos/bulk-update', adminAuth, requirePermission('photos
     res.json({ message: `${photoIds.length} photos updated successfully` });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to update photos');
+  }
+});
+
+// Photo credits (#1561) — the names on this event's photos with their counts,
+// for the grid's filter. `none` counts the photos without a name.
+router.get('/:eventId/photos/credits', adminAuth, requirePermission('photos.view'), requireEventOwnership, async (req, res) => {
+  try {
+    const eventId = parseInt(req.params.eventId, 10);
+    const rows = await db('photos')
+      .where('event_id', eventId)
+      .whereNotNull('credit_name')
+      .groupBy('credit_name')
+      .select('credit_name')
+      .count('id as count')
+      .orderBy('credit_name', 'asc');
+    const none = await db('photos')
+      .where('event_id', eventId)
+      .whereNull('credit_name')
+      .count('id as count')
+      .first();
+    res.json({
+      credits: rows.map((r) => ({ name: r.credit_name, count: Number(r.count) })),
+      none: Number(none?.count || 0),
+    });
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to load photo credits');
+  }
+});
+
+// Correct or clear one photo's credit (#1561). Its own route rather than a
+// field on PATCH /photos/:photoId, which clears the category of any request
+// that leaves category_id out.
+router.put('/:eventId/photos/:photoId/credit', adminAuth, requirePermission('photos.edit'), requireEventOwnership, async (req, res) => {
+  try {
+    const { eventId, photoId } = req.params;
+    const creditFields = manualCreditFields(req.body?.credit_name);
+    if (creditFields.error) {
+      return res.status(400).json({ error: creditFields.error });
+    }
+    const updated = await db('photos')
+      .where({ id: photoId, event_id: eventId })
+      .update(creditFields);
+    if (!updated) {
+      return res.status(404).json({ error: 'Photo not found' });
+    }
+    await logActivity('photo_credit_updated', {
+      photo_id: Number(photoId), cleared: creditFields.credit_name === null,
+    }, parseInt(eventId, 10), { type: 'admin', id: req.admin.id, name: req.admin.username });
+    res.json({ credit_name: creditFields.credit_name, credit_source: creditFields.credit_source });
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to update photo credit');
   }
 });
 
@@ -1218,7 +1349,7 @@ router.get('/:eventId/photos/:photoId/download', adminAuth, requirePermission('p
 router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requireEventOwnership, async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { category_id, type, search, sort = 'date', has_likes, has_favorites, has_comments, min_rating, color_label } = req.query;
+    const { category_id, type, media_type, search, sort = 'date', has_likes, has_favorites, has_comments, min_rating, color_label, credit } = req.query;
     const order = ['asc', 'desc'].includes(req.query.order) ? req.query.order : 'desc';
     const logic = req.query.logic === 'OR' ? 'OR' : 'AND';
 
@@ -1247,6 +1378,39 @@ router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requ
     // Keep type filter for backwards compatibility
     if (type) {
       query = query.where({ 'photos.type': type });
+    }
+
+    // Folder (issue 1786): `root` = photos in no folder, a number = the
+    // photos directly in that folder (the admin browses one level at a time,
+    // like the guest), `pending` = photos waiting for a folder request.
+    const folderParam = req.query.folder_id;
+    if (folderParam === 'root') {
+      query = query.whereNull('photos.folder_id');
+    } else if (folderParam === 'pending') {
+      query = query.whereNotNull('photos.pending_folder_request_id');
+    } else if (folderParam !== undefined && folderParam !== '') {
+      const numericFolderId = parseInt(folderParam, 10);
+      if (numericFolderId > 0) query = query.where('photos.folder_id', numericFolderId);
+    }
+
+    // Media type filter. The admin grid has sent media_type=photo|video since
+    // the filter was added, and this route never read it, so the select
+    // changed nothing. Any other value means "both".
+    if (media_type === 'video') {
+      query = query.whereRaw(IS_VIDEO_SQL);
+    } else if (media_type === 'photo') {
+      query = query.whereRaw(IS_PHOTO_SQL);
+    }
+
+    // Credit filter (#1561): an exact name, or CREDIT_NONE for the photos
+    // that carry none. Exact, not LIKE: the value comes from the names list
+    // below, and "Anna" must not also match "Annabel".
+    if (typeof credit === 'string' && credit !== '') {
+      if (credit === CREDIT_NONE) {
+        query = query.whereNull('photos.credit_name');
+      } else {
+        query = query.where('photos.credit_name', credit);
+      }
     }
 
     // Search by filename. original_filename is included because that is the
@@ -1345,15 +1509,32 @@ router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requ
       }
     }
 
-    // Sorting
-    let orderByColumn = 'photos.uploaded_at';
-    if (sort === 'name') {
-      orderByColumn = 'photos.filename';
+    // Sorting. Every branch ends on photos.id: a bulk import writes hundreds
+    // of rows inside the same second, and without a tiebreaker the order
+    // inside a tie is whatever the engine returns, which moves rows under a
+    // shift-click range from one load to the next.
+    if (sort === 'capture_date') {
+      query = query.orderByRaw(`${captureDateOrderSql(db.client.config.client)} ${order}`);
     } else if (sort === 'size') {
-      orderByColumn = 'photos.size_bytes';
+      query = query.orderBy('photos.size_bytes', order);
+    } else if (sort === 'rating') {
+      // The filter bar has always offered this and the route never read it.
+      query = query.orderByRaw(`COALESCE(photos.average_rating, 0) ${order}`);
+    } else if (sort !== 'name') {
+      query = query.orderBy('photos.uploaded_at', order);
     }
-    
-    const photos = await query.orderBy(orderByColumn, order);
+    const photos = await query.orderBy('photos.id', order);
+
+    // By name means natural order (issue 1739): IMG_2 before IMG_10, the way
+    // a file manager lists them. ORDER BY filename compares character by
+    // character, so 1, 10, 100, 2 — and a shift-click range over "1 to 20"
+    // picked up the wrong files. Sorted here rather than in SQL: the list is
+    // not paginated, and neither engine has a natural collation to ask for.
+    if (sort === 'name') {
+      const direction = order === 'asc' ? 1 : -1;
+      photos.sort((a, b) => direction
+        * (NATURAL_NAME_ORDER.compare(a.filename || '', b.filename || '') || a.id - b.id));
+    }
     
     // Get comment counts separately
     const commentCounts = await db('photo_feedback')
@@ -1391,8 +1572,13 @@ router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requ
         original_filename: photo.original_filename || null,
         // Use the correct admin photos router base for serving images
         url: `/admin/photos/${eventId}/photo/${photo.id}`,
-        // Always expose a thumbnail URL; backend will generate on demand if missing
-        thumbnail_url: `/admin/photos/${eventId}/thumbnail/${photo.id}`,
+        // Always expose a thumbnail URL; backend will generate on demand if missing.
+        // The route caches for an hour and a retried poster frame lands under
+        // the same key as the placeholder it replaces, so the URL of a tile
+        // showing the placeholder note differs from the URL once the note
+        // is gone — otherwise the browser kept the cached placeholder after
+        // a successful Retry (issue 1430, item 6).
+        thumbnail_url: `/admin/photos/${eventId}/thumbnail/${photo.id}${photo.processing_error ? '?v=note' : ''}`,
         type: photo.type,
         // Guest visibility (#172). This explicit mapper never included it,
         // so the admin grid's "Hidden" badge could never render and a photo
@@ -1401,11 +1587,27 @@ router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requ
         // Same omission: the grid's "Processing…" and "Failed"/Retry
         // placeholders read this, so neither could ever render either.
         processing_status: photo.processing_status || 'complete',
+        // Set on a complete video that shows the placeholder tile (issue
+        // 1430, item 6); the grid shows the note and offers Retry.
+        processing_error: photo.processing_error || null,
         category_id: photo.category_id || photo.type,
-        category_name: photo.pc_name || (photo.type === 'individual' ? 'Individual Photos' : 'Collages'),
+        // Only a real category has a name here. The fallback used to be the
+        // English "Individual Photos" / "Collages", which no locale could
+        // translate and which labelled a video a photo; the grid now derives
+        // the default label from category_slug and the media type.
+        category_name: photo.pc_name || null,
         category_slug: photo.pc_slug || photo.type,
+        // Folder (issue 1786) and first-look flag (issue 1562).
+        folder_id: photo.folder_id || null,
+        pending_folder_request_id: photo.pending_folder_request_id || null,
+        first_look: parseBooleanInput(photo.first_look, false),
         media_type: photo.media_type || 'image',
         mime_type: photo.mime_type || null,
+        // Browser-playable copy (issue 1430, item 8): null until the setting
+        // has queued the video. The grid shows a failed copy; the original
+        // keeps playing (or not) as before.
+        web_status: photo.web_status || null,
+        web_error: photo.web_error || null,
         width: photo.width || null,
         height: photo.height || null,
         duration: photo.duration || null,
@@ -1429,7 +1631,12 @@ router.get('/:eventId/photos', adminAuth, requirePermission('photos.view'), requ
         // column showed 0 regardless of what the DB counted. This, not
         // stale data, was why per-image downloads always displayed 0.
         view_count: photo.view_count || 0,
-        download_count: photo.download_count || 0
+        download_count: photo.download_count || 0,
+        // Photo credit (#1561). The admin always sees it, whatever the
+        // event's show-to-guests switch says.
+        credit_name: photo.credit_name || null,
+        credit_source: photo.credit_source || null,
+        uploaded_by: photo.uploaded_by === 'guest' ? 'guest' : 'admin'
       }))
     });
   } catch (error) {
@@ -1689,6 +1896,7 @@ router.post('/:eventId/chunked-upload/init', adminAuth, requirePermission('photo
       fileSize,
       mimeType,
       eventId: parseInt(eventId),
+      adminId: req.admin.id,
       totalChunks,
       // The declared fileSize check above is client-controlled; the service
       // enforces this cap on the bytes it actually receives and merges.
@@ -1697,11 +1905,23 @@ router.post('/:eventId/chunked-upload/init', adminAuth, requirePermission('photo
 
     res.json(result);
   } catch (error) {
+    // A declared size and chunk count that do not fit together is the
+    // client's mistake, and carries its own status.
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     errorResponse(res, error, 500, 'Failed to initialize upload');
   }
 });
 
 // Upload a chunk
+// Every operation below names the upload by its opaque id. requireEventOwnership
+// only proves access to the :eventId in the URL, so the service is told which
+// event and admin the call is for and answers 404 unless the upload was
+// initialised by that admin for that event — a leaked id must not let a scoped
+// admin touch another event's upload.
+const uploadOwner = (req) => ({ eventId: parseInt(req.params.eventId), adminId: req.admin.id });
+
 router.post('/:eventId/chunked-upload/:uploadId/chunk/:chunkIndex', adminAuth, requirePermission('photos.upload'), requireEventOwnership, async (req, res) => {
   try {
     const { uploadId, chunkIndex } = req.params;
@@ -1715,6 +1935,7 @@ router.post('/:eventId/chunked-upload/:uploadId/chunk/:chunkIndex', adminAuth, r
     const declaredBytes = Number(req.headers['content-length']);
     const result = await chunkedUpload.uploadChunk(uploadId, parseInt(chunkIndex), req, {
       declaredBytes: Number.isFinite(declaredBytes) ? declaredBytes : undefined,
+      owner: uploadOwner(req),
     });
 
     res.json(result);
@@ -1733,7 +1954,7 @@ router.post('/:eventId/chunked-upload/:uploadId/chunk/:chunkIndex', adminAuth, r
       return res.status(error.statusCode).json({ error: error.message });
     }
     logger.error('Error uploading chunk:', error);
-    res.status(500).json({ error: error.message || 'Failed to upload chunk' });
+    res.status(500).json({ error: 'Failed to upload chunk' });
   }
 });
 
@@ -1743,8 +1964,30 @@ router.post('/:eventId/chunked-upload/:uploadId/complete', adminAuth, requirePer
     const { eventId, uploadId } = req.params;
     const { category_id } = req.body;
 
+    // Same rules as the batch upload route: the photo cap and the category
+    // scope. Checked before the merge, so a refused upload writes nothing.
+    const event = await db('events').where({ id: eventId }).first();
+    if (!event) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+    const { placement, error: placementError } = await resolveUploadPlacement(event.id, req.body);
+    if (placementError) {
+      await chunkedUpload.abortUpload(uploadId, { owner: uploadOwner(req) }).catch(() => {});
+      return res.status(400).json(placementError);
+    }
+    const photoCap = photoCapOf(event);
+    if (photoCap) {
+      const currentCount = await countEventPhotos(event.id);
+      if (currentCount + 1 > photoCap) {
+        await chunkedUpload.abortUpload(uploadId, { owner: uploadOwner(req) }).catch(() => {});
+        return res.status(400).json({
+          error: `Photo cap exceeded. This event allows a maximum of ${photoCap} photos. Currently ${currentCount} photos exist, and you are trying to upload 1 more.`
+        });
+      }
+    }
+
     // Complete the chunked upload (merge chunks)
-    const mergedFile = await chunkedUpload.completeUpload(uploadId);
+    const mergedFile = await chunkedUpload.completeUpload(uploadId, { owner: uploadOwner(req) });
 
     // Process the merged file as a regular upload
     const fileObj = {
@@ -1754,15 +1997,20 @@ router.post('/:eventId/chunked-upload/:uploadId/complete', adminAuth, requirePer
       path: mergedFile.path
     };
 
+    // The event the upload was initialised for. The owner check above makes
+    // it the URL's event too; the stored one is authoritative regardless.
     const uploadedPhotos = await processUploadedPhotos(
       [fileObj],
-      parseInt(eventId),
+      mergedFile.eventId,
       'admin',
-      category_id || null
+      category_id || null,
+      placementColumns(placement)
     );
+    await afterUploadPlacement(mergedFile.eventId, placement, uploadedPhotos.length,
+      { type: 'admin', id: req.admin.id, name: req.admin.username });
     if (uploadedPhotos.length) acceptedUpload(res, {
       video: isVideoMimeType(fileObj.mimetype),
-      raw: path.extname(fileObj.originalname).toLowerCase() === '.dng',
+      raw: isRawUploadFilename(fileObj.originalname),
       s3: process.env.STORAGE_BACKEND === 's3'
     });
 
@@ -1785,7 +2033,7 @@ router.post('/:eventId/chunked-upload/:uploadId/complete', adminAuth, requirePer
       return res.status(error.statusCode).json({ error: error.message });
     }
     logger.error('Error completing chunked upload:', error);
-    res.status(500).json({ error: error.message || 'Failed to complete upload' });
+    res.status(500).json({ error: 'Failed to complete upload' });
   }
 });
 
@@ -1794,7 +2042,7 @@ router.get('/:eventId/chunked-upload/:uploadId/status', adminAuth, requirePermis
   try {
     const { uploadId } = req.params;
 
-    const status = chunkedUpload.getUploadStatus(uploadId);
+    const status = chunkedUpload.getUploadStatus(uploadId, { owner: uploadOwner(req) });
 
     if (!status) {
       return res.status(404).json({ error: 'Upload not found or expired' });
@@ -1811,7 +2059,10 @@ router.delete('/:eventId/chunked-upload/:uploadId', adminAuth, requirePermission
   try {
     const { uploadId } = req.params;
 
-    await chunkedUpload.abortUpload(uploadId);
+    const aborted = await chunkedUpload.abortUpload(uploadId, { owner: uploadOwner(req) });
+    if (!aborted) {
+      return res.status(404).json({ error: 'Upload not found or expired' });
+    }
 
     res.json({ success: true, message: 'Upload aborted' });
   } catch (error) {

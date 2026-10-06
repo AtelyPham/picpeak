@@ -225,7 +225,7 @@ describe('gallery upload status + cache headers (B6/B7)', () => {
         css_content: 'body { color: red; }',
         is_enabled: 1,
       }).returning('id');
-      await db('events').where({ id: eventA }).update({ css_template_id: tpl?.id ?? tpl });
+      await db('events').where({ id: eventA }).update({ css_template_id: tpl?.id ?? tpl, custom_theme_enabled: true });
 
       const cached = await request(app).get(`/api/gallery/${SLUG_A}/css-template`);
       expect(cached.status).toBe(200);

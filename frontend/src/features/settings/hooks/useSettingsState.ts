@@ -6,6 +6,7 @@ import { settingsService } from '../../../services/settings.service';
 import { adminService } from '../../../services/admin.service';
 import { useAdminAuth } from '../../../contexts';
 import { toBoolean, toNumber } from '../../../utils/parsers';
+import type { GuestNameMode } from '../../../types';
 
 const BYTES_PER_GB = 1024 * 1024 * 1024;
 export const MAX_FILES_PER_UPLOAD_LIMIT = 2000;
@@ -27,6 +28,8 @@ export interface GeneralSettings {
   /** Videos get their own per-file cap — the photo cap would otherwise
    *  block every normal clip. */
   max_video_size_mb: number;
+  /** Browser-playable H.264 copies of videos (issue 1430). Off by default. */
+  video_web_rendition: boolean;
   max_files_per_upload: number;
   allowed_file_types: string;
   // #509 — re-added after the main-into-beta merge dropped it.
@@ -129,6 +132,16 @@ export interface EventSettings {
   event_default_allow_reactions: boolean;
   event_default_allow_color_labels: boolean;
   event_default_keybind_mode: 'colors' | 'lightroom';
+  // Download limit for new events (issue 1560). 0 = unlimited.
+  event_default_download_limit: number;
+  // Uploader names for new galleries (#1561).
+  event_default_guest_name_mode: GuestNameMode;
+  event_default_show_credits_to_guests: boolean;
+  // Folders + two-stage delivery (issues 1786, 1562).
+  event_default_folder_structure: boolean;
+  event_default_delivery_days: number;
+  first_look_keyword_detection: boolean;
+  first_look_folder_keywords: string[];
   gallery_show_filter_bar: boolean;
   event_phone_field_enabled: boolean;
 }
@@ -169,6 +182,7 @@ export function useSettingsState() {
     default_expiration_days: 30,
     max_file_size_mb: 50,
     max_video_size_mb: 500,
+    video_web_rendition: false,
     max_files_per_upload: 500,
     allowed_file_types: 'jpg,jpeg,png,gif,webp',
     max_upload_batch_size_mb: 95,
@@ -237,6 +251,13 @@ export function useSettingsState() {
     event_default_allow_reactions: true,
     event_default_allow_color_labels: false,
     event_default_keybind_mode: 'colors',
+    event_default_download_limit: 0,
+    event_default_guest_name_mode: 'off',
+    event_default_show_credits_to_guests: false,
+    event_default_folder_structure: true,
+    event_default_delivery_days: 7,
+    first_look_keyword_detection: true,
+    first_look_folder_keywords: ['FirstLook', 'Sneak Peek'],
     gallery_show_filter_bar: true,
     event_phone_field_enabled: false
   });
@@ -255,11 +276,35 @@ export function useSettingsState() {
   });
 
   // Account form state
+  // What the server last sent, in draft shape, so each tab can tell whether
+  // its draft differs (SettingsSaveBar) and put it back on Discard.
+  const [loaded, setLoaded] = useState<{
+    general: GeneralSettings; security: SecuritySettings; rateLimit: RateLimitSettings;
+    analytics: AnalyticsSettings; event: EventSettings; seo: SeoSettings;
+  } | null>(null);
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const generalDirty = !!loaded && !same(generalSettings, loaded.general);
+  const securityDirty = !!loaded && (!same(securitySettings, loaded.security) || !same(rateLimitSettings, loaded.rateLimit));
+  const analyticsDirty = !!loaded && !same(analyticsSettings, loaded.analytics);
+  const eventDirty = !!loaded && !same(eventSettings, loaded.event);
+  const seoDirty = !!loaded && !same(seoSettings, loaded.seo);
+  const discardGeneral = () => { if (loaded) setGeneralSettings(loaded.general); };
+  const discardSecurity = () => { if (loaded) { setSecuritySettings(loaded.security); setRateLimitSettings(loaded.rateLimit); } };
+  const discardAnalytics = () => { if (loaded) setAnalyticsSettings(loaded.analytics); };
+  const discardEvent = () => { if (loaded) setEventSettings(loaded.event); };
+  const discardSeo = () => { if (loaded) setSeoSettings(loaded.seo); };
+
   const [accountForm, setAccountForm] = useState({
     username: '',
     email: ''
   });
   const [accountErrors, setAccountErrors] = useState<Record<string, string>>({});
+  const accountDirty = !!adminProfile && (accountForm.username !== (adminProfile.username || '') || accountForm.email !== (adminProfile.email || ''));
+  const discardAccount = () => {
+    if (!adminProfile) return;
+    setAccountForm({ username: adminProfile.username || '', email: adminProfile.email || '' });
+    setAccountErrors({});
+  };
 
   // Storage state
   const [softLimitGb, setSoftLimitGb] = useState<number | ''>('');
@@ -271,7 +316,7 @@ export function useSettingsState() {
   // Initialize settings from API
   useEffect(() => {
     if (settings) {
-      setGeneralSettings({
+      const generalLoaded: GeneralSettings = {
         site_url: settings.general_site_url_env_pinned
           ? (settings.general_site_url_effective || '')
           : (settings.general_site_url || ''),
@@ -280,6 +325,7 @@ export function useSettingsState() {
         default_expiration_days: toNumber(settings.general_default_expiration_days, 30),
         max_file_size_mb: toNumber(settings.general_max_file_size_mb, 50),
         max_video_size_mb: toNumber(settings.general_max_video_size_mb, 500),
+        video_web_rendition: toBoolean(settings.general_video_web_rendition, false),
         max_files_per_upload: Math.min(
           MAX_FILES_PER_UPLOAD_LIMIT,
           Math.max(1, toNumber(settings.general_max_files_per_upload, 500))
@@ -301,9 +347,10 @@ export function useSettingsState() {
               : settings.general_date_format)
           : { format: 'dd/MM/yyyy', locale: 'en-GB' },
         time_format: settings.general_time_format === '12h' ? '12h' : '24h'
-      });
+      };
+      setGeneralSettings(generalLoaded);
 
-      setSecuritySettings({
+      const securityLoaded: SecuritySettings = {
         password_min_length: toNumber(settings.security_password_min_length, 8),
         password_complexity: settings.security_password_complexity ?? 'moderate',
         session_timeout_minutes: toNumber(settings.security_session_timeout_minutes, 60),
@@ -314,16 +361,18 @@ export function useSettingsState() {
         recaptcha_site_key: settings.security_recaptcha_site_key ?? '',
         recaptcha_secret_key: settings.security_recaptcha_secret_key ?? '',
         gallery_password_recoverable: toBoolean(settings.security_gallery_password_recoverable, false)
-      });
+      };
+      setSecuritySettings(securityLoaded);
 
-      setRateLimitSettings({
+      const rateLimitLoaded: RateLimitSettings = {
         rate_limit_enabled: toBoolean(settings.rate_limit_enabled, true),
         rate_limit_window_minutes: toNumber(settings.rate_limit_window_minutes, 15),
         rate_limit_max_requests: toNumber(settings.rate_limit_max_requests, 300),
         rate_limit_auth_max_requests: toNumber(settings.rate_limit_auth_max_requests, 5),
         rate_limit_skip_authenticated: toBoolean(settings.rate_limit_skip_authenticated, true),
         rate_limit_public_endpoints_only: toBoolean(settings.rate_limit_public_endpoints_only, false)
-      });
+      };
+      setRateLimitSettings(rateLimitLoaded);
 
       // Tracker provider: prefer explicit setting; fall back to legacy
       // umami_enabled flag for installs that haven't picked yet (#663).
@@ -335,7 +384,7 @@ export function useSettingsState() {
         ? explicitProvider
         : (toBoolean(settings.analytics_umami_enabled, false) ? 'umami' : 'none');
 
-      setAnalyticsSettings({
+      const analyticsLoaded: AnalyticsSettings = {
         tracker_provider: provider,
         umami_enabled: toBoolean(settings.analytics_umami_enabled, false),
         umami_url: settings.analytics_umami_url || '',
@@ -346,9 +395,10 @@ export function useSettingsState() {
         rybbit_website_id: settings.analytics_rybbit_website_id || '',
         rybbit_api_key: settings.analytics_rybbit_api_key || '',
         custom_head_html: settings.analytics_custom_head_html || ''
-      });
+      };
+      setAnalyticsSettings(analyticsLoaded);
 
-      setEventSettings({
+      const eventLoaded: EventSettings = {
         event_require_customer_name: toBoolean(settings.event_require_customer_name, true),
         event_require_customer_email: toBoolean(settings.event_require_customer_email, true),
         event_require_admin_email: toBoolean(settings.event_require_admin_email, true),
@@ -365,11 +415,29 @@ export function useSettingsState() {
         event_default_allow_reactions: toBoolean(settings.event_default_allow_reactions, true),
         event_default_allow_color_labels: toBoolean(settings.event_default_allow_color_labels, false),
         event_default_keybind_mode: settings.event_default_keybind_mode === 'lightroom' ? 'lightroom' : 'colors',
+        event_default_download_limit: Number(settings.event_default_download_limit) > 0
+          ? Number(settings.event_default_download_limit)
+          : 0,
+        event_default_guest_name_mode: ['optional', 'required'].includes(settings.event_default_guest_name_mode)
+          ? settings.event_default_guest_name_mode
+          : 'off',
+        event_default_show_credits_to_guests: toBoolean(settings.event_default_show_credits_to_guests, false),
+        // Fallbacks mirror the backend (eventCreationService, deliveryService,
+        // folderTreeService.getFirstLookKeywords).
+        event_default_folder_structure: toBoolean(settings.event_default_folder_structure, true),
+        event_default_delivery_days: Number(settings.event_default_delivery_days) > 0
+          ? Number(settings.event_default_delivery_days)
+          : 7,
+        first_look_keyword_detection: toBoolean(settings.first_look_keyword_detection, true),
+        first_look_folder_keywords: Array.isArray(settings.first_look_folder_keywords)
+          ? settings.first_look_folder_keywords.map(String)
+          : ['FirstLook', 'Sneak Peek'],
         gallery_show_filter_bar: toBoolean(settings.gallery_show_filter_bar, true),
         event_phone_field_enabled: toBoolean(settings.event_phone_field_enabled, false)
-      });
+      };
+      setEventSettings(eventLoaded);
 
-      setSeoSettings({
+      const seoLoaded: SeoSettings = {
         allow_indexing: toBoolean(settings.seo_allow_indexing, false),
         block_ai_crawlers: toBoolean(settings.seo_block_ai_crawlers, true),
         block_social_bots: toBoolean(settings.seo_block_social_bots, false),
@@ -379,7 +447,9 @@ export function useSettingsState() {
         meta_nofollow: toBoolean(settings.seo_meta_nofollow, false),
         meta_noai: toBoolean(settings.seo_meta_noai, true),
         sitemap_url: settings.seo_sitemap_url || ''
-      });
+      };
+      setSeoSettings(seoLoaded);
+      setLoaded({ general: generalLoaded, security: securityLoaded, rateLimit: rateLimitLoaded, analytics: analyticsLoaded, event: eventLoaded, seo: seoLoaded });
     }
   }, [settings]);
 
@@ -614,8 +684,8 @@ export function useSettingsState() {
     }
   };
 
-  const handleAccountSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const handleAccountSubmit = (event?: React.FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
 
     if (updateAdminProfileMutation.isPending) return;
 
@@ -703,6 +773,9 @@ export function useSettingsState() {
   };
 
   return {
+    generalDirty, securityDirty, analyticsDirty, eventDirty, seoDirty,
+    discardGeneral, discardSecurity, discardAnalytics, discardEvent, discardSeo,
+    accountDirty, discardAccount,
     // Loading states
     isLoading,
     adminProfileLoading,

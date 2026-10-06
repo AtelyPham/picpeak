@@ -20,6 +20,12 @@ interface ProjectSelectProps {
   label?: string;
   /** Restrict the list to a single customer's projects when set. */
   customerAccountId?: number | null;
+  /**
+   * With customerAccountId: leave out projects that have no customer as
+   * well. For links the server checks against that customer (customer
+   * documents), where a customer-less project is refused with a 400.
+   */
+  strictCustomer?: boolean;
   disabled?: boolean;
   className?: string;
 }
@@ -29,6 +35,7 @@ export const ProjectSelect: React.FC<ProjectSelectProps> = ({
   onChange,
   label,
   customerAccountId,
+  strictCustomer = false,
   disabled,
   className,
 }) => {
@@ -46,21 +53,24 @@ export const ProjectSelect: React.FC<ProjectSelectProps> = ({
   if (!flags.projects) return null;
 
   const options = (projects || []).filter(
-    (p) => customerAccountId == null || p.customerAccountId == null || p.customerAccountId === customerAccountId,
+    (p) => customerAccountId == null
+      || p.customerAccountId === customerAccountId
+      || (!strictCustomer && p.customerAccountId == null),
   );
 
   return (
     <div className={className}>
       {label && (
-        <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+        <label className="block text-sm font-medium text-body mb-1">
           {label}
         </label>
       )}
       <select
+        aria-label={label}
         value={value ?? ''}
         disabled={disabled || isLoading}
         onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}
-        className="w-full rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-3 py-2 text-sm text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-60"
+        className="w-full rounded-md border border-line-strong bg-panel px-3 py-2 text-sm text-heading focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-60"
       >
         <option value="">{t('projects.picker.none', 'No project')}</option>
         {options.map((p) => (

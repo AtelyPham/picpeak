@@ -1,14 +1,19 @@
-import React, { lazy, Suspense, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 import { Outlet, Navigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 
 import { useAdminAuth } from '../../contexts';
 import { FeatureFlagsProvider } from '../../contexts/FeatureFlagsContext';
+import { UploadSessionProvider } from '../../contexts/UploadSessionContext';
+import { UploadProgressBar } from './UploadProgressBar';
+import { UnsavedChangesProvider } from '../../contexts/UnsavedChangesContext';
 import { useSessionTimeout } from '../../hooks/useSessionTimeout';
 import { AdminSidebar } from './AdminSidebar';
 import { AdminHeader } from './AdminHeader';
 import { MaintenanceBanner } from './MaintenanceBanner';
-import { MigrationBanner } from './MigrationBanner';
 import { MandatoryPasswordChangeModal } from './MandatoryPasswordChangeModal';
+import { CommandPalette } from './CommandPalette';
+import { BottomBarSlotContext } from './bottomBarSlot';
 
 const SIDEBAR_COLLAPSED_KEY = 'admin-sidebar-collapsed';
 const ProductUsageNotice = lazy(() => import('./ProductUsageNotice'));
@@ -34,7 +39,7 @@ export const AdminLayout: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 flex items-center justify-center">
+      <div className="min-h-screen bg-canvas flex items-center justify-center">
         <div className="text-center">
           <div className="w-16 h-16 border-4 border-accent-dark border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-neutral-600">Loading...</p>
@@ -53,13 +58,22 @@ export const AdminLayout: React.FC = () => {
   // /api/admin/feature-flags has a session cookie attached.
   return (
     <FeatureFlagsProvider>
-      <AdminLayoutInner
-        sidebarOpen={sidebarOpen}
-        setSidebarOpen={setSidebarOpen}
-        sidebarCollapsed={sidebarCollapsed}
-        setSidebarCollapsed={setSidebarCollapsed}
-        mustChangePassword={mustChangePassword}
-      />
+      {/* Photo uploads run here, above the page, so the upload modal can close
+          as soon as an upload starts and the bar survives navigating within
+          the admin. Settings forms register their dirty state in
+          UnsavedChangesProvider; the sidebar and header ask before navigating
+          away from unsaved edits. */}
+      <UploadSessionProvider>
+        <UnsavedChangesProvider>
+          <AdminLayoutInner
+            sidebarOpen={sidebarOpen}
+            setSidebarOpen={setSidebarOpen}
+            sidebarCollapsed={sidebarCollapsed}
+            setSidebarCollapsed={setSidebarCollapsed}
+            mustChangePassword={mustChangePassword}
+          />
+        </UnsavedChangesProvider>
+      </UploadSessionProvider>
     </FeatureFlagsProvider>
   );
 };
@@ -73,6 +87,37 @@ interface AdminLayoutInnerProps {
 }
 
 const AdminLayoutInner: React.FC<AdminLayoutInnerProps> = ({ sidebarOpen, setSidebarOpen, sidebarCollapsed, setSidebarCollapsed, mustChangePassword }) => {
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [bottomBarSlot, setBottomBarSlot] = useState<HTMLDivElement | null>(null);
+  const { t } = useTranslation();
+
+  // Cmd+K on a Mac, Ctrl+K everywhere else. NOT "either modifier": Ctrl+K on
+  // macOS is kill-to-end-of-line in every text field, and claiming it would
+  // take a working editing key away from anyone typing in the admin. Shift and
+  // Alt disqualify too, so Cmd+Shift+K stays free for whatever else wants it.
+  //
+  // Registered on the layout rather than inside the palette so the listener
+  // exists whether or not the palette is mounted, and is torn down with the
+  // admin shell. Suppressed while the mandatory password change is up:
+  // nothing else is reachable then.
+  useEffect(() => {
+    if (mustChangePassword) return;
+    // `navigator.platform` is deprecated; an empty value simply falls through
+    // to the Ctrl branch, which is the safe default on anything non-Apple.
+    const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '');
+    const onKeyDown = (e: KeyboardEvent) => {
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      // The OTHER modifier disqualifies too, so Ctrl+Cmd+K stays free.
+      const other = isMac ? e.ctrlKey : e.metaKey;
+      if (mod && !other && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [mustChangePassword]);
+
   return (
     // Explicit text colour on the admin shell: the branding theme sets
     // --color-text on <html> app-wide (GlobalThemeProvider applies it on every
@@ -80,9 +125,11 @@ const AdminLayoutInner: React.FC<AdminLayoutInnerProps> = ({ sidebarOpen, setSid
     // colour class inherited it through `body { color: var(--color-text) }` and
     // rendered near-invisible on a dark-toned theme. Components with an
     // explicit class or `text-theme` still win over this.
-    <div className="h-screen bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 flex overflow-hidden">
+    <div className="h-screen bg-canvas text-heading flex overflow-hidden">
       {/* Mandatory Password Change Modal */}
       {mustChangePassword && <MandatoryPasswordChangeModal />}
+
+      <CommandPalette isOpen={paletteOpen && !mustChangePassword} onClose={() => setPaletteOpen(false)} />
       
       {/* Mobile sidebar backdrop */}
       {sidebarOpen && (
@@ -117,16 +164,15 @@ const AdminLayoutInner: React.FC<AdminLayoutInnerProps> = ({ sidebarOpen, setSid
       >
         {/* Header - disabled when password change required */}
         <div className={mustChangePassword ? 'pointer-events-none opacity-50' : ''}>
-          <AdminHeader onMenuClick={() => setSidebarOpen(true)} />
+          <AdminHeader onMenuClick={() => setSidebarOpen(true)} onOpenSearch={() => setPaletteOpen(true)} />
         </div>
 
         {/* Maintenance mode banner */}
         <MaintenanceBanner />
 
-        {/* One-time migration banner — flip the constant in MigrationBanner.tsx
-            (or remove this mount) after operators have had time to update their
-            docker-compose.yml. See #669. */}
-        <MigrationBanner />
+        {/* Live upload progress, sticky under the header */}
+        <UploadProgressBar />
+
         {!mustChangePassword && <Suspense fallback={null}><ProductUsageNotice /></Suspense>}
         {!mustChangePassword && <Suspense fallback={null}><UsageReportingPrompt /></Suspense>}
 
@@ -134,9 +180,20 @@ const AdminLayoutInner: React.FC<AdminLayoutInnerProps> = ({ sidebarOpen, setSid
             overflow moved up to the column so the scrollbar gutter is
             reserved once at the column level (see above). main now
             just contributes its content + padding. */}
-        <main id="main-content" className={`flex-1 px-4 sm:px-6 lg:px-8 py-8 ${mustChangePassword ? 'opacity-50 pointer-events-none' : ''}`}>
-          <Outlet />
-        </main>
+        <BottomBarSlotContext.Provider value={bottomBarSlot}>
+          <main id="main-content" className={`flex-1 px-4 sm:px-6 lg:px-8 py-8 ${mustChangePassword ? 'opacity-50 pointer-events-none' : ''}`}>
+            <Outlet />
+          </main>
+        </BottomBarSlotContext.Provider>
+        {/* Bottom bars (SettingsSaveBar) render here: after a <main> that
+            fills the column, so they sit at the bottom of the window even
+            when the page is shorter than it. */}
+        <div
+          ref={setBottomBarSlot}
+          role="region"
+          aria-label={t('settings.saveBar.region', 'Save or discard changes')}
+          className={`sticky bottom-0 z-20 empty:hidden ${mustChangePassword ? 'opacity-50 pointer-events-none' : ''}`}
+        />
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-const { secretValues, redactEmailData, redactRenderedHtml, replaceMaskedSecrets, isSecretKey } = require('../utils/emailSecretRedaction');
+const { secretValues, redactEmailData, redactRenderedHtml, replaceMaskedSecrets, isSecretKey, redactRecoveryLinks, redactRecoveryLinksInData, hasMaskedRecoveryLink } = require('../utils/emailSecretRedaction');
 const nodemailer = require('nodemailer');
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
@@ -12,6 +12,41 @@ const emailWebhookTransport = require('./emailWebhookTransport');
 // Migration 198 — the global email footer signature is read from the
 // business profile. No cycle: businessProfileService only pulls db + utils.
 const businessProfileService = require('./businessProfileService');
+const { resolveStoredPathStrict } = require('../utils/safePath');
+
+/**
+ * The file a queued attachment names, or a refusal.
+ *
+ * Every sender queues a file it wrote under the storage root (business-docs
+ * or uploads; none attaches from a temp directory), and the row carries the
+ * path the sender saw. email_queue rows travel in a .picpeak archive, so a
+ * path is placed on this install's storage root (a row queued before a
+ * restore names the old root) and checked with symlinks followed. A path
+ * outside the storage root is refused: the email fails with that reason in
+ * its queue row instead of mailing whatever file the row names.
+ *
+ * Only the realpath the check returned is handed to the transport. A file
+ * that cannot be realpath'd (missing, or a symlink whose target is not there
+ * yet) is not attached by its unchecked path: the send fails like a deleted
+ * file always did, and the retry checks it again.
+ */
+function attachmentFile(file, filename) {
+  if (!file) return file;
+  let placed;
+  try {
+    placed = resolveStoredPathStrict(file);
+  } catch (err) {
+    const refused = new Error(`Attachment "${filename || 'file'}" was refused: it is not a file under the storage directory`);
+    refused.code = 'ATTACHMENT_REFUSED';
+    throw refused;
+  }
+  if (!placed) {
+    const missing = new Error(`Attachment "${filename || 'file'}" is missing from the storage directory`);
+    missing.code = 'ATTACHMENT_MISSING';
+    throw missing;
+  }
+  return placed;
+}
 
 /**
  * The From identity for an outbound message (#1225).
@@ -365,6 +400,20 @@ function renderEmailSignatureText(signature, { brandingCompanyName, language } =
   return `\n\n--\n${lines.join('\n')}`;
 }
 
+// The branding rows below are written by `settings.edit`, a permission the
+// email templates themselves are NOT in (email.edit). So the wrapper has to
+// treat them as text, not markup: the company name is HTML-escaped where it
+// is rendered, the logo URL is escaped inside src="" and may not carry a
+// scheme other than http(s), and each colour has to match a colour grammar
+// before it is interpolated into <style>, style="" and bgcolor="".
+const { sanitizeCssColor } = require('../utils/cssSanitizer');
+
+function isUsableLogoUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  const scheme = value.match(/^\s*([a-z][a-z0-9+.-]*)\s*:/i);
+  return !scheme || ['http', 'https'].includes(scheme[1].toLowerCase());
+}
+
 // Wrap HTML body in the styled email template with header, footer, and logo
 async function wrapEmailHtml(htmlBody, subject, language = 'en') {
   // Email colour palette. The two original settings (email_primary_color and
@@ -398,20 +447,22 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
       if (!val) return fallback;
       try { return JSON.parse(val); } catch (e) { return val; }
     };
+    // A stored value that is not a colour keeps the default.
+    const readColor = (val, fallback) => sanitizeCssColor(readSetting(val, fallback)) || fallback;
 
     brandingSettings.forEach(setting => {
       const val = setting.setting_value;
       switch (setting.setting_key) {
       case 'branding_logo_url':       logoUrl = readSetting(val, logoUrl); break;
       case 'branding_company_name':   companyName = readSetting(val, companyName); break;
-      case 'email_primary_color':     primaryColor = readSetting(val, primaryColor); break;
-      case 'email_secondary_color':   secondaryColor = readSetting(val, secondaryColor); break;
-      case 'email_body_bg_color':     bodyBgColor = readSetting(val, bodyBgColor); break;
-      case 'email_container_bg_color': containerBgColor = readSetting(val, containerBgColor); break;
-      case 'email_list_bg_color':     listBgColor = readSetting(val, listBgColor); break;
-      case 'email_body_text_color':   bodyTextColor = readSetting(val, bodyTextColor); break;
-      case 'email_muted_text_color':  mutedTextColor = readSetting(val, mutedTextColor); break;
-      case 'email_button_text_color': buttonTextColor = readSetting(val, buttonTextColor); break;
+      case 'email_primary_color':     primaryColor = readColor(val, primaryColor); break;
+      case 'email_secondary_color':   secondaryColor = readColor(val, secondaryColor); break;
+      case 'email_body_bg_color':     bodyBgColor = readColor(val, bodyBgColor); break;
+      case 'email_container_bg_color': containerBgColor = readColor(val, containerBgColor); break;
+      case 'email_list_bg_color':     listBgColor = readColor(val, listBgColor); break;
+      case 'email_body_text_color':   bodyTextColor = readColor(val, bodyTextColor); break;
+      case 'email_muted_text_color':  mutedTextColor = readColor(val, mutedTextColor); break;
+      case 'email_button_text_color': buttonTextColor = readColor(val, buttonTextColor); break;
       default: break;
       }
     });
@@ -423,9 +474,13 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
 
   // Build full logo URL - ensure logoUrl is a valid non-empty string
   const frontendUrl = (await getFrontendBaseUrl()) || 'http://localhost:3000';
-  const logoPath = (typeof logoUrl === 'string' && logoUrl.trim()) ? logoUrl : '/picpeak-logo-transparent.png';
+  const logoPath = isUsableLogoUrl(logoUrl) ? logoUrl : '/picpeak-logo-transparent.png';
   const logoFullUrl = `${frontendUrl}${logoPath.startsWith('/') ? '' : '/'}${logoPath}`;
   logger.debug('Email logo URL:', { frontendUrl, logoPath, logoFullUrl });
+  // Attribute-context encodings. companyName stays raw for the signature
+  // comparison below; these are what the markup gets.
+  const logoSrc = escapeHtml(logoFullUrl);
+  const companyNameHtml = escapeHtml(companyName);
 
   // Migration 198 — global footer signature from the business profile.
   // Memoised for 60 s in the service, so a queue tick sending ten mails
@@ -454,7 +509,7 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${subject}</title>
+  <title>${escapeHtml(subject)}</title>
   <style>
     body {
       margin: 0;
@@ -570,7 +625,7 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
         <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" class="email-container" style="width:100%;max-width:600px;background-color:${containerBgColor};border-radius:8px;overflow:hidden;">
           <tr>
             <td align="center" bgcolor="${primaryColor}" class="email-header" style="background-color:${primaryColor};padding:30px;text-align:center;">
-              <img src="${logoFullUrl}" alt="${companyName}" width="180" class="logo" style="max-width:180px;height:auto;display:inline-block;border:0;">
+              <img src="${logoSrc}" alt="${companyNameHtml}" width="180" class="logo" style="max-width:180px;height:auto;display:inline-block;border:0;">
             </td>
           </tr>
           <tr>
@@ -580,9 +635,9 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
           </tr>
           <tr>
             <td align="center" bgcolor="${secondaryColor}" class="email-footer" style="background-color:${secondaryColor};padding:30px;text-align:center;border-top:1px solid #eeeeee;">
-              <img src="${logoFullUrl}" alt="${companyName}" width="120" style="max-width:120px;height:auto;opacity:0.8;margin-bottom:15px;border:0;">
-              <p style="color:${mutedTextColor};font-size:14px;margin:5px 0;">${companyName}</p>${signatureHtml}
-              <p style="font-size:12px;color:#999999;margin:5px 0;">© ${year} ${companyName}. All rights reserved.</p>
+              <img src="${logoSrc}" alt="${companyNameHtml}" width="120" style="max-width:120px;height:auto;opacity:0.8;margin-bottom:15px;border:0;">
+              <p style="color:${mutedTextColor};font-size:14px;margin:5px 0;">${companyNameHtml}</p>${signatureHtml}
+              <p style="font-size:12px;color:#999999;margin:5px 0;">© ${year} ${companyNameHtml}. All rights reserved.</p>
             </td>
           </tr>
         </table>
@@ -786,6 +841,10 @@ async function processTemplate(template, variables, language = 'en') {
   if (processedVariables.expires_at) {
     processedVariables.expires_at = await formatDate(processedVariables.expires_at, language);
   }
+  // Promised completion date of a two-stage delivery (delivery_due_reminder).
+  if (processedVariables.due_date) {
+    processedVariables.due_date = await formatDate(processedVariables.due_date, language);
+  }
 
   // Format welcome message for HTML display (preserve line breaks)
   if (processedVariables.welcome_message) {
@@ -962,7 +1021,7 @@ async function sendTemplateEmail(to, templateKey, variables, { usageEligible = t
         .filter((a) => a && (a.contentPath || a.path || a.content))
         .map((a) => ({
           filename: a.filename,
-          path: a.contentPath || a.path,
+          path: attachmentFile(a.contentPath || a.path, a.filename),
           content: a.content,
           contentType: a.contentType,
         }))
@@ -1093,7 +1152,7 @@ async function sendRawEmail({ to, cc, subject, html, text, attachments, accountK
   const ccList = Array.isArray(cc) ? cc.filter(Boolean) : (cc ? [cc] : undefined);
   const atts = Array.isArray(attachments)
     ? attachments.filter((a) => a && (a.contentPath || a.path || a.content))
-      .map((a) => ({ filename: a.filename, path: a.contentPath || a.path, content: a.content, contentType: a.contentType }))
+      .map((a) => ({ filename: a.filename, path: attachmentFile(a.contentPath || a.path, a.filename), content: a.content, contentType: a.contentType }))
     : undefined;
   const mail = {
     from: `${fromName || 'picpeak'} <${fromEmail}>`,
@@ -1125,6 +1184,51 @@ async function renderQueuedEmail(templateKey, variables = {}, to = '') {
   const language = variables.__language || await getRecipientLanguage(to, variables.eventId || null);
   const { subject, htmlBody } = await processTemplate(template, variables, language);
   return { subject, html: htmlBody };
+}
+
+// Customer document notification types (customerDocumentNotifications.js,
+// #1591). Queued as soon as the triggering write commits, so the document or
+// request they report on can change state before the queue reaches the row
+// — a share undone, an upload deleted, a rejection reversed by a later
+// acceptance, a request fulfilled or cancelled. staleDocumentNotificationReason
+// re-checks the row right before send and returns why it no longer applies,
+// or null when it's still good to send. Scoped to just these types — not a
+// generic "verify relevance" hook for every email.
+const DOCUMENT_NOTIFICATION_TYPES = new Set([
+  'customer_document_shared',
+  'customer_document_uploaded_admin',
+  'customer_document_reviewed',
+  'customer_document_requested',
+  'customer_document_request_reminder',
+]);
+
+async function staleDocumentNotificationReason(emailType, emailData) {
+  if (!DOCUMENT_NOTIFICATION_TYPES.has(emailType)) return null;
+
+  if (emailType === 'customer_document_requested' || emailType === 'customer_document_request_reminder') {
+    const requestId = emailData.__requestId;
+    if (requestId == null) return null; // queued before this check existed
+    const request = await db('customer_document_requests').where({ id: requestId }).first('status');
+    if (!request || request.status !== 'open') {
+      return 'The document request was fulfilled or cancelled after this mail was queued';
+    }
+    return null;
+  }
+
+  const documentId = emailData.__documentId;
+  if (documentId == null) return null; // queued before this check existed
+  const doc = await db('customer_documents').where({ id: documentId })
+    .first('status', 'shared_at', 'unshared_at', 'deleted_at');
+  if (!doc || doc.deleted_at) {
+    return 'The document was deleted after this mail was queued';
+  }
+  if (emailType === 'customer_document_shared' && !(doc.shared_at && !doc.unshared_at)) {
+    return 'The document was unshared after this mail was queued';
+  }
+  if (emailType === 'customer_document_reviewed' && doc.status !== 'rejected') {
+    return 'The document was reviewed again after this mail was queued';
+  }
+  return null;
 }
 
 // Process email queue.
@@ -1211,9 +1315,13 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
       // schedule and the retry cap: the admin is forcing a retry, typically
       // right after fixing SMTP. Without this, emails that failed 3× during
       // an SMTP outage are stuck "pending" forever with no way to resend.
+      // Oldest effective time first. scheduled_at is NULL for mail that goes
+      // out at once (issue 1670), and Postgres sorts NULL last on ASC where
+      // SQLite sorts it first — either would let one kind starve the other
+      // under a full batch. COALESCE puts every row at the time it became due.
       pendingEmails = await query
-        .orderBy('scheduled_at', 'asc')
-        .orderBy('created_at', 'asc')
+        .orderByRaw('COALESCE(scheduled_at, created_at) ASC')
+        .orderBy('id', 'asc')
         .limit(limit);
     } catch (dbError) {
       logger.error('Failed to query email queue:', dbError);
@@ -1248,6 +1356,20 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
         // the template say "not shown" instead of mailing the mask.
         emailData = replaceMaskedSecrets(emailData);
 
+        // An invitation or password-reset link is scrubbed once its mail is
+        // out, so a re-queued copy would mail a dead link. Refuse it here, the
+        // one place every requeue path passes, instead of sending it.
+        if (hasMaskedRecoveryLink(emailData)) {
+          // Status-guarded: a row cancelled since the batch was fetched
+          // (e.g. a customer erasure, issue 1593) must stay cancelled.
+          await db('email_queue').where({ id: email.id, status: 'pending' }).update({
+            status: 'failed',
+            error_message: 'This invitation or password-reset email cannot be sent again: its link is not kept after sending. Send a new invitation or password reset instead.',
+          });
+          result.failed += 1;
+          continue;
+        }
+
         // Language is resolved from emailData.eventId (event.language is the top
         // priority). queueEmail injects it, but direct email_queue inserts (e.g.
         // the gallery-publish notification) only set the event_id COLUMN — so
@@ -1255,6 +1377,23 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
         // recipient language from the event consistently.
         if (emailData.eventId == null && email.event_id != null) {
           emailData.eventId = email.event_id;
+        }
+
+        // Customer document notifications (#1591) re-check the document/
+        // request they report on right before sending: a share can be
+        // undone, an upload deleted, a rejection reversed, or a request
+        // fulfilled/cancelled between queueing and the processor reaching
+        // this row. Cancelled here, the same way a newsletter opt-out is
+        // below — not an error, so it neither counts against retries nor
+        // logs at error level.
+        const staleDocumentReason = await staleDocumentNotificationReason(email.email_type, emailData);
+        if (staleDocumentReason) {
+          await db('email_queue').where('id', email.id).update({
+            status: 'cancelled',
+            error_message: staleDocumentReason,
+          });
+          logger.info(`Email ${email.id} skipped — ${staleDocumentReason}`);
+          continue;
         }
 
         // Newsletter campaigns (#1264) have no `email_templates` row — the
@@ -1283,6 +1422,19 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
           }
           sendResult = await sendCampaignEmail(email, emailData);
         } else {
+          // Same race as the newsletter branch above: the batch was
+          // materialised before this loop started, so a cancel/redact that
+          // lands in the gap (e.g. a customer erasure, #1593) would
+          // otherwise be silently overwritten below by this send re-writing
+          // the row back to 'sent' with the pre-erasure, unredacted data.
+          // Re-check the row is still pending immediately before sending.
+          const stillPending = await db('email_queue')
+            .where({ id: email.id, status: 'pending' })
+            .first('id');
+          if (!stillPending) {
+            logger.info(`Email ${email.id} skipped — cancelled after the batch was fetched`);
+            continue;
+          }
           sendResult = await sendTemplateEmail(
             email.recipient_email,
             email.email_type,
@@ -1299,16 +1451,27 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
         // in the clear. Gallery passwords and client PINs are bcrypt-hashed
         // everywhere else; without this the archive kept them readable for
         // the life of the event, and the Messages pane served them back.
+        // Invitation and password-reset links go too: their token sets the
+        // account's password, and the archive has no use for it.
         const secrets = secretValues(emailData);
-        sentUpdate.email_data = JSON.stringify(redactEmailData(emailData));
+        sentUpdate.email_data = JSON.stringify(redactRecoveryLinksInData(redactEmailData(emailData)));
         try {
           if (sendResult && sendResult.html && await hasColumnCached('email_queue', 'rendered_html')) {
-            sentUpdate.rendered_html = redactRenderedHtml(sendResult.html, secrets);
+            sentUpdate.rendered_html = redactRecoveryLinks(redactRenderedHtml(sendResult.html, secrets));
           }
         } catch (_) { /* best-effort — never block the send on the preview */ }
-        await db('email_queue')
-          .where('id', email.id)
+        // Status-guarded: the stillPending re-check above can't cover the
+        // SMTP call itself. A customer erasure committing during it cancels
+        // and redacts this row (issue 1593); an unguarded update would flip
+        // it back to 'sent' and restore the pre-erasure data + HTML.
+        const markedSent = await db('email_queue')
+          .where({ id: email.id, status: 'pending' })
           .update(sentUpdate);
+        if (!markedSent) {
+          logger.info(`Email ${email.id} was sent but cancelled mid-send — leaving the cancelled row as is`);
+          result.sent += 1;
+          continue;
+        }
 
         // Campaign bookkeeping (#1264). Best-effort by contract — a failure
         // in the audit trail must never turn a delivered email into a
@@ -1326,6 +1489,17 @@ async function processEmailQueue({ ignoreSchedule = false, limit = 10, onlyId = 
         logger.info(`Email ${email.id} sent successfully`);
       } catch (error) {
         result.failed += 1;
+        // A refused attachment will be refused on every retry: fail the row
+        // now, with the reason, rather than retrying or sending without it.
+        if (error && error.code === 'ATTACHMENT_REFUSED') {
+          try {
+            await db('email_queue').where('id', email.id).update({ status: 'failed', error_message: error.message });
+          } catch (updateError) {
+            logger.error(`Failed to mark email ${email.id} failed:`, updateError);
+          }
+          logger.error(`Email ${email.id} not sent: ${error.message}`);
+          continue;
+        }
         // Increment retry count. The variables stay in the clear on
         // failure: a row past the cap can still be re-queued (Messages
         // "retry" resets retry_count, ignoreSchedule skips the cap) and a
@@ -1445,6 +1619,14 @@ async function getScheduledEmailConfig() {
 // Attachments + cc travel inside `emailData` (keys: attachments, cc)
 // so callers don't need a new signature for every email shape.
 async function queueEmail(eventId, recipientEmail, emailType, emailData, options = {}) {
+  // Callers pass `customer_email || host_email`, and an event may have
+  // neither (issue 1733). A row without a recipient can never be sent, so
+  // nothing is queued; this is not thrown because the automated callers
+  // (expiry warnings, reminders) run inside loops that must carry on.
+  if (typeof recipientEmail !== 'string' || !recipientEmail.trim()) {
+    logger.warn(`Email not queued: ${emailType} has no recipient`, { eventId });
+    return false;
+  }
   try {
     // Add eventId to emailData for language detection
     emailData.eventId = eventId;
@@ -1459,6 +1641,12 @@ async function queueEmail(eventId, recipientEmail, emailType, emailData, options
       status: 'pending',
       retry_count: 0,
       created_at: new Date(),
+      // Explicit NULL, never the column default. The default is
+      // CURRENT_TIMESTAMP, which on SQLite is the text '2026-09-25 08:57:45'
+      // in a column the processor compares against a number — and SQLite
+      // sorts every number below every text, so such a row is never due
+      // (issue 1670). NULL is what the processor's whereNull() looks for.
+      scheduled_at: null,
     };
     let snappedFrom = null;
     // Base time to schedule from:
@@ -1481,7 +1669,7 @@ async function queueEmail(eventId, recipientEmail, emailType, emailData, options
       if (snapped.getTime() !== baseTime.getTime()) snappedFrom = baseTime;
       // Persist a future scheduled_at for an explicit scheduledAt always;
       // for the respectBusinessHours floor only when it actually moved the
-      // time forward (inside hours → leave null → processor sends at once).
+      // time forward (inside hours → stays null → processor sends at once).
       if (options.scheduledAt || snappedFrom) row.scheduled_at = snapped;
     }
     await db('email_queue').insert(row);
@@ -1491,6 +1679,7 @@ async function queueEmail(eventId, recipientEmail, emailType, emailData, options
         snappedFrom ? `, floored from ${snappedFrom.toISOString()}` : ''
       })` : ''
     }`);
+    return true;
   } catch (error) {
     logger.error('Error queueing email:', error);
     throw error;

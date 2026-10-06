@@ -35,6 +35,49 @@ export interface SystemHealthFailures {
    *  `waitingEmails` then means "nothing found yet", not "nothing". */
   scanTruncated?: boolean;
   counts: { stuckEmails: number; waitingEmails: number; pendingScanned?: number };
+  /** Customer documents (#1444): uploads waiting for a review, and rejected ones. */
+  customerDocuments?: {
+    pending: number;
+    rejected: number;
+    /** Last 24 hours (#1444). */
+    abuse?: { forbiddenAccess: number; quotaExceeded: number; rateLimited: number; customersOverThreshold: number };
+    /** clamd (#1444). lastError is a category (timeout, refused, …), never the host. */
+    scanner?: {
+      configured: boolean; reachable: boolean; lastSuccessAt: string | null;
+      lastError: string | null; lastErrorAt?: string | null;
+    };
+  };
+  /** Where the key for signing evidence comes from (#1446) — never the key itself. */
+  evidenceKey?: {
+    source: 'env' | 'file' | 'none' | 'unreadable';
+    keyId: string | null;
+    /** A key OTHER than the current one that stored evidence was written under. */
+    storedKeyId?: string | null;
+    /** null when nothing is stored yet; false when any value is under another key. */
+    matchesStored?: boolean | null;
+    /** Encrypted values counted, across every evidence column. */
+    storedValues?: number;
+    /** How many of them the current key can still read. */
+    storedValuesUnderCurrentKey?: number;
+    /** Key ids the server can still open (#1446 key ring), the current one first. */
+    readableKeyIds?: string[];
+    /** Values under a key the server no longer has. */
+    unreadableValues?: number;
+    /** Values under an older key that can still be read — rotation pending. */
+    valuesUnderOlderKeys?: number;
+    /** Values per key id, including `unreadable` for anything unparseable. */
+    storedKeyIds?: Record<string, number>;
+    /** True when there was more evidence than this endpoint reads. */
+    scanTruncated?: boolean;
+  };
+  /** Enumeration / replay signals on the signing links, last 24 h (#1446). */
+  signingSignals?: {
+    since: string;
+    /** per_client: addresses may be kept (hashed); global: only overall counts. */
+    mode?: 'per_client' | 'global';
+    byKind: Record<string, number>;
+    alerts: Array<{ hour: string; kind: string; count: number }>;
+  } | null;
 }
 
 export const systemHealthService = {

@@ -2,26 +2,35 @@ import { useMemo } from 'react';
 import type { Photo, PhotoCategory } from '../../../types';
 import type { ColorLabel } from '../../../services/feedback.service';
 import type { FeedbackFilterType } from '../GalleryFilter';
-import { photosInScope } from '../folders';
+import { photosInView } from '../folders';
+import { creditKeyOf } from '../../../utils/photoCredits';
+import { photoMatchesFilenameSearch, photoNameCompare } from '../../../utils/photoFilename';
 export type GallerySort = 'date' | 'name' | 'size' | 'rating' | 'capture_date';
 export interface GalleryFilterOptions {
   sourcePhotos?: Photo[]; categories?: PhotoCategory[]; folderId: number | string | null;
+  // "All photos" (issue 1786): containment off, every photo in one grid.
+  viewAll?: boolean;
   selectedCategoryId: number | string | null; searchTerm: string; sortBy: GallerySort; sortDesc: boolean;
   watermarkEnabled: boolean; slug: string; activeFilters: FeedbackFilterType[]; activeColorFilters: ColorLabel[];
   mediaFilter: 'all' | 'photo' | 'video'; isGuestIdentityMode: boolean;
   myFeedbackPhotoIds: Record<FeedbackFilterType, Set<number>>; selectedPersonIds: number[]; peopleMatchAny: boolean;
+  // "By" filter (#1561): a key from utils/photoCredits, null = everyone.
+  selectedCreditKey?: string | null;
+  // Minimum own star rating (issue 1733, A3c), 1-5; null = no rating filter.
+  minRating?: number | null;
 }
 export const resolveMediaType = (photo: Photo): 'photo' | 'video' =>
   photo.media_type === 'video' || photo.mime_type?.startsWith('video/') || photo.type === 'video' ? 'video' : 'photo';
-export function useGalleryFiltering({ sourcePhotos, categories, folderId, selectedCategoryId, searchTerm, sortBy, sortDesc, watermarkEnabled, slug, activeFilters, activeColorFilters, mediaFilter, isGuestIdentityMode, myFeedbackPhotoIds, selectedPersonIds, peopleMatchAny }: GalleryFilterOptions) {
+export function useGalleryFiltering({ sourcePhotos, categories, folderId, viewAll = false, selectedCategoryId, searchTerm, sortBy, sortDesc, watermarkEnabled, slug, activeFilters, activeColorFilters, mediaFilter, isGuestIdentityMode, myFeedbackPhotoIds, selectedPersonIds, peopleMatchAny, selectedCreditKey = null, minRating = null }: GalleryFilterOptions) {
   return useMemo(() => {
     if (!sourcePhotos) return [];
 
     // Folder containment (#1160) comes FIRST: at root this drops every photo that
     // lives in a folder, inside a folder it keeps only that folder's photos.
     // Everything below narrows within that scope, so a search or a feedback chip
-    // never reaches across a folder boundary.
-    let photos = photosInScope(sourcePhotos, categories, folderId);
+    // never reaches across a folder boundary. "All photos" (issue 1786) turns
+    // containment off.
+    let photos = photosInView(sourcePhotos, categories, folderId, viewAll);
 
     if (mediaFilter === 'photo') {
       photos = photos.filter(photo => resolveMediaType(photo) !== 'video');
@@ -29,18 +38,16 @@ export function useGalleryFiltering({ sourcePhotos, categories, folderId, select
       photos = photos.filter(photo => resolveMediaType(photo) === 'video');
     }
 
-    // Apply category filter. Only meaningful at root — inside a folder every
-    // photo already shares the folder's category.
-    if (selectedCategoryId && !folderId) {
+    // Apply category filter. Since issue 1786 a folder lives in `folder_id`
+    // and `category_id` is a filter only, so this narrows inside a folder and
+    // in "All photos" as well as at root.
+    if (selectedCategoryId) {
       photos = photos.filter(photo => photo.category_id === selectedCategoryId);
     }
 
     // Apply search filter
     if (searchTerm) {
-      const term = searchTerm.toLowerCase();
-      photos = photos.filter(photo => 
-        photo.filename.toLowerCase().includes(term)
-      );
+      photos = photos.filter(photo => photoMatchesFilenameSearch(photo, searchTerm));
     }
     
     // Apply feedback filters. Multi-select (#889): a photo matching ANY
@@ -84,6 +91,12 @@ export function useGalleryFiltering({ sourcePhotos, categories, folderId, select
       });
     }
 
+    // Apply the "By" filter (#1561). Composes with the rest, so "Anna's photos
+    // that I liked" works.
+    if (selectedCreditKey) {
+      photos = photos.filter(photo => creditKeyOf(photo) === selectedCreditKey);
+    }
+
     // Apply colour-label filters (#1044). Guest-scoped by construction:
     // `my_color_label` is the requesting viewer's own label, which is what a
     // proofing client means by "show me my greens". Composes with (ANDs
@@ -94,6 +107,14 @@ export function useGalleryFiltering({ sourcePhotos, categories, folderId, select
       );
     }
 
+    // Apply the minimum own-rating filter (issue 1733, A3c). `my_rating` is
+    // the viewer's own stars (null when unrated or ratings are off), so this
+    // is guest-scoped like the colour chips and ANDs against everything above:
+    // "Saved" + "3+" is "saved photos I rated three stars or more".
+    if (minRating) {
+      photos = photos.filter(photo => (photo.my_rating || 0) >= minRating);
+    }
+
     // Apply sorting
     // Each comparator defaults to its natural order (desc for dates/size/rating, asc for name).
     // The flip multiplier reverses that when sortDesc differs from the natural order.
@@ -102,7 +123,7 @@ export function useGalleryFiltering({ sourcePhotos, categories, folderId, select
       switch (sortBy) {
         case 'name':
           // Natural order is ascending (A-Z); flip when sortDesc=true
-          return (sortDesc ? -1 : 1) * a.filename.localeCompare(b.filename);
+          return (sortDesc ? -1 : 1) * photoNameCompare(a, b);
         case 'size':
           return flip * (b.size - a.size);
         case 'rating': {
@@ -134,5 +155,5 @@ export function useGalleryFiltering({ sourcePhotos, categories, folderId, select
     }
     
     return photos;
-  }, [sourcePhotos, categories, folderId, selectedCategoryId, searchTerm, sortBy, sortDesc, watermarkEnabled, slug, activeFilters, activeColorFilters, mediaFilter, isGuestIdentityMode, myFeedbackPhotoIds, selectedPersonIds, peopleMatchAny]);
+  }, [sourcePhotos, categories, folderId, viewAll, selectedCategoryId, searchTerm, sortBy, sortDesc, watermarkEnabled, slug, activeFilters, activeColorFilters, mediaFilter, isGuestIdentityMode, myFeedbackPhotoIds, selectedPersonIds, peopleMatchAny, selectedCreditKey, minRating]);
 }

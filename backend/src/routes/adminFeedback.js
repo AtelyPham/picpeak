@@ -1,5 +1,5 @@
 const express = require('express');
-const { neutralizeSpreadsheetFormula } = require('../utils/spreadsheetSafe');
+const { csvCell, objectsToCsv } = require('../utils/spreadsheetSafe');
 const router = express.Router();
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
@@ -13,7 +13,7 @@ const {
   validateWordFilter,
   checkValidation
 } = require('../utils/feedbackValidation');
-const { requireEventOwnership } = require('../middleware/ownership');
+const { requireEventOwnership, canAccessEvent, scopeEventsQuery } = require('../middleware/ownership');
 
 // Get event feedback settings
 router.get('/events/:eventId/feedback-settings',
@@ -172,11 +172,10 @@ router.get('/events/:eventId/feedback',
 // false and sends a 404 (not 403 — don't leak which feedback ids exist)
 // when the caller may not act on it.
 async function assertOwnsFeedback(req, res, feedbackId) {
-  if (req.admin.roleName === 'super_admin') return true;
   const fb = await db('photo_feedback').where('id', feedbackId).first('event_id');
   if (!fb) { res.status(404).json({ error: 'Feedback not found' }); return false; }
   const event = await db('events').where('id', fb.event_id).first('created_by');
-  if (event && event.created_by && event.created_by !== req.admin.id) {
+  if (event && !canAccessEvent(req.admin, event)) {
     res.status(404).json({ error: 'Feedback not found' });
     return false;
   }
@@ -186,7 +185,7 @@ async function assertOwnsFeedback(req, res, feedbackId) {
 // Moderate feedback (approve/hide/reject)
 router.put('/feedback/:feedbackId/:action',
   adminAuth,
-  requirePermission('events.edit'),
+  requirePermission(['events.edit', 'events.support']),
   async (req, res) => {
     try {
       const { feedbackId, action } = req.params;
@@ -377,9 +376,7 @@ router.get('/feedback/pending-moderation',
       // Scope to the caller's owned events unless super_admin (GHSA-3335).
       let ownedEventIds = null;
       if (req.admin.roleName !== 'super_admin') {
-        const rows = await db('events')
-          .where((q) => q.whereNull('created_by').orWhere('created_by', req.admin.id))
-          .select('id');
+        const rows = await scopeEventsQuery(db('events'), req.admin).select('id');
         ownedEventIds = rows.map((r) => r.id);
       }
       const pending = await feedbackService.getPendingModeration(null, ownedEventIds);
@@ -469,33 +466,15 @@ router.delete('/word-filters/:id',
   }
 );
 
-// Helper function to convert JSON to CSV. Improvements over the original
-// (#640 part #6): handles booleans (rendered yes/no for spreadsheet
-// readability), nulls/undefined (rendered as empty), and escapes strings
-// containing newlines as well as commas/quotes — comments with line breaks
-// were silently breaking the CSV row count before this.
+// CSV export. Booleans render as yes/no and nulls as empty for spreadsheet
+// readability (#640 part #6); quoting and formula neutralisation
+// (GHSA-3cw3) are the shared csvCell.
 function convertToCSV(data) {
-  if (!data || data.length === 0) return '';
-
-  const headers = Object.keys(data[0]);
-  const csvHeaders = headers.join(',');
-
-  const csvRows = data.map(row => {
-    return headers.map(header => {
-      const value = row[header];
-      if (value === null || value === undefined) return '';
-      if (typeof value === 'boolean') return value ? 'yes' : 'no';
-      // Formula-neutralize user-controlled cells (guest_name/comment_text)
-      // before quoting — quoting alone doesn't stop `=cmd()` (GHSA-3cw3).
-      const neutralized = neutralizeSpreadsheetFormula(value);
-      if (neutralized.includes(',') || neutralized.includes('"') || neutralized.includes('\n') || neutralized.includes('\r')) {
-        return `"${neutralized.replace(/"/g, '""')}"`;
-      }
-      return neutralized;
-    }).join(',');
+  return objectsToCsv(data, (value) => {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'boolean') return value ? 'yes' : 'no';
+    return csvCell(value);
   });
-
-  return [csvHeaders, ...csvRows].join('\n');
 }
 
 module.exports = router;

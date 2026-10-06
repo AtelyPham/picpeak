@@ -1,10 +1,10 @@
 const express = require('express');
 const { db } = require('../database/db');
 const { adminAuth } = require('../middleware/auth');
-const { requirePermission, requireSuperAdmin } = require('../middleware/permissions');
+const { requirePermission, requireSuperAdmin, isSuperAdminUser } = require('../middleware/permissions');
 const { clearAdminAuthCookie } = require('../utils/tokenUtils');
 const { revokeToken } = require('../utils/tokenRevocation');
-const { triggerManualBackup, getBackupStatus, cleanupOldBackupRuns, getBackupManifest, validateBackupManifest } = require('../services/backupService');
+const { triggerManualBackup, getBackupStatus, cleanupOldBackupRuns, getBackupManifest, validateBackupManifest, sshHostKeyOptions } = require('../services/backupService');
 const logger = require('../utils/logger');
 const { errorResponse, getPagination } = require('../utils/routeHelpers');
 const { formatBytes } = require('../utils/formatBytes');
@@ -13,8 +13,136 @@ const path = require('path');
 const crypto = require('crypto');
 const archiver = require('archiver');
 const S3StorageAdapter = require('../services/storage/s3Storage');
+const { getStoragePath } = require('../config/storage');
+const { findWriteBlocker, localDestinationHint } = require('../utils/localBackupDestination');
+const {
+  APPROVAL_SETTING: S3_APPROVAL_SETTING,
+  backupS3Access,
+  backupS3Ssl,
+  classifyS3Endpoint,
+  endpointOrigin,
+  isPrivateEndpointApproved,
+  policyApplies: s3PolicyApplies,
+} = require('../utils/s3EndpointPolicy');
 
 const router = express.Router();
+
+// Where backups are sent, and whether they carry the database, decides who
+// ends up with a full copy of this instance. backup.create is held by the
+// built-in admin role, so changing those settings is limited to super_admin.
+// Schedule, retention and which files to include stay on backup.create.
+// The manifest path and format decide where the manifest file is written,
+// so they count as a destination too.
+const DESTINATION_SETTING_RE = /^backup_(destination_|s3_|rsync_|manifest_path$|manifest_format$)/;
+const MANIFEST_FORMATS = new Set(['json', 'yaml']);
+const DATABASE_SETTING_KEYS = new Set(['backup_include_database', 'backup_database_inline_dump']);
+const SECRET_MASK = '••••••••';
+
+// backup_rsync_ssh_key is the PATH of a private key file: buildRsyncArgs
+// hands it to `ssh -i`. The form used to ask for the key itself, so some
+// installs hold a pasted private key here instead; that value stays masked
+// and is refused on save. Same charset and length as validateRsyncParam.
+const isSshKeyPath = (value) => typeof value === 'string'
+  && value.length <= 1024
+  && /^\/[a-zA-Z0-9._/@:-]+$/.test(value);
+
+// Read like backupService.normalizeBoolean, which decides what a backup
+// actually does: booleans as they are, 'true'/'false' strings, and anything
+// else by truthiness.
+function readBackupBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+  }
+  return Boolean(value);
+}
+
+function comparableBackupSetting(key, value) {
+  if (key === 'backup_include_database') return readBackupBoolean(value);
+  if (key === 'backup_database_inline_dump') {
+    // The inline dump stays on unless it was explicitly turned off.
+    return value === undefined || value === null ? true : readBackupBoolean(value);
+  }
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+}
+
+/** The destination and database-inclusion keys this update would change. */
+async function changedRestrictedBackupSettings(updates) {
+  const keys = Object.keys(updates || {}).filter((key) => (
+    (DESTINATION_SETTING_RE.test(key) || DATABASE_SETTING_KEYS.has(key)) && updates[key] !== SECRET_MASK
+  ));
+  if (keys.length === 0) return [];
+  const rows = await db('app_settings')
+    .where('setting_type', 'backup')
+    .whereIn('setting_key', keys)
+    .select('setting_key', 'setting_value');
+  const stored = new Map(rows.map((row) => {
+    try {
+      return [row.setting_key, JSON.parse(row.setting_value)];
+    } catch {
+      return [row.setting_key, row.setting_value];
+    }
+  }));
+  return keys.filter((key) => comparableBackupSetting(key, updates[key]) !== comparableBackupSetting(key, stored.get(key)));
+}
+
+const S3_ERROR_MESSAGES = {
+  S3_PRIVATE_ENDPOINT: 'S3 endpoint resolves to a private or internal network address. A Super Admin must approve this exact endpoint before it can be used.',
+  S3_ENDPOINT_FORBIDDEN: 'S3 endpoint resolves to a link-local, metadata or reserved address, which can never be approved',
+  S3_ENDPOINT_UNRESOLVED: 'S3 endpoint hostname could not be resolved',
+  S3_ENDPOINT_INVALID: 'S3 endpoint is not a valid URL',
+  S3_APPROVAL_MISMATCH: 'The approval does not match the configured S3 endpoint',
+};
+
+const s3ErrorBody = (code, origin) => ({
+  error: S3_ERROR_MESSAGES[code] || 'S3 endpoint is not permitted',
+  code,
+  severity: code === 'S3_PRIVATE_ENDPOINT' ? 'warning' : 'error',
+  ...(origin && { origin }),
+  ...(code === 'S3_PRIVATE_ENDPOINT' && { requiresApproval: true }),
+});
+
+const S3_STATUS_CODES = {
+  approvable: 'S3_PRIVATE_ENDPOINT',
+  forbidden: 'S3_ENDPOINT_FORBIDDEN',
+  unresolved: 'S3_ENDPOINT_UNRESOLVED',
+  invalid: 'S3_ENDPOINT_INVALID',
+};
+
+/**
+ * Vet the S3 endpoint a config update would leave in place. Returns
+ * { error } with a 400 body, or {} — clearing a stored approval when the
+ * endpoint it approved is no longer the configured one.
+ */
+async function checkS3EndpointUpdate(updates) {
+  const touched = ['backup_s3_endpoint', 'backup_s3_ssl_enabled', S3_APPROVAL_SETTING]
+    .some((key) => Object.prototype.hasOwnProperty.call(updates || {}, key) && updates[key] !== SECRET_MASK);
+  if (!touched || !s3PolicyApplies()) return {};
+
+  const effective = { ...(await getBackupConfig()) };
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== SECRET_MASK) effective[key] = value;
+  }
+  if (!effective.backup_s3_endpoint) return {};
+
+  const sslEnabled = readBackupBoolean(effective.backup_s3_ssl_enabled ?? true);
+  const { status, origin } = await classifyS3Endpoint(effective.backup_s3_endpoint, sslEnabled);
+  const approval = typeof effective[S3_APPROVAL_SETTING] === 'string' ? effective[S3_APPROVAL_SETTING].trim() : '';
+  const approvalSupplied = typeof updates[S3_APPROVAL_SETTING] === 'string' && updates[S3_APPROVAL_SETTING].trim() !== '';
+
+  if (approvalSupplied && updates[S3_APPROVAL_SETTING].trim() !== origin) {
+    return { error: s3ErrorBody('S3_APPROVAL_MISMATCH', origin) };
+  }
+  if (status === 'approvable' && approval === origin) return {};
+  if (status !== 'public') return { error: s3ErrorBody(S3_STATUS_CODES[status], origin) };
+  // A public endpoint needs no approval; drop one left over from an earlier
+  // private endpoint so it cannot silently come back into force.
+  if (approval) updates[S3_APPROVAL_SETTING] = '';
+  return {};
+}
 
 // Get backup configuration
 router.get('/config', adminAuth, requirePermission('backup.view'), async (req, res) => {
@@ -36,7 +164,11 @@ router.get('/config', adminAuth, requirePermission('backup.view'), async (req, r
     // config endpoints do. The PUT below skips the mask sentinel, so the
     // form round-trips without clobbering the real values.
     if (config.backup_s3_secret_key) config.backup_s3_secret_key = '••••••••';
-    if (config.backup_rsync_ssh_key) config.backup_rsync_ssh_key = '••••••••';
+    // A key file path is not a secret and is shown; anything else is a
+    // pasted key and stays masked.
+    if (config.backup_rsync_ssh_key && !isSshKeyPath(config.backup_rsync_ssh_key)) {
+      config.backup_rsync_ssh_key = '••••••••';
+    }
 
     res.json(config);
   } catch (error) {
@@ -48,6 +180,50 @@ router.get('/config', adminAuth, requirePermission('backup.view'), async (req, r
 router.put('/config', adminAuth, requirePermission('backup.create'), async (req, res) => {
   try {
     const updates = req.body;
+
+    // Real booleans only: a string such as "0" would compare as off here but
+    // read as on when the backup runs.
+    for (const key of DATABASE_SETTING_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(updates || {}, key) && typeof updates[key] !== 'boolean') {
+        return res.status(400).json({ error: `${key} must be true or false` });
+      }
+    }
+
+    const sshKeyUpdate = (updates || {}).backup_rsync_ssh_key;
+    const sshKeyNotPath = (sshKeyUpdate !== undefined && sshKeyUpdate !== null && typeof sshKeyUpdate !== 'string')
+      || (typeof sshKeyUpdate === 'string' && sshKeyUpdate !== SECRET_MASK && sshKeyUpdate.trim() !== ''
+        && !isSshKeyPath(sshKeyUpdate.trim()));
+    if (sshKeyNotPath) {
+      return res.status(400).json({
+        error: 'backup_rsync_ssh_key must be the absolute path to a private key file, not the key itself',
+        code: 'RSYNC_SSH_KEY_NOT_PATH',
+      });
+    }
+    if (typeof sshKeyUpdate === 'string' && sshKeyUpdate !== SECRET_MASK) {
+      updates.backup_rsync_ssh_key = sshKeyUpdate.trim();
+    }
+
+    // Stored trimmed: the database dump reads this setting trimmed
+    // (databaseBackup.js readSettingValue) while the file backup and the
+    // restore use it as stored, so a padded value split one backup across
+    // two directories.
+    if (typeof (updates || {}).backup_destination_path === 'string') {
+      updates.backup_destination_path = updates.backup_destination_path.trim();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates || {}, 'backup_manifest_format')
+        && !MANIFEST_FORMATS.has(updates.backup_manifest_format)) {
+      return res.status(400).json({ error: 'backup_manifest_format must be json or yaml' });
+    }
+
+    const restricted = await changedRestrictedBackupSettings(updates);
+    if (restricted.length > 0 && !(await isSuperAdminUser(req.admin && req.admin.id))) {
+      return res.status(403).json({
+        error: 'Only a Super Admin can change where backups are stored or whether they include the database',
+        code: 'SUPER_ADMIN_REQUIRED',
+        fields: restricted,
+      });
+    }
     
     // Validate required fields based on destination type
     if (updates.backup_destination_type) {
@@ -71,23 +247,21 @@ router.put('/config', adminAuth, requirePermission('backup.create'), async (req,
       }
     }
 
-    // SSRF: validate an S3 endpoint whenever one is supplied — NOT only when
-    // the payload also flips backup_destination_type to 's3'. The PUT
-    // persists every backup_* field independently, so with S3 already
-    // selected a caller could PATCH just backup_s3_endpoint to a
+    // SSRF: validate the S3 endpoint whenever it (or its approval) is
+    // supplied — NOT only when the payload also flips backup_destination_type
+    // to 's3'. The PUT persists every backup_* field independently, so with
+    // S3 already selected a caller could PATCH just backup_s3_endpoint to a
     // private-resolving host; the management ops (manifest, bucket/file
     // browse, cleanup, test-upload) then connect without going through
     // testConnection. Prod-only; dev points at localhost MinIO deliberately.
-    if (process.env.NODE_ENV === 'production'
-        && updates.backup_s3_endpoint && updates.backup_s3_endpoint !== '••••••••') {
-      const rawEndpoint = updates.backup_s3_endpoint;
-      const withProto = /^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
-      let epHost = null;
-      try { epHost = new URL(withProto).hostname; } catch { epHost = null; }
-      const { isHostAllowed } = require('../utils/networkValidation');
-      if (!epHost || !(await isHostAllowed(epHost))) {
-        return res.status(400).json({ error: 'S3 endpoint resolves to a private or internal network address' });
-      }
+    //
+    // A private endpoint is accepted only with a Super Admin's approval of
+    // that exact origin (issue 1641). The approval key matches
+    // DESTINATION_SETTING_RE, so the Super Admin check above already covers
+    // who may set it.
+    const endpointUpdate = await checkS3EndpointUpdate(updates);
+    if (endpointUpdate.error) {
+      return res.status(400).json(endpointUpdate.error);
     }
 
     // Update settings
@@ -213,7 +387,11 @@ const picpeakUpload = multer({
 // all data except the current logged-in account (the client shows an explicit
 // confirmation before calling this). Returns `usesExternalMedia` so the UI can
 // prompt the admin to reconfigure the external-media mount afterwards.
-router.post('/picpeak/import', adminAuth, requirePermission('backup.restore'), picpeakUpload.single('backup'), async (req, res) => {
+//
+// super_admin only: the import replaces admin_users, roles and their
+// permissions from the file, so any lesser role able to run it could bring in
+// a Super Admin account of its own.
+router.post('/picpeak/import', adminAuth, requireSuperAdmin(), picpeakUpload.single('backup'), async (req, res) => {
   const fsSync = require('fs');
   if (!req.file) return res.status(400).json({ error: 'No backup file uploaded' });
   const picpeakPath = req.file.path;
@@ -297,6 +475,193 @@ router.get('/runs/:id', adminAuth, requirePermission('backup.view'), async (req,
   }
 });
 
+// Delete one backup run (issue 1711). The History table's trash action called
+// this route while only GET /runs/:id existed, so every click was a 404.
+//
+// What "the stored artifact" is depends on the destination, and only the
+// metadata recorded on the run at backup time decides where to look, never
+// anything in the request. On every destination it is the run's own
+// metadata, never its data files: an incremental run only stores the files
+// that changed since the previous one (hasFileChanged against the shared
+// backup_file_states table), so a later run's manifest points at files that
+// exist only under an earlier run. Removing those would take the only copy.
+//   s3     the manifest objects under <run prefix>/manifests/ and the run's
+//          backup-summary.json, with the prefix derived from the recorded
+//          manifest_path (<base>/<date>/backup-<ts>/manifests/<file>) and
+//          only when it sits under the configured bucket and base prefix.
+//          The data objects under the prefix stay; the retention-based S3
+//          cleanup route is what purges them.
+//   local  the manifest file, when it resolves inside the manifest directory.
+//          The mirrored tree under backup_destination_path stays.
+//   rsync  the local manifest as above; nothing on the remote mirror.
+// The record goes only after the artifact step succeeded or found nothing to
+// do, so the UI never reports a deletion that left storage behind.
+const backupDeleteError = (res, status, code, message) => res.status(status).json({ error: message, code });
+
+class ArtifactOutOfScopeError extends Error {
+  constructor(message) {
+    super(message);
+    this.code = 'ARTIFACT_OUT_OF_SCOPE';
+  }
+}
+
+async function deleteLocalBackupManifest(config, manifestPath) {
+  const destinationRoot = config.backup_destination_path || path.join(getStoragePath(), 'backups');
+  const manifestDir = config.backup_manifest_path || path.join(destinationRoot, 'manifests');
+  const resolved = path.resolve(manifestPath);
+  // The writer stores path.join(manifestDir, basename), so a genuine manifest
+  // sits directly in the manifest directory. Requiring exactly that, rather
+  // than "somewhere below it", also rules out a symlinked subdirectory that
+  // points outside, which a prefix check would follow.
+  if (path.dirname(resolved) !== path.resolve(manifestDir)) {
+    throw new ArtifactOutOfScopeError('The recorded manifest is outside the configured manifest directory');
+  }
+  try {
+    await fs.unlink(resolved);
+    return { kind: 'manifest', status: 'deleted', removed: 1 };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { kind: 'manifest', status: 'missing', removed: 0 };
+    throw error;
+  }
+}
+
+async function deleteS3BackupRun(config, manifestPath) {
+  const match = manifestPath.match(/^s3:\/\/([^/]+)\/(.+)$/);
+  if (!match) throw new ArtifactOutOfScopeError('The recorded manifest location is not a usable S3 reference');
+  const [, bucket, key] = match;
+  if (config.backup_destination_type !== 's3' || !config.backup_s3_bucket || bucket !== config.backup_s3_bucket) {
+    throw new ArtifactOutOfScopeError('This backup is stored in a bucket that is not the configured backup destination');
+  }
+  // The same normalisation performS3Backup applies when it builds the key
+  // (path.posix.join keeps a leading slash and collapses doubled ones), so a
+  // prefix configured as "/backups" or "archive/picpeak/" matches its own runs.
+  const baseWithSlash = path.posix.join(config.backup_s3_prefix ? String(config.backup_s3_prefix) : 'backups', '/');
+  const manifestsAt = key.lastIndexOf('/manifests/');
+  const runPrefix = manifestsAt > 0 ? key.slice(0, manifestsAt) : '';
+  const runSegment = runPrefix.split('/').pop() || '';
+  if (baseWithSlash === '/' || !runPrefix.startsWith(baseWithSlash) || !/^backup-\d+$/.test(runSegment) || runPrefix.includes('..')) {
+    throw new ArtifactOutOfScopeError('The recorded manifest location is outside the configured backup prefix');
+  }
+
+  const s3Adapter = new S3StorageAdapter({
+    endpoint: config.backup_s3_endpoint,
+    bucket: config.backup_s3_bucket,
+    accessKeyId: config.backup_s3_access_key,
+    secretAccessKey: config.backup_s3_secret_key,
+    region: config.backup_s3_region || 'us-east-1',
+    forcePathStyle: config.backup_s3_force_path_style || false,
+    sslEnabled: backupS3Ssl(config),
+    ...backupS3Access(config)
+  });
+
+  // Only the run's metadata objects (see the comment above the route).
+  const keys = [];
+  for (const listPrefix of [`${runPrefix}/manifests/`, `${runPrefix}/backup-summary.json`]) {
+    let continuationToken;
+    do {
+      const page = await s3Adapter.list(listPrefix, { maxKeys: 1000, continuationToken });
+      for (const object of page.Contents || page.objects || []) {
+        const objectKey = object.Key || object.key;
+        // The listing is prefix-scoped already; refuse anything that is not.
+        if (objectKey && objectKey.startsWith(listPrefix)) keys.push(objectKey);
+      }
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
+  }
+
+  if (keys.length === 0) return { kind: 'manifest', status: 'missing', removed: 0 };
+  const result = await s3Adapter.deleteMany(keys);
+  const removed = result.Deleted ? result.Deleted.length : 0;
+  const errors = result.Errors || [];
+  if (errors.length > 0) {
+    const error = new Error(`${errors.length} of ${keys.length} objects could not be deleted`);
+    error.code = 'ARTIFACT_DELETE_FAILED';
+    error.removed = removed;
+    throw error;
+  }
+  return { kind: 'manifest', status: 'deleted', removed };
+}
+
+router.delete('/runs/:id', adminAuth, requirePermission('backup.delete'), async (req, res) => {
+  const rawId = String(req.params.id || '').trim();
+  const id = /^\d+$/.test(rawId) ? Number.parseInt(rawId, 10) : NaN;
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return backupDeleteError(res, 404, 'BACKUP_NOT_FOUND', 'Backup run not found');
+  }
+
+  const audit = async (activityType, metadata) => {
+    try {
+      await db('activity_logs').insert({
+        activity_type: activityType,
+        actor_type: 'admin',
+        actor_id: req.admin?.id ?? null,
+        actor_name: req.admin?.username ?? null,
+        metadata: JSON.stringify(metadata)
+      });
+    } catch (error) {
+      logger.warn('backup run delete: audit entry failed', { error: error.message });
+    }
+  };
+
+  try {
+    const run = await db('backup_runs').where('id', id).first();
+    if (!run) {
+      return backupDeleteError(res, 404, 'BACKUP_NOT_FOUND', 'Backup run not found');
+    }
+    if (run.status === 'running') {
+      return backupDeleteError(res, 409, 'BACKUP_RUNNING', 'A running backup cannot be deleted');
+    }
+
+    const config = await getBackupConfig();
+    const manifestPath = typeof run.manifest_path === 'string' ? run.manifest_path.trim() : '';
+    const destination = manifestPath.startsWith('s3://')
+      ? 's3'
+      : (config.backup_destination_type || 'local');
+
+    let artifact = { kind: 'none', status: 'none', removed: 0 };
+    try {
+      if (manifestPath.startsWith('s3://')) {
+        artifact = await deleteS3BackupRun(config, manifestPath);
+      } else if (manifestPath) {
+        artifact = await deleteLocalBackupManifest(config, manifestPath);
+      }
+    } catch (error) {
+      const code = error.code === 'ARTIFACT_OUT_OF_SCOPE' ? 'ARTIFACT_OUT_OF_SCOPE' : 'ARTIFACT_DELETE_FAILED';
+      logger.error('backup run delete: artifact step failed', {
+        backup_run_id: id, destination, code, error: error.message
+      });
+      await audit('backup_run_delete_failed', {
+        backup_run_id: id, destination, code, removed: error.removed || 0
+      });
+      if (code === 'ARTIFACT_OUT_OF_SCOPE') {
+        return backupDeleteError(res, 409, code, `${error.message}; the record was kept`);
+      }
+      return backupDeleteError(res, 500, code, 'The stored backup files could not be removed; the record was kept');
+    }
+
+    // The success audit commits with the deletion, so a deleted run is never
+    // without its audit row; a failed audit rolls the record back.
+    await db.transaction(async (trx) => {
+      await trx('backup_manifest').where('backup_run_id', id).del();
+      await trx('backup_runs').where('parent_backup_id', id).update({ parent_backup_id: null });
+      await trx('backup_runs').where('id', id).del();
+      await trx('activity_logs').insert({
+        activity_type: 'backup_run_deleted',
+        actor_type: 'admin',
+        actor_id: req.admin?.id ?? null,
+        actor_name: req.admin?.username ?? null,
+        metadata: JSON.stringify({
+          backup_run_id: id, destination, artifact: artifact.status, removed: artifact.removed
+        })
+      });
+    });
+
+    res.json({ success: true, id, destination, artifact });
+  } catch (error) {
+    errorResponse(res, error, 500, 'Failed to delete backup run');
+  }
+});
+
 // Get file states (for debugging/monitoring)
 router.get('/files', adminAuth, requirePermission('backup.view'), async (req, res) => {
   try {
@@ -345,24 +710,43 @@ router.delete('/cleanup', adminAuth, requirePermission('backup.delete'), async (
 });
 
 // Test backup destination connectivity
-router.post('/test-connection', adminAuth, requirePermission('backup.create'), async (req, res) => {
+// Probes a caller-supplied destination, which only matters to whoever may set
+// one: super_admin (see changedRestrictedBackupSettings).
+router.post('/test-connection', adminAuth, requireSuperAdmin(), async (req, res) => {
   try {
     const { destination_type, ...config } = req.body;
     
     switch (destination_type) {
     case 'local': {
-      // Test local path access
-      const fs = require('fs').promises;
-      try {
-        await fs.access(config.path, fs.constants.W_OK);
-        res.json({ success: true, message: 'Local path is writable' });
-      } catch (error) {
-        logger.warn('Local backup path not writable', {
-          path: config.path,
-          error: error.message
-        });
-        res.json({ success: false, message: 'Cannot write to local path. Check server logs for details.' });
+      // The rule the backup itself applies: writable, or missing below a
+      // writable ancestor, since performLocalBackup creates the directory.
+      // The reason goes into the answer: in production a warn only reaches
+      // logs/combined.log, so "check the server logs" showed nothing in
+      // `docker compose logs` (issue 1365).
+      // Trimmed, as PUT /config stores it.
+      const target = typeof config.path === 'string' ? config.path.trim() : '';
+      if (!target) {
+        res.json({ success: false, message: 'Local backup requires destination path' });
+        break;
       }
+      const blocker = await findWriteBlocker(target);
+      if (!blocker) {
+        res.json({ success: true, message: 'Local path is writable' });
+        break;
+      }
+      logger.warn('Local backup path not writable', {
+        path: target,
+        blockedAt: blocker.path,
+        error: blocker.code
+      });
+      const reason = path.resolve(blocker.path) === path.resolve(target)
+        ? `The backend cannot write to ${target} (${blocker.code}).`
+        : `${target} does not exist and the backend cannot create it: ${blocker.path} is not writable (${blocker.code}).`;
+      res.json({
+        success: false,
+        code: 'LOCAL_PATH_NOT_WRITABLE',
+        message: `${reason} ${localDestinationHint()}`
+      });
       break;
     }
 
@@ -379,7 +763,23 @@ router.post('/test-connection', adminAuth, requirePermission('backup.create'), a
 
       const host = sanitizeInput(config.host);
       const user = sanitizeInput(config.user);
-      const sshKeyPath = sanitizeInput(config.ssh_key);
+      // The key file path from the form, or the saved one when the form
+      // holds the mask or sends none. An explicit '' tests without a key, as
+      // saving the emptied field would. A value that is not a path (a pasted
+      // key) is never handed to ssh.
+      const useSavedKey = typeof config.ssh_key !== 'string' || config.ssh_key.trim() === SECRET_MASK;
+      const keyCandidate = useSavedKey
+        ? (await getBackupConfig()).backup_rsync_ssh_key
+        : config.ssh_key.trim();
+      if (keyCandidate && !isSshKeyPath(keyCandidate)) {
+        res.json({
+          success: false,
+          code: 'RSYNC_SSH_KEY_NOT_PATH',
+          message: 'The SSH key setting must be the absolute path to a private key file, not the key itself',
+        });
+        break;
+      }
+      const sshKeyPath = keyCandidate || null;
 
       if (!host) {
         res.json({ success: false, message: 'Invalid host specified' });
@@ -420,7 +820,14 @@ router.post('/test-connection', adminAuth, requirePermission('backup.create'), a
         }
         sshArgs.push('-i', sshKeyPath);
       }
-      sshArgs.push('-o', 'StrictHostKeyChecking=no');
+      // Same host-key policy as the backup run: record the key on first
+      // contact, refuse a host whose key changed since.
+      try {
+        sshArgs.push(...sshHostKeyOptions(sshKeyPath || null));
+      } catch (optionError) {
+        res.json({ success: false, message: optionError.message });
+        break;
+      }
       sshArgs.push('-o', 'ConnectTimeout=10');
       sshArgs.push('-o', 'BatchMode=yes');
 
@@ -461,15 +868,65 @@ router.post('/test-connection', adminAuth, requirePermission('backup.create'), a
           destination: host,
           error: error.message
         });
-        res.json({ success: false, message: 'Rsync connection failed. Check server logs for details.' });
+        const hostKeyChanged = /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed/.test(error.message);
+        res.json({
+          success: false,
+          message: hostKeyChanged
+            ? 'The SSH host key of this destination differs from the one recorded on first contact. If the server was reinstalled on purpose, remove its line from the known_hosts file next to the SSH key and test again.'
+            : 'Rsync connection failed. Check server logs for details.'
+        });
       }
       break;
     }
 
-    case 's3':
-      // Test S3 connection (would need AWS SDK)
-      res.json({ success: false, message: 'S3 testing not implemented yet' });
+    case 's3': {
+      // A real HeadBucket against the values in the form (issue 1641).
+      const stored = await getBackupConfig();
+      const endpoint = typeof config.endpoint === 'string' ? config.endpoint.trim() : '';
+      // The scheme a scheme-less endpoint gets, as a backup run would use it:
+      // the form has no SSL field, so the saved setting applies unless the
+      // caller sends one.
+      const sslEnabled = readBackupBoolean(config.ssl_enabled ?? stored.backup_s3_ssl_enabled ?? true);
+      const storedSsl = readBackupBoolean(stored.backup_s3_ssl_enabled ?? true);
+      const sameEndpoint = endpointOrigin(endpoint, sslEnabled) === endpointOrigin(stored.backup_s3_endpoint, storedSsl);
+      // The form holds the mask for a saved secret. Reuse the stored one only
+      // against the endpoint it was saved for, so a test cannot send the
+      // saved credentials somewhere new.
+      const secretKey = config.secret_key === SECRET_MASK
+        ? (sameEndpoint ? stored.backup_s3_secret_key : '')
+        : config.secret_key;
+      if (!config.bucket || !config.access_key || !secretKey) {
+        res.json({ success: false, code: 'S3_CONFIG_INCOMPLETE', message: 'S3 test requires endpoint, bucket and credentials' });
+        break;
+      }
+      const approval = typeof config.private_endpoint_approval === 'string'
+        ? config.private_endpoint_approval
+        : stored[S3_APPROVAL_SETTING];
+      try {
+        const s3Adapter = new S3StorageAdapter({
+          endpoint: endpoint || undefined,
+          bucket: config.bucket,
+          accessKeyId: config.access_key,
+          secretAccessKey: secretKey,
+          region: config.region || 'us-east-1',
+          sslEnabled,
+          allowPrivateEndpoint: isPrivateEndpointApproved(endpoint, sslEnabled, approval),
+          maxRetries: 1,
+          connectionTimeout: 10000,
+          socketTimeout: 15000,
+        });
+        await s3Adapter.testConnection();
+        res.json({ success: true, message: 'S3 bucket is reachable' });
+      } catch (error) {
+        if (S3_ERROR_MESSAGES[error.code]) {
+          res.json({ success: false, ...s3ErrorBody(error.code, error.origin || endpointOrigin(endpoint, sslEnabled)), message: S3_ERROR_MESSAGES[error.code] });
+          break;
+        }
+        logger.warn('S3 connection test failed', { bucket: config.bucket, error: error.message });
+        res.json({ success: false, code: 'S3_CONNECTION_FAILED', message: 'Could not reach the S3 bucket with these settings. Check server logs for details.' });
+      }
       break;
+    }
         
     default:
       res.status(400).json({ error: 'Invalid destination type' });
@@ -634,8 +1091,10 @@ router.post('/manifests/validate', adminAuth, requirePermission('backup.view'), 
   }
 });
 
-// List S3 buckets
-router.get('/s3/buckets', adminAuth, requirePermission('backup.view'), async (req, res) => {
+// List S3 buckets. An account-wide ListBuckets with the stored backup
+// credential — provider inventory beyond the configured bucket, so Super
+// Admin only, like /test-connection. The Owner object is not returned.
+router.get('/s3/buckets', adminAuth, requireSuperAdmin(), async (req, res) => {
   try {
     const config = await getBackupConfig();
     
@@ -649,7 +1108,9 @@ router.get('/s3/buckets', adminAuth, requirePermission('backup.view'), async (re
       accessKeyId: config.backup_s3_access_key,
       secretAccessKey: config.backup_s3_secret_key,
       region: config.backup_s3_region || 'us-east-1',
-      forcePathStyle: config.backup_s3_force_path_style || false
+      forcePathStyle: config.backup_s3_force_path_style || false,
+      sslEnabled: backupS3Ssl(config),
+      ...backupS3Access(config)
     });
     
     // List buckets using the S3 client
@@ -657,8 +1118,7 @@ router.get('/s3/buckets', adminAuth, requirePermission('backup.view'), async (re
     const result = await s3Adapter.s3Client.send(new ListBucketsCommand({}));
     
     res.json({
-      buckets: result.Buckets || [],
-      owner: result.Owner || null
+      buckets: result.Buckets || []
     });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to list S3 buckets');
@@ -681,7 +1141,9 @@ router.get('/s3/files', adminAuth, requirePermission('backup.view'), async (req,
       accessKeyId: config.backup_s3_access_key,
       secretAccessKey: config.backup_s3_secret_key,
       region: config.backup_s3_region || 'us-east-1',
-      forcePathStyle: config.backup_s3_force_path_style || false
+      forcePathStyle: config.backup_s3_force_path_style || false,
+      sslEnabled: backupS3Ssl(config),
+      ...backupS3Access(config)
     });
     
     const result = await s3Adapter.list(prefix, {
@@ -717,7 +1179,9 @@ router.delete('/s3/cleanup', adminAuth, requirePermission('backup.delete'), asyn
       accessKeyId: config.backup_s3_access_key,
       secretAccessKey: config.backup_s3_secret_key,
       region: config.backup_s3_region || 'us-east-1',
-      forcePathStyle: config.backup_s3_force_path_style || false
+      forcePathStyle: config.backup_s3_force_path_style || false,
+      sslEnabled: backupS3Ssl(config),
+      ...backupS3Access(config)
     });
     
     const cutoffDate = new Date();
@@ -777,7 +1241,9 @@ router.post('/s3/test-upload', adminAuth, requirePermission('backup.create'), as
       accessKeyId: config.backup_s3_access_key,
       secretAccessKey: config.backup_s3_secret_key,
       region: config.backup_s3_region || 'us-east-1',
-      forcePathStyle: config.backup_s3_force_path_style || false
+      forcePathStyle: config.backup_s3_force_path_style || false,
+      sslEnabled: backupS3Ssl(config),
+      ...backupS3Access(config)
     });
     
     // Create test content
@@ -865,7 +1331,9 @@ router.get('/download/:backupId', adminAuth, requirePermission('backup.view'), a
         accessKeyId: config.backup_s3_access_key,
         secretAccessKey: config.backup_s3_secret_key,
         region: config.backup_s3_region || 'us-east-1',
-        forcePathStyle: config.backup_s3_force_path_style || false
+        forcePathStyle: config.backup_s3_force_path_style || false,
+        sslEnabled: backupS3Ssl(config),
+        ...backupS3Access(config)
       });
         
       // List all files for this backup
@@ -1021,7 +1489,8 @@ router.post('/estimate', adminAuth, requirePermission('backup.view'), async (req
     const categories = [
       { path: 'events/active', name: 'Active Events' },
       { path: 'thumbnails', name: 'Thumbnails' },
-      { path: 'uploads', name: 'Uploads' }
+      { path: 'uploads', name: 'Uploads' },
+      { path: 'videos', name: 'Video copies' }
     ];
     
     if (includeArchived) {

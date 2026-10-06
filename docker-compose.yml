@@ -28,8 +28,18 @@ services:
         # so a non-root reader must be able to read them. The volume is private to
         # these containers and never host-exposed.
         chmod 644 /run/secrets/jwt_secret /run/secrets/db_password /run/secrets/redis_password
+        # Postgres and Redis each mount a volume holding only their own password,
+        # so neither can read jwt_secret (the backend's token signing key).
+        # Refreshed from picpeak-secrets on every run, which also fills them on
+        # an existing install the first time this version starts.
+        mkdir -p /run/db-secret /run/redis-secret
+        cp /run/secrets/db_password /run/db-secret/db_password
+        cp /run/secrets/redis_password /run/redis-secret/redis_password
+        chmod 644 /run/db-secret/db_password /run/redis-secret/redis_password
     volumes:
       - picpeak-secrets:/run/secrets
+      - picpeak-db-secret:/run/db-secret
+      - picpeak-redis-secret:/run/redis-secret
     restart: "no"
 
   backend:
@@ -81,13 +91,24 @@ services:
       # JWT_SECRET) and the break-glass override that re-enables local
       # password login when the IdP is down while SSO-only mode is active.
       - OIDC_ENCRYPTION_KEY=${OIDC_ENCRYPTION_KEY:-}
+      # Signing evidence key (#1446): encrypts contract signers' names, email
+      # addresses and IP addresses at rest. Unset, a key is generated into
+      # storage/business-docs/keys/evidence.key — inside the backup path, but
+      # then the only copy. See docs/ENVIRONMENT_VARIABLES.md.
+      - PICPEAK_EVIDENCE_KEY=${PICPEAK_EVIDENCE_KEY:-}
+      # Earlier evidence keys, only while rotating (scripts/rotate-evidence-key.js).
+      - PICPEAK_EVIDENCE_KEYS_OLD=${PICPEAK_EVIDENCE_KEYS_OLD:-}
       # Optional product usage (#1110); remains off until explicit in-app consent.
       - USAGE_COLLECTOR_URL=${USAGE_COLLECTOR_URL:-https://usage.picpeak.app}
       - USAGE_ENCRYPTION_KEY=${USAGE_ENCRYPTION_KEY:-}
       - OIDC_BREAK_GLASS=${OIDC_BREAK_GLASS:-}
+      - INTEGRATION_PRIVATE_ORIGINS=${INTEGRATION_PRIVATE_ORIGINS:-}
       - ADMIN_URL=${ADMIN_URL:-}
       - TZ=${TZ:-UTC}
       - STORAGE_PATH=/app/storage
+      # Makes the entrypoint create /backup/picpeak and /backup/database and
+      # chown the ./backup mount to UID 1001 (same as production).
+      - BACKUP_DIR=/backup
       # Watch-folder auto-import: max photos processed in parallel (default 2).
       - FILE_WATCHER_CONCURRENCY=${FILE_WATCHER_CONCURRENCY:-2}
       # External-media folder watcher (issue 1187); all optional, see .env.example.
@@ -105,6 +126,16 @@ services:
       - FACE_ML_URL=${FACE_ML_URL:-http://picpeak-ml:8000}
       - FACE_ML_TOKEN=${FACE_ML_TOKEN:-}
       - FACE_PROCESSOR_CONCURRENCY=${FACE_PROCESSOR_CONCURRENCY:-}
+      # Malware scanner for customer documents (#1444). Empty = no scanner;
+      # uploads then wait for an admin's review. With the opt-in `clamav`
+      # profile below, set CLAMAV_HOST=clamav. See docs/ENVIRONMENT_VARIABLES.md.
+      - CLAMAV_HOST=${CLAMAV_HOST:-}
+      - CLAMAV_PORT=${CLAMAV_PORT:-3310}
+      - CLAMAV_TIMEOUT_MS=${CLAMAV_TIMEOUT_MS:-30000}
+      - CLAMAV_MAX_BYTES=${CLAMAV_MAX_BYTES:-26214400}
+      # Per-network ceiling above the per-device protected-image rate limits,
+      # as a multiple of the device limit. Unset = 20.
+      - RATE_LIMIT_NETWORK_MULTIPLIER=${RATE_LIMIT_NETWORK_MULTIPLIER:-}
     # No `user:` directive — as of #484, the container starts as root,
     # chowns the bind mounts to nodejs (UID 1001), then drops privileges
     # via su-exec. PUID/PGID env vars are no longer read; if you need
@@ -146,7 +177,7 @@ services:
       - TZ=${TZ:-UTC}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - picpeak-secrets:/run/secrets:ro
+      - picpeak-db-secret:/run/secrets:ro
     depends_on:
       secrets-init:
         condition: service_completed_successfully
@@ -169,7 +200,7 @@ services:
     command: sh -c 'exec redis-server --appendonly yes --requirepass "$$(cat /run/secrets/redis_password)"'
     volumes:
       - redis-data:/data
-      - picpeak-secrets:/run/secrets:ro
+      - picpeak-redis-secret:/run/secrets:ro
     depends_on:
       secrets-init:
         condition: service_completed_successfully
@@ -243,6 +274,24 @@ services:
     networks:
       - picpeak-network
 
+  # Optional malware scanner for customer documents (#1444). Gated behind the
+  # `clamav` profile — a plain `docker compose up -d` does NOT start it; opt
+  # in with `docker compose --profile clamav up -d` and set CLAMAV_HOST=clamav
+  # in .env. ClamAV holds its signature database in memory: plan for about
+  # 1 GB of RAM, and a few minutes on first start while it downloads the
+  # signatures (uploads stay pending meanwhile). No host port: only the
+  # backend reaches it on picpeak-network.
+  clamav:
+    image: clamav/clamav:stable
+    container_name: picpeak-clamav
+    restart: unless-stopped
+    profiles:
+      - clamav
+    volumes:
+      - clamav-db:/var/lib/clamav
+    networks:
+      - picpeak-network
+
   frontend:
     build:
       context: ./frontend
@@ -280,6 +329,17 @@ volumes:
   # Auto-generated machine secrets (jwt/db/redis). Keep it — deleting it orphans
   # the DB password from the Postgres volume.
   picpeak-secrets:
+    driver: local
+  # Copies of db_password and redis_password for the postgres and redis
+  # containers alone. secrets-init rebuilds them from picpeak-secrets, so they
+  # need no backup.
+  picpeak-db-secret:
+    driver: local
+  picpeak-redis-secret:
+    driver: local
+  # ClamAV signature database (opt-in `clamav` profile). Re-downloadable;
+  # needs no backup.
+  clamav-db:
     driver: local
 
 networks:

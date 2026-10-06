@@ -1,0 +1,12 @@
+# PicPeak updater (host agent). Installed by scripts/picpeak-setup.sh
+# --enable-self-update. Starts picpeak-updater.service whenever the backend
+# files an update request. See docs/self-update.md.
+[Unit]
+Description=Watch for PicPeak update requests
+
+[Path]
+PathExists=@UPDATE_DIR@/request/update-requested
+Unit=picpeak-updater.service
+
+[Install]
+WantedBy=multi-user.target

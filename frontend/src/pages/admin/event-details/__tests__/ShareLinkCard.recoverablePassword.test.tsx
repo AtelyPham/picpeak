@@ -11,6 +11,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ShareLinkCard } from '../ShareLinkCard';
 import type { Event } from '../../../../types';
 
+vi.mock('../../../../hooks/usePermission', () => ({ usePermission: () => true, useAnyPermission: () => true }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en' } }),
   // components/common barrel -> ErrorBoundary -> i18n/config calls

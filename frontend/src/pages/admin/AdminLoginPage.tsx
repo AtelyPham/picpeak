@@ -68,7 +68,8 @@ export const AdminLoginPage: React.FC = () => {
   useEffect(() => {
     const ssoError = searchParams.get('sso_error');
     if (!ssoError) return;
-    const known = ['config', 'state', 'idp', 'inactive', 'not_provisioned', 'no_email', 'no_role'];
+    const known = ['config', 'state', 'idp', 'inactive', 'not_provisioned', 'no_email', 'no_role',
+      'email_unverified', 'email_ambiguous'];
     const key = known.includes(ssoError) ? ssoError : 'idp';
     toast.error(t(`adminLogin.ssoErrors.${key}`));
   }, [searchParams, t]);
@@ -478,18 +479,22 @@ export const AdminLoginPage: React.FC = () => {
           )}
         </Card>
 
-        {/* Footer */}
+        {/* Footer. The support line only renders once Branding has a
+            support email — publicSettings returns '' until then, and a
+            placeholder address would send visitors nowhere. */}
         <div className="text-center mt-8">
-          <p className="text-sm" style={{ color: 'var(--color-text, #171717)', opacity: 0.7 }}>
-            {t('adminLogin.needHelp')}{' '}
-            <a 
-              href={`mailto:${settingsData?.branding_support_email || 'support@example.com'}`} 
-              className="hover:underline"
-              style={{ color: 'var(--color-primary, #5C8762)' }}
-            >
-              {settingsData?.branding_support_email || 'support@example.com'}
-            </a>
-          </p>
+          {settingsData?.branding_support_email && (
+            <p className="text-sm" style={{ color: 'var(--color-text, #171717)', opacity: 0.7 }}>
+              {t('adminLogin.needHelp')}{' '}
+              <a
+                href={`mailto:${settingsData.branding_support_email}`}
+                className="hover:underline"
+                style={{ color: 'var(--color-primary, #5C8762)' }}
+              >
+                {settingsData.branding_support_email}
+              </a>
+            </p>
+          )}
           <PoweredBy className="text-xs mt-2" style={{ color: 'var(--color-text, #171717)', opacity: 0.5 }} />
         </div>
 

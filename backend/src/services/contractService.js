@@ -45,12 +45,12 @@ const conversions = require('./contract/conversions');
 const { SECTIONS_ORDER, nextContractNumber } = helpers;
 const { renderTemplatedBody, buildPlaceholderContext, buildRenderContext } = renderContext;
 const {
-  listContracts, getContractById, createContract, updateContract, cancelContract,
+  listContracts, getContractById, createContract, createContractIdempotent, updateContract, cancelContract,
 } = crud;
 const { renderContractPdfBuffer, sendContract } = sending;
 const {
   recordCustomerSignature, recordAdminCountersignature, attachSignedPdfUpload,
-  rerenderAndResend, restampSignatures, getAuditTrail, verifyIntegrity,
+  rerenderAndResend, restampSignatures, getAuditTrail,
 } = signatures;
 const { createFromQuote, convertToEvent, convertToInvoiceOnly } = conversions;
 
@@ -58,6 +58,7 @@ module.exports = {
   listContracts,
   getContractById,
   createContract,
+  createContractIdempotent,
   updateContract,
   sendContract,
   renderContractPdfBuffer,
@@ -71,7 +72,6 @@ module.exports = {
   rerenderAndResend,
   restampSignatures,
   getAuditTrail,
-  verifyIntegrity,
   // Exported for tests + the public-route preview endpoint.
   _internal: {
     nextContractNumber,

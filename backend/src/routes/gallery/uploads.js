@@ -3,11 +3,15 @@ const { db } = require('../../database/db');
 
 const router = express.Router();
 const { verifyGalleryAccess, denySlideshowToken } = require('../../middleware/gallery');
+const { resolveGuest } = require('../../middleware/guestAuth');
 const { noStoreCache } = require('../../middleware/noStoreCache');
 const logger = require('../../utils/logger');
 const { errorResponse } = require('../../utils/routeHelpers');
+const { photoCapOf, isPhotoCapReached, photoCapError } = require('../../services/photoCap');
+const categoryScope = require('../../utils/categoryScope');
+const { guestNameModeOf, guestCreditFields } = require('../../services/photoCredit');
 
-router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, async (req, res) => {
+router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, resolveGuest, async (req, res) => {
   try {
     const eventId = parseInt(req.params.eventId);
 
@@ -19,6 +23,29 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, async (
     // Check if user uploads are allowed
     if (!req.event.allow_user_uploads) {
       return res.status(403).json({ error: 'User uploads are not allowed for this event' });
+    }
+
+    // Uploader name (#1561). The guest identity is the gallery_guests row the
+    // x-guest-token names — the same identity feedback uses, so one guest has
+    // one name across likes, comments and uploads. A token issued for another
+    // gallery names nobody here. `off` records nothing, whatever the request
+    // carries; `required` refuses a nameless upload before multer writes a
+    // byte.
+    const nameMode = guestNameModeOf(req.event);
+    const uploader = req.guest && Number(req.guest.eventId) === Number(req.event.id) ? req.guest : null;
+    if (nameMode === 'required' && !uploader) {
+      return res.status(400).json({
+        error: 'Please enter your name before uploading',
+        code: 'UPLOADER_NAME_REQUIRED',
+      });
+    }
+    const credit = nameMode === 'off' ? {} : guestCreditFields(uploader, req.event);
+
+    // The event's photo cap applies to guests too. Refused here before multer
+    // writes anything, and checked again as each photo row is inserted.
+    const photoCap = photoCapOf(req.event);
+    if (photoCap && await isPhotoCapReached(req.event)) {
+      return res.status(409).json(photoCapError(photoCap));
     }
 
     // Ensure temp upload directory exists
@@ -36,7 +63,7 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, async (
     // Import multer and photo processing
     const multer = require('multer');
     const { getAllowedMimeTypes, getMaxFilesPerUpload, getMaxFileSizeBytes, DEFAULT_MAX_FILE_SIZE_MB } = require('../../services/uploadSettings');
-    const { validateFileType } = require('../../utils/fileSecurityUtils');
+    const { validateFileType, normalizeUploadMimeType } = require('../../utils/fileSecurityUtils');
 
     // Resolve allowed MIME types from settings
     let allowedMimeTypes;
@@ -78,6 +105,12 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, async (
       limits: {
         fileSize: maxFileSizeBytes,
         files: maxFilesPerUpload,
+        // The only text field this route reads is category_id. Without these
+        // caps an unbounded number of ~1 MiB text parts is held in memory
+        // before the handler runs (Codex security audit 2026-09-30).
+        fields: 5,
+        fieldSize: 1024,
+        parts: maxFilesPerUpload + 5,
         // CVE-2026-82333: files arrive as repeated `photos` parts via
         // .array(), not bracket-indexed field names like `photos[0]` — no
         // legitimate field name uses array-index syntax at all. Reject any
@@ -85,6 +118,9 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, async (
         fieldArrayIndexLimit: 0
       },
       fileFilter: (req, file, cb) => {
+        // Assigned, not just compared: multer copies this object into
+        // req.files, so processing stores the canonical type.
+        file.mimetype = normalizeUploadMimeType(file.originalname, file.mimetype);
         if (validateFileType(file.originalname, file.mimetype, allowedMimeTypes)) {
           cb(null, true);
         } else {
@@ -111,21 +147,66 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, async (
       }
 
       const { queueFilesForProcessing } = require('../../services/photoProcessor');
-      const rawCategory = req.body.category_id || req.event.upload_category_id || null;
-      const numericCategoryId = (() => {
-        if (rawCategory === null || rawCategory === undefined) return null;
-        const n = parseInt(rawCategory, 10);
-        return Number.isFinite(n) ? n : null;
-      })();
+      const removeTempFiles = () => Promise.all(
+        req.files.map((file) => fs.promises.unlink(file.path).catch(() => {}))
+      );
+      // A category must belong to this event or be global, the same rule the
+      // admin and v1 uploads apply. A category the guest sends outside that
+      // scope is refused; an event default that no longer resolves is dropped.
+      // Ids are integer columns: anything beyond that range cannot name a
+      // category, and passing it on would make Postgres reject the lookup.
+      const MAX_CATEGORY_ID = 2147483647;
+      const parseCategoryId = (raw) => {
+        const n = parseInt(raw, 10);
+        return Number.isInteger(n) && n > 0 && n <= MAX_CATEGORY_ID ? n : null;
+      };
 
       try {
+        let numericCategoryId = null;
+        const rawRequestedCategory = req.body.category_id;
+        const requestedCategoryId = parseCategoryId(rawRequestedCategory);
+        const requestedSomething = rawRequestedCategory !== undefined && rawRequestedCategory !== null
+          && String(rawRequestedCategory).trim() !== '' && Number.isFinite(parseInt(rawRequestedCategory, 10));
+        if (requestedSomething) {
+          if (!requestedCategoryId || !(await categoryScope.findScopedCategory(eventId, requestedCategoryId))) {
+            await removeTempFiles();
+            return res.status(400).json(categoryScope.outOfScopeCategoryError(rawRequestedCategory));
+          }
+          numericCategoryId = requestedCategoryId;
+        } else {
+          const defaultCategoryId = parseCategoryId(req.event.upload_category_id);
+          if (defaultCategoryId && await categoryScope.findScopedCategory(eventId, defaultCategoryId)) {
+            numericCategoryId = defaultCategoryId;
+          }
+        }
+        // A folder as the upload category (issue 1160) lands in folder_id
+        // since migration 265; category_id holds filter categories only.
+        let numericFolderId = null;
+        if (numericCategoryId) {
+          const assignment = await categoryScope.resolveCategoryAssignment(eventId, numericCategoryId);
+          if (assignment && assignment.folder_id) {
+            numericFolderId = assignment.folder_id;
+            numericCategoryId = null;
+          }
+        }
+
         // Queue files as 'pending' — the background worker will process
         // thumbnails / EXIF / dimensions off the request thread (#357).
         const result = await queueFilesForProcessing(req.files, {
           eventId,
           photoType: 'individual',
           categoryId: numericCategoryId,
+          folderId: numericFolderId,
+          photoCap,
+          uploadedBy: 'guest',
+          credit,
         });
+
+        // Every file refused for the cap: say so as a refusal, not a 202.
+        if (result.photos.length === 0 && result.errors.length > 0
+          && result.errors.every((e) => e.code === 'PHOTO_CAP_REACHED')) {
+          return res.status(409).json(photoCapError(photoCap));
+        }
 
         res.status(202).json({
           message: 'Photos queued for processing',
@@ -136,6 +217,9 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, async (
           errors: result.errors.length > 0 ? result.errors : undefined,
         });
       } catch (processError) {
+        // Multer does not await this callback, so every failure has to end
+        // here: nothing may escape as an unhandled rejection.
+        await removeTempFiles();
         errorResponse(res, processError, 500, 'Failed to process photos');
       }
     });

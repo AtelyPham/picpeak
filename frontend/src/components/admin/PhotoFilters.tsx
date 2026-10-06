@@ -1,20 +1,28 @@
 import React from 'react';
-import { Search, Filter, SortAsc, SortDesc } from 'lucide-react';
+import { Search, Filter, SortAsc, SortDesc, UserRound } from 'lucide-react';
 import { Input } from '../common';
 import { useTranslation } from 'react-i18next';
+import type { PhotoSortKey } from '../../services/photos.service';
 
 interface PhotoFiltersProps {
   categories: Array<{ id: number | string; name: string; slug: string }>;
   selectedCategory: number | string | null | undefined;
   searchTerm: string;
-  sortBy: 'date' | 'name' | 'size' | 'rating';
+  sortBy: PhotoSortKey;
   sortOrder: 'asc' | 'desc';
   onCategoryChange: (categoryId: number | string | null | undefined) => void;
   onSearchChange: (search: string) => void;
-  onSortChange: (sort: 'date' | 'name' | 'size' | 'rating', order: 'asc' | 'desc') => void;
+  onSortChange: (sort: PhotoSortKey, order: 'asc' | 'desc') => void;
   mediaType?: 'all' | 'photo' | 'video';
   onMediaTypeChange?: (mediaType: 'all' | 'photo' | 'video') => void;
   showMediaFilter?: boolean;
+  // Credit filter (#1561). Rendered only when the event has at least one
+  // credited photo. `creditNoneValue` is the backend's "no credit" token.
+  credits?: Array<{ name: string; count: number }>;
+  creditNoneCount?: number;
+  creditNoneValue?: string;
+  selectedCredit?: string;
+  onCreditChange?: (credit: string | undefined) => void;
 }
 
 export const PhotoFilters: React.FC<PhotoFiltersProps> = ({
@@ -28,7 +36,12 @@ export const PhotoFilters: React.FC<PhotoFiltersProps> = ({
   onSortChange,
   mediaType = 'all',
   onMediaTypeChange,
-  showMediaFilter = false
+  showMediaFilter = false,
+  credits = [],
+  creditNoneCount = 0,
+  creditNoneValue = '__none__',
+  selectedCredit,
+  onCreditChange,
 }) => {
   const { t } = useTranslation();
   const handleSortToggle = () => {
@@ -36,7 +49,7 @@ export const PhotoFilters: React.FC<PhotoFiltersProps> = ({
   };
 
   return (
-    <div className="bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg p-4 mb-6">
+    <div className="bg-panel border border-line rounded-lg p-4 mb-6">
       <div className="flex flex-col lg:flex-row gap-4">
         {/* Search */}
         <div className="flex-1">
@@ -60,7 +73,7 @@ export const PhotoFilters: React.FC<PhotoFiltersProps> = ({
               const numeric = Number(raw);
               onCategoryChange(Number.isNaN(numeric) ? raw : numeric);
             }}
-            className="px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+            className="px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
           >
             <option value="">{t('gallery.allCategories', 'All Categories')}</option>
             {/* The literal the backend understands, not 0 (#1211). It skips
@@ -77,13 +90,43 @@ export const PhotoFilters: React.FC<PhotoFiltersProps> = ({
           </select>
         </div>
 
+        {/* Kept while a name is selected: clearing the last credited name
+            empties the list, and the filter would stay on with no way out. */}
+        {onCreditChange && (credits.length > 0 || !!selectedCredit) && (
+          <div className="flex items-center gap-2">
+            <UserRound className="w-5 h-5 text-neutral-400" aria-hidden="true" />
+            <select
+              value={selectedCredit ?? ''}
+              onChange={(e) => onCreditChange(e.target.value === '' ? undefined : e.target.value)}
+              aria-label={t('admin.photos.credit.filterLabel')}
+              className="px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500 focus:border-accent-dark max-w-[16rem]"
+            >
+              <option value="">{t('admin.photos.credit.filterAll')}</option>
+              {credits.map((credit) => (
+                <option key={credit.name} value={credit.name}>
+                  {credit.name} ({credit.count})
+                </option>
+              ))}
+              {selectedCredit && selectedCredit !== creditNoneValue
+                && !credits.some((credit) => credit.name === selectedCredit) && (
+                <option value={selectedCredit}>{selectedCredit} (0)</option>
+              )}
+              {(creditNoneCount > 0 || selectedCredit === creditNoneValue) && (
+                <option value={creditNoneValue}>
+                  {t('admin.photos.credit.filterNone')} ({creditNoneCount})
+                </option>
+              )}
+            </select>
+          </div>
+        )}
+
         {showMediaFilter && onMediaTypeChange && (
           <div className="flex items-center gap-2">
             <Filter className="w-5 h-5 text-neutral-400" />
             <select
               value={mediaType}
               onChange={(e) => onMediaTypeChange(e.target.value as 'all' | 'photo' | 'video')}
-              className="px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+              className="px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
             >
               <option value="all">{t('gallery.allMedia', 'All media')}</option>
               <option value="photo">{t('gallery.photosOnly', 'Photos only')}</option>
@@ -96,10 +139,11 @@ export const PhotoFilters: React.FC<PhotoFiltersProps> = ({
         <div className="flex items-center gap-2">
           <select
             value={sortBy}
-            onChange={(e) => onSortChange(e.target.value as 'date' | 'name' | 'size' | 'rating', sortOrder)}
-            className="px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+            onChange={(e) => onSortChange(e.target.value as PhotoSortKey, sortOrder)}
+            className="px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
           >
             <option value="date">{t('gallery.sortByDate', 'Sort by Date')}</option>
+            <option value="capture_date">{t('gallery.sortByCaptureDate', 'Sort by Capture Date')}</option>
             <option value="name">{t('gallery.sortByName', 'Sort by Name')}</option>
             <option value="size">{t('gallery.sortBySize', 'Sort by Size')}</option>
             <option value="rating">{t('gallery.sortByRating', 'Sort by Rating')}</option>
@@ -107,13 +151,13 @@ export const PhotoFilters: React.FC<PhotoFiltersProps> = ({
           
           <button
             onClick={handleSortToggle}
-            className="p-2 border border-neutral-300 dark:border-neutral-600 rounded-lg hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
+            className="p-2 border border-line-strong rounded-lg hover:bg-hover transition-colors"
             aria-label={sortOrder === 'asc' ? t('gallery.sortDescending', 'Sort descending') : t('gallery.sortAscending', 'Sort ascending')}
           >
             {sortOrder === 'asc' ? (
-              <SortAsc className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
+              <SortAsc className="w-5 h-5 text-soft" />
             ) : (
-              <SortDesc className="w-5 h-5 text-neutral-600 dark:text-neutral-400" />
+              <SortDesc className="w-5 h-5 text-soft" />
             )}
           </button>
         </div>

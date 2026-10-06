@@ -8,7 +8,7 @@
  * the User Management page can show role details without role-editing rights.
  *
  * System roles (super_admin/admin/editor/viewer/solo_photographer/
- * team_photographer) are protected in the service layer: they can't be deleted
+ * team_photographer/customer_support) are protected in the service layer: they can't be deleted
  * or renamed, and super_admin's permission set is immutable (the boot self-heal
  * keeps it complete regardless).
  *

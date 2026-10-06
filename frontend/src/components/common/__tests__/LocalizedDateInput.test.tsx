@@ -36,4 +36,29 @@ describe('LocalizedDateInput', () => {
     fireEvent.change(input, { target: { value: '15.08.2026' } });
     expect(onChange).toHaveBeenCalledWith('2026-08-15');
   });
+
+  it('focuses the native date input when opening the calendar, so leaving it closes the calendar', () => {
+    const focusedWhenOpened: Array<Element | null> = [];
+    const showPicker = vi.fn(function (this: HTMLInputElement) { focusedWhenOpened.push(document.activeElement); });
+    Object.defineProperty(HTMLInputElement.prototype, 'showPicker', { value: showPicker, configurable: true });
+    const { container } = render(<LocalizedDateInput label="Valid until" value="" onChange={vi.fn()} />);
+    const native = container.querySelector('input[type="date"]') as HTMLInputElement;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Valid until' }));
+    expect(showPicker).toHaveBeenCalledTimes(1);
+    // Browsers close the calendar when this input loses focus; it has to hold
+    // focus while the calendar is open.
+    expect(focusedWhenOpened[0]).toBe(native);
+    delete (HTMLInputElement.prototype as Partial<HTMLInputElement>).showPicker;
+  });
+
+  it('returns focus to the visible field once a date is picked', () => {
+    const onChange = vi.fn();
+    const { container } = render(<LocalizedDateInput label="Valid until" value="" onChange={onChange} />);
+    const native = container.querySelector('input[type="date"]') as HTMLInputElement;
+    native.focus();
+    fireEvent.change(native, { target: { value: '2026-09-16' } });
+    expect(onChange).toHaveBeenCalledWith('2026-09-16');
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Valid until' }));
+  });
 });

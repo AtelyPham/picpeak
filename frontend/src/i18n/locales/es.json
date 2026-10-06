@@ -127,6 +127,8 @@
     "noCategory": "Sin categoría",
     "eventSpecific": "(Específico del evento)",
     "clickToUpload": "Haz clic para subir o arrastra y suelta",
+    "clickToUploadOrDropFolder": "Haz clic para subir o arrastra y suelta archivos o una carpeta",
+    "takePhoto": "Tomar una foto",
     "fileRequirements": "{{formats}} (máx. {{sizeLimit}}MB por archivo, {{limit}} archivos por subida)",
     "fileRequirementsMedia": "Imágenes JPEG, PNG o WebP y videos MP4/MOV/WEBM (máx. 50MB por archivo, {{limit}} archivos por subida)",
     "unsupportedFiles": "Algunos archivos se omitieron porque el formato no es compatible (usa JPEG/PNG/WebP/MP4/MOV/WEBM).",
@@ -156,7 +158,54 @@
     "limitReached": "Límite de subida alcanzado ({{limit}} archivos por lote)",
     "uploadingChunks": "Subiendo {{count}} archivos en {{total}} lotes...",
     "mediaCategory": "Categoría de medios",
-    "uploadAction": "Subir {{count}} archivos"
+    "uploadAction": "Subir {{count}} archivos",
+    "invalidFileType": "Tipo de archivo no compatible: {{names}}",
+    "uploadingAs": "Subiendo como {{name}}",
+    "notYou": "¿No eres tú?",
+    "yourName": "Tu nombre",
+    "yourNameOptional": "Tu nombre (opcional)",
+    "nameRequired": "Introduce tu nombre para subir fotos.",
+    "nameSaveFailed": "No se pudo guardar tu nombre. Inténtalo de nuevo.",
+    "namePrivacyShown": "Tu nombre se guarda con tus fotos y se muestra a los demás invitados. El anfitrión puede eliminarlo en cualquier momento.",
+    "namePrivacyHidden": "Tu nombre se guarda con tus fotos para el anfitrión. Los demás invitados no lo ven, y el anfitrión puede eliminarlo en cualquier momento.",
+    "addFiles": "Agregar archivos",
+    "chooseFolder": "Elegir carpeta",
+    "structure": {
+      "galleryRoot": "nivel principal de la galería",
+      "folderCount_one": "{{count}} carpeta",
+      "folderCount_other": "{{count}} carpetas",
+      "uploadRequesting_one": "Subir {{count}} archivo · solicitar {{folders}}",
+      "uploadRequesting_other": "Subir {{count}} archivos · solicitar {{folders}}",
+      "uploadIntoFolders_one": "Subir {{count}} archivo a {{folders}}",
+      "uploadIntoFolders_other": "Subir {{count}} archivos a {{folders}}",
+      "tooManyFolders": "Esta selección tiene más de {{limit}} carpetas. Súbela en partes.",
+      "resolveFailed": "No se pudieron preparar las carpetas para esta subida. No se subió nada.",
+      "looseFilesGoTo": "Los archivos sueltos van a",
+      "uploadInto": "Subir a",
+      "statusNew": "Nueva",
+      "statusNeedsAdmin": "Requiere administrador",
+      "statusExists": "Existe",
+      "keepStructure": "Mantener la estructura de carpetas",
+      "keepStructureHelp": "Las subcarpetas se convierten en carpetas de la galería. El valor predeterminado viene del ajuste Carpetas del evento.",
+      "skipOuter": "Omitir la carpeta exterior \"{{name}}\"",
+      "skipOuterHelp": "Todo estaba dentro de una sola carpeta, así que se omite. De lo contrario, los invitados tendrían que abrir primero una carpeta adicional.",
+      "previewFailed": "No se pudo cargar la vista previa de las carpetas. La subida vuelve a determinar las carpetas al empezar.",
+      "loading": "Comprobando las carpetas…",
+      "firstLookRow": "→ nivel principal de la galería, marcado como \"Primera selección\"",
+      "looseFiles_one": "{{count}} archivo suelto → {{target}}",
+      "looseFiles_other": "{{count}} archivos sueltos → {{target}}",
+      "hiddenSkipped_one": "Se omite {{count}} archivo en carpetas ocultas",
+      "hiddenSkipped_other": "Se omiten {{count}} archivos en carpetas ocultas",
+      "folded": "Las carpetas con más de {{depth}} niveles de profundidad se agrupan en su carpeta del nivel {{depth}}.",
+      "needsAdminNotice_one": "{{count}} carpeta aún no existe. Tu rol puede subir archivos, pero no crear carpetas, así que se envía a un administrador como solicitud de carpeta. Hasta que un administrador la confirme, sus {{files}} fotos esperan en la carpeta existente más cercana (indicada con →) y pasan automáticamente a la nueva carpeta una vez confirmada.",
+      "needsAdminNotice_other": "{{count}} carpetas aún no existen. Tu rol puede subir archivos, pero no crear carpetas, así que se envían a un administrador como solicitudes de carpeta. Hasta que un administrador las confirme, sus {{files}} fotos esperan en la carpeta existente más cercana (indicada con →) y pasan automáticamente a las nuevas carpetas una vez confirmadas.",
+      "firstLookCallout_one": "Carpeta de primera selección encontrada: \"{{name}}\". Su {{count}} foto se marca como \"Primera selección\" y esta galería pasa a la entrega en dos etapas: los invitados ven que hay más fotos en camino hasta que marques la galería completa como lista.",
+      "firstLookCallout_other": "Carpeta de primera selección encontrada: \"{{name}}\". Sus {{count}} fotos se marcan como \"Primera selección\" y esta galería pasa a la entrega en dos etapas: los invitados ven que hay más fotos en camino hasta que marques la galería completa como lista.",
+      "firstLookSettings": "Fecha y insignia: Ajustes de esta galería → Carpetas y entrega. Palabras clave: Ajustes → Eventos.",
+      "nothingToUpload": "No se puede subir ninguno de los archivos seleccionados: todos están en carpetas ocultas u omitidas.",
+      "keptForNext": "Los archivos añadidos mientras se preparaban las carpetas siguen seleccionados: {{count}}."
+    },
+    "largeFileReplaceSkipped": "Reemplazar por nombre no está disponible para archivos que superan el tamaño del lote; súbelo sin reemplazar."
   },
   "navigation": {
     "dashboard": "Panel",
@@ -169,7 +218,9 @@
     "emailSettings": "Ajustes de correo",
     "backup": "Copia de seguridad",
     "cmsPages": "Páginas CMS",
-    "users": "Usuarios"
+    "users": "Usuarios",
+    "automation": "Automatización",
+    "sharing": "Compartir"
   },
   "archives": {
     "title": "Archivos",
@@ -255,6 +306,8 @@
     "noPhotosFound": "No se encontraron fotos",
     "failedToLoad": "Error al cargar las fotos",
     "tryAgain": "Intentar de nuevo",
+    "passwordChangeRequired": "Cambia tu contraseña en el área de administración antes de previsualizar esta galería.",
+    "goToAdminArea": "Ir al área de administración",
     "loading": "Cargando galería...",
     "expiredOn": "Esta galería expiró el {{date}}.",
     "expiresIn": "La galería expira en {{count}} día",
@@ -270,10 +323,24 @@
     "downloadedPhotos_plural": "¡{{count}} fotos descargadas!",
     "downloadError": "Algunas fotos fallaron al descargar",
     "selectPhotos": "Seleccionar fotos",
+    "selectMedia": "Seleccionar medios",
     "cancelSelection": "Cancelar selección",
     "photosSelected": "{{count}} seleccionadas",
     "selectAll": "Seleccionar todo",
     "deselectAll": "Deseleccionar todo",
+    "copyFilenames": {
+      "button": "Copiar nombres de archivo",
+      "title": "Copiar nombres de archivo",
+      "selectedCount": "Fotos seleccionadas: {{count}}",
+      "favoritesCount": "Fotos favoritas: {{count}}",
+      "hint": "Pega la lista en la búsqueda por nombre de archivo de tu editor RAW. Se omiten las extensiones para que también coincidan los archivos RAW.",
+      "separator": "Separador",
+      "separatorComma": "Coma",
+      "separatorSpace": "Espacio",
+      "copy": "Copiar",
+      "copied": "Copiado",
+      "copyFailed": "La copia fue bloqueada. El texto está seleccionado, pulsa Ctrl+C o Cmd+C para copiarlo."
+    },
     "deleteSelected": "Eliminar seleccionadas",
     "photosCount": "{{count}} foto",
     "photosCount_plural": "{{count}} fotos",
@@ -309,6 +376,8 @@
     "commented": "Comentado",
     "colorFilter": "Color",
     "filterByColor": "Mostrar solo {{color}}",
+    "minRatingFilter": "Mi valoración",
+    "filterByMinRating": "Mi valoración: {{min}} estrellas o más",
     "folders": "Carpetas",
     "openFolder": "Abrir carpeta {{name}}",
     "folderPhotoCount": "{{count}} fotos",
@@ -317,7 +386,50 @@
     "downloadFolderCapped": "Descargar las primeras {{limit}} de {{total}}",
     "downloadEverything": "Descargar todas las fotos",
     "videoFormatUnsupported": "Este formato de vídeo no se puede reproducir en este navegador. Descárgalo para verlo.",
-    "videoLoadFailed": "No se ha podido cargar este vídeo."
+    "videoLoadFailed": "No se ha podido cargar este vídeo.",
+    "downloadLimit": {
+      "reached": "Límite de descargas alcanzado. Contacta con tu fotógrafo para obtener más descargas.",
+      "notEnough": "Solo quedan {{remaining}} descargas. Selecciona menos fotos o contacta con tu fotógrafo.",
+      "counter": "{{used}} de {{limit}} descargas usadas",
+      "selectionCost": "Usa {{cost}} de tus {{remaining}} descargas restantes",
+      "selectionTooLarge": "Límite de descargas: esta selección necesita {{cost}} descargas, solo quedan {{remaining}}",
+      "downloadAllBlocked": "Esta galería tiene más fotos que tus descargas restantes",
+      "previewOnly": "Las descargas de esta galería tienen tamaño de vista previa. Los archivos originales están disponibles para el cliente.",
+      "videoClientOnly": "Este vídeo solo está disponible para el cliente."
+    },
+    "credits": {
+      "filterLabel": "De",
+      "everyone": "Todos",
+      "unnamedGuests": "Invitados sin nombre",
+      "photographer": "Fotógrafo",
+      "uploadedBy": "Subida por {{name}}",
+      "photoBy": "Foto de {{name}}"
+    },
+    "footer": {
+      "forgetMeConfirmUploads": "Tu nombre se eliminará de las fotos que subiste a esta galería."
+    },
+    "firstLook": "Primera selección",
+    "viewAllPhotos": "Todas las fotos",
+    "viewSwitch": "Mostrar fotos por",
+    "folderRoot": "Galería",
+    "folderPath": "Ruta de carpetas",
+    "folderUp": "Volver a {{name}}",
+    "subfolderCount": "Carpetas: {{count}}",
+    "downloadFolderWithSubfolders": "Descargar carpeta con subcarpetas ({{count}})",
+    "collapseFolder": "Contraer {{name}}",
+    "expandFolder": "Expandir {{name}}",
+    "subfolderCount_one": "Carpetas: {{count}}",
+    "downloadFolderWithSubfolders_one": "Descargar carpeta con subcarpetas ({{count}})",
+    "subfolderCount_other": "Carpetas: {{count}}",
+    "downloadFolderWithSubfolders_other": "Descargar carpeta con subcarpetas ({{count}})",
+    "delivery": {
+      "title": "Más fotos en camino",
+      "progressWithDate": "{{delivered}} de aprox. {{expected}} fotos ya están aquí. Las imágenes restantes aún se están editando: la galería completa estará disponible a más tardar el {{date}}.",
+      "progress": "{{delivered}} de aprox. {{expected}} fotos ya están aquí. Las imágenes restantes aún se están editando.",
+      "withDate": "Las imágenes restantes aún se están editando: la galería completa estará disponible a más tardar el {{date}}.",
+      "noDetails": "Las imágenes restantes aún se están editando.",
+      "progressLabel": "Fotos entregadas hasta ahora"
+    }
   },
   "categories": {
     "title": "Categorías de fotos",
@@ -343,7 +455,8 @@
     "coverPhotoSet": "Foto de portada establecida con éxito",
     "coverPhotoRemoved": "Foto de portada eliminada",
     "failedToSetCoverPhoto": "Error al establecer la foto de portada",
-    "categoryHeroHint": "Si no se establece una foto de portada para una categoría, se usará la foto hero por defecto."
+    "categoryHeroHint": "Si no se establece una foto de portada para una categoría, se usará la foto hero por defecto.",
+    "nestedFoldersHint": "Las carpetas dentro de carpetas se gestionan en la barra de carpetas de la pestaña Fotos."
   },
   "events": {
     "revealMode": "Modo revelación (ocultar la galería hasta revelarla)",
@@ -427,6 +540,7 @@
     "warningEmailsSent": "Se han enviado emails de aviso al cliente.",
     "overview": "Resumen",
     "photos": "Fotos",
+    "media": "Medios",
     "categories": "Categorías",
     "eventInformation": "Información del evento",
     "sourceMode": "Modo de origen",
@@ -449,8 +563,18 @@
     "creationEmailResent": "El correo de creación se ha puesto en cola para enviar",
     "failedToResendEmail": "Error al reenviar el correo de creación",
     "photoStatistics": "Estadísticas de fotos",
+    "mediaStatistics": "Estadísticas de medios",
     "totalPhotos": "Total de fotos",
+    "videos": "Videos",
+    "videoRuntime": "Duración de los videos",
+    "photosCount_one": "{{count}} foto",
+    "photosCount_many": "{{count}} fotos",
+    "photosCount_other": "{{count}} fotos",
+    "videosCount_one": "{{count}} video",
+    "videosCount_many": "{{count}} videos",
+    "videosCount_other": "{{count}} videos",
     "managePhotos": "Gestionar fotos",
+    "manageMedia": "Gestionar medios",
     "actions": "Acciones",
     "archivingInfo": "Al archivar se creará un archivo ZIP con todas las fotos y se quitará la galería del acceso público.",
     "statistics": "Estadísticas",
@@ -677,9 +801,8 @@
     },
     "activeFilter": "Activo",
     "archivedFilter": "Archivado",
-    "sortByName": "Por nombre",
-    "sortByDate": "Por fecha",
-    "sortByExpiration": "Por expiración",
+    "sortByName": "Ordenar por nombre",
+    "sortByDate": "Ordenar por fecha",
     "photosCount": "Fotos",
     "moreActions": "Más acciones",
     "copyLinkTooltip": "Copiar enlace",
@@ -691,7 +814,115 @@
     "noEventsDescription": "Crea tu primer evento para comenzar.",
     "bulkArchive": "Archivar",
     "confirmBulkArchive": "¿Seguro que quieres archivar {{count}} evento(s)?",
-    "confirmBulkArchiveDescription": "Esta acción no se puede deshacer. Los eventos archivados dejarán de ser accesibles públicamente."
+    "confirmBulkArchiveDescription": "Esta acción no se puede deshacer. Los eventos archivados dejarán de ser accesibles públicamente.",
+    "downloadLimit": "Límite de descargas",
+    "downloadLimitHelp": "Número máximo de fotos que el cliente puede descargar. 0 = ilimitado",
+    "downloadLimitUsage": "{{used}} / {{limit}} descargadas",
+    "downloadLimitReset": "Restablecer",
+    "downloadLimitResetConfirm": "¿Restablecer las descargas de esta galería? El cliente recupera el límite completo y las fotos ya descargadas vuelven a contar.",
+    "downloadLimitResetDone": "Descargas restablecidas",
+    "downloadLimitResetFailed": "No se pudieron restablecer las descargas",
+    "uploaderNames": {
+      "label": "Nombres de quien sube",
+      "help": "Permite a los invitados añadir su nombre al subir fotos, para que sepas quién subió cada una.",
+      "modes": {
+        "off": "Desactivado",
+        "optional": "Opcional",
+        "required": "Obligatorio"
+      },
+      "showToGuests": "Mostrar los nombres a los invitados",
+      "showToGuestsHelp": "Los invitados ven los nombres de las fotos subidas mientras esto está activado; los nombres dados mientras estaba desactivado quedan solo para ti y el anfitrión. Al desactivarlo se ocultan todos los nombres a los invitados. También afecta a los créditos del fotógrafo leídos del EXIF.",
+      "shownToGuests": "Visible para los invitados",
+      "hiddenFromGuests": "Visible solo para ti"
+    },
+    "sortNameAsc": "A – Z",
+    "sortNameDesc": "Z – A",
+    "sortDateNewest": "Más recientes primero",
+    "sortDateOldest": "Más antiguas primero",
+    "sortCreatedNewest": "Creadas recientemente",
+    "sortCreatedOldest": "Creadas primero",
+    "sortPhotosMost": "Más fotos",
+    "sortPhotosFewest": "Menos fotos",
+    "sortStatusActive": "Activas primero",
+    "sortStatusArchived": "Archivadas primero",
+    "sortExpiresSoonest": "Caducan antes",
+    "sortExpiresLatest": "Caducan después",
+    "filterAllTypes": "Todos los tipos",
+    "filterByType": "Filtrar por tipo",
+    "sortByPhotos": "Ordenar por número de fotos",
+    "sortByStatus": "Ordenar por estado",
+    "sortByExpiry": "Ordenar por caducidad",
+    "settingsTab": {
+      "delivery": "Carpetas y entrega",
+      "about": {
+        "delivery": "Carpetas anidadas de las subidas y una primera selección antes de la galería completa."
+      },
+      "summary": {
+        "folderStructureOn": "Estructura de carpetas activada",
+        "folderStructureOff": "Subidas sin carpetas",
+        "firstLookDue": "primera selección, galería completa para el {{date}}",
+        "firstLook": "primera selección, más después"
+      }
+    },
+    "folders": {
+      "sectionTitle": "Carpetas",
+      "sectionHelp": "Las subcarpetas de una subida o de la carpeta externa vinculada se convierten en carpetas anidadas de la galería (como máximo tres niveles). Desactivarlo solo afecta a nuevas subidas y escaneos; las carpetas existentes se quedan como están.",
+      "mirror": "Reproducir la estructura de carpetas al subir e importar",
+      "mirrorHelp": "El diálogo de subida aún puede cambiarlo en cada subida."
+    },
+    "delivery": {
+      "sectionTitle": "Entrega en dos etapas",
+      "sectionHelp": "Entrega ahora una primera selección y la galería completa más tarde. Los invitados ven las primeras fotos con una insignia, un aviso de que llegarán más y marcadores de posición hasta que marques la galería completa como lista.",
+      "statusComplete": "Completa",
+      "statusPartial": "Primera selección, más después",
+      "ofApprox": "de ~{{count}}",
+      "badged": "Fotos con la insignia «{{label}}»: {{count}}",
+      "overdueSince": "Prometida para el {{date}}: atrasada",
+      "promisedBy": "Prometida para el {{date}} · días restantes: {{count}}",
+      "completeButton": "La galería completa está lista",
+      "completedOn": "Completada el {{date}}. Las insignias de la primera selección se quedan en sus fotos.",
+      "expected": "Número de fotos previsto",
+      "expectedHelp": "Aproximado. Solo se usa para el aviso a los invitados y los marcadores de posición.",
+      "dueAt": "Galería completa prometida para",
+      "dueDefault": "predeterminado",
+      "dueHelp": "Se muestra a los invitados y se usa para tu recordatorio. Vacío: fecha del evento más el valor predeterminado de Ajustes → Eventos.",
+      "badgeLabel": "Texto de la insignia",
+      "badgeHelp": "Por ejemplo «Avance para redes sociales». La insignia se queda en estas fotos cuando llega la galería completa.",
+      "switchOffHint": "Guardar «Completa» aquí solo quita el aviso y los marcadores de posición; no se envía ningún correo. Usa «La galería completa está lista» para avisar al cliente.",
+      "invalidExpected": "El número de fotos previsto debe ser un número entero mayor que 0 o quedar vacío.",
+      "completeTitle": "¿Marcar la galería completa como lista?",
+      "completeBody": "El aviso y los marcadores de posición desaparecen. Las insignias de la primera selección se quedan. Fotos que verán los invitados: {{count}}.",
+      "sendMail": "Enviar el correo «Su galería completa está lista»",
+      "sendMailHelp": "Al correo del cliente de esta galería. Los flujos de trabajo también pueden reaccionar a «gallery.completed».",
+      "removeDuplicates": "Quitar duplicados de la primera selección ({{count}})",
+      "removeDuplicatesHelp": "Fotos de la primera selección que vuelven a aparecer en la galería completa: mismo nombre de archivo original, único en ambos lados, y misma hora de captura (o, sin ella, mismo tamaño). Eliminar es definitivo; las copias de la galería completa conservan la insignia.",
+      "removeDuplicatesNoPermission": "Para eliminar fotos se necesita el permiso photos.delete.",
+      "completeAndNotify": "Marcar como lista y avisar",
+      "completeOnly": "Marcar como lista",
+      "completedMailed": "La galería está completa. Se ha avisado al cliente.",
+      "completed": "La galería está completa.",
+      "completeFailed": "No se pudo marcar la galería como completa.",
+      "pill": "Primera selección",
+      "pillOverdue": "Primera selección · atrasada",
+      "pillDue": "Primera selección · vence en {{count}} d",
+      "awaitingFilter": "Galería completa pendiente",
+      "progressShort": "{{count}} de ~{{expected}} fotos",
+      "progressNoExpected": "Fotos hasta ahora: {{count}}",
+      "overdueShort": "Atrasada desde el {{date}}",
+      "dueShort": "Vence el {{date}}",
+      "viewAllAwaiting": "Ver todas",
+      "duplicatesNotRemoved": "La galería está completa, pero no se pudieron quitar los duplicados de la primera selección. Elimínalos en la pestaña Fotos."
+    },
+    "externalSource": {
+      "applyStructure": "Aplicar estructura de carpetas",
+      "applyStructureHint": "Reflejar las subcarpetas en las fotos importadas antes de activar la estructura de carpetas",
+      "applyStructureTitle": "¿Aplicar la estructura de carpetas?",
+      "applyStructureMessage": "Las fotos que aún no están en una carpeta de la galería pasan a carpetas que reflejan las subcarpetas de la carpeta externa. Las fotos que ya están en una carpeta se quedan donde están.",
+      "structureApplied_one": "{{count}} foto movida a carpetas",
+      "structureApplied_other": "{{count}} fotos movidas a carpetas",
+      "structureNothing": "Todas las fotos de una subcarpeta ya están en una carpeta",
+      "structureFailed": "No se pudo aplicar la estructura de carpetas"
+    }
   },
   "settings": {
     "title": "Ajustes del sistema",
@@ -705,6 +936,8 @@
       "defaultExpiration": "Expiración por defecto (días)",
       "defaultExpirationHelp": "Cuánto tiempo permanecen activas las galerías por defecto",
       "maxFileSize": "Tamaño máximo de archivo (MB)",
+      "videoWebRendition": "Copias de vídeo reproducibles en el navegador",
+      "videoWebRenditionHelp": "Recodifica los vídeos que un navegador no puede reproducir (HEVC, QuickTime, MP4 no transmitibles) a un MP4 H.264 para la reproducción. El original sigue siendo la descarga. Consume CPU por vídeo y un segundo archivo; al activarlo se ponen en cola los vídeos ya subidos.",
       "maxFileSizeHelp": "Tamaño máximo por foto subida",
       "maxFilesPerUpload": "Máx. archivos por subida",
       "maxFilesPerUploadHelp": "Número máximo de fotos permitido en un solo lote de subida (1-{{max}}).",
@@ -738,7 +971,10 @@
       "accountEmailRequired": "Se requiere una dirección de correo",
       "accountEmailInvalid": "Introduce una dirección de correo válida",
       "accountSaveButton": "Guardar detalles de la cuenta",
-      "accountSaveSuccess": "Detalles de la cuenta actualizados"
+      "accountSaveSuccess": "Detalles de la cuenta actualizados",
+      "adminLanguage": "Tu idioma de administración",
+      "adminLanguageHelp": "Se aplica al área de administración, solo para ti en este dispositivo. Surte efecto de inmediato — no hace falta guardar.",
+      "customerLanguage": "Idioma de la galería y los invitados"
     },
     "publicSite": {
       "tabLabel": "Sitio público",
@@ -844,7 +1080,7 @@
       "aboutText": "Las categorías globales están disponibles para todos los eventos. También puedes crear categorías específicas del evento al editar eventos individuales. Las categorías ayudan a organizar las fotos y permiten a los invitados filtrar por tipo en la galería."
     },
     "systemStatus": {
-      "title": "Estado del sistema",
+      "title": "Estado",
       "storageOverview": "Resumen de almacenamiento",
       "systemInfo": "Información del sistema",
       "databaseInfo": "Información de la base de datos",
@@ -868,7 +1104,8 @@
       "pending": "Pendiente",
       "sent": "Enviado",
       "failed": "Fallado",
-      "lastUpdate": "Última actualización"
+      "lastUpdate": "Última actualización",
+      "description": "Servicios, colas, almacenamiento y versión — lo que esta instancia está ejecutando ahora."
     },
     "photoDimensions": {
       "title": "Dimensiones de foto",
@@ -932,7 +1169,17 @@
       "defaultAllowColorLabels": "Etiquetas de color",
       "defaultKeybindMode": "Atajos predeterminados del visor",
       "keybindColors": "Solo colores — 1 verde, 2 amarillo, 3 rojo",
-      "keybindLightroom": "Lightroom — 1-5 estrellas, 6-9 colores"
+      "keybindLightroom": "Lightroom — 1-5 estrellas, 6-9 colores",
+      "defaultDownloadLimit": "Límite de descargas predeterminado",
+      "defaultDownloadLimitHelp": "Valor inicial para nuevos eventos: cuántas fotos puede descargar un cliente. 0 = ilimitado.",
+      "defaultFolderStructure": "Reproducir la estructura de carpetas en galerías nuevas",
+      "defaultFolderStructureHelp": "Las subcarpetas de subidas y carpetas externas se convierten en carpetas anidadas de la galería. Las galerías existentes conservan su propio ajuste.",
+      "firstLookDetection": "Iniciar una primera selección desde carpetas con palabra clave",
+      "firstLookDetectionHelp": "Una carpeta de nivel superior cuyo nombre contenga una de estas palabras (p. ej. «Boda (FirstLook)») no se crea como carpeta: sus fotos reciben una insignia y la galería pasa a la entrega en dos etapas.",
+      "firstLookKeywords": "Palabras clave",
+      "firstLookKeywordsHelp": "Separadas por comas. Se ignoran mayúsculas, espacios, guiones y guiones bajos, así que «FirstLook» también coincide con «first-look».",
+      "deliveryDays": "Galería completa vence tras (días)",
+      "deliveryDaysHelp": "Si una primera selección empieza sin fecha prometida, la galería completa vence tantos días después de la fecha del evento."
     },
     "imageSecurity": {
       "title": "Proteger Imagen",
@@ -1070,6 +1317,35 @@
       "deviceTypes": "Tipos de dispositivo desde agentes de usuario",
       "privacy": "Privacidad",
       "privacyText": "Las direcciones IP están hasheadas para privacidad. No se almacena datos personales. Los datos de analíticas se conservan durante 90 días."
+    },
+    "customerSurface": {
+      "save": "Guardar ajustes del encabezado"
+    },
+    "creditBackfill": {
+      "title": "Autores de las fotos",
+      "description": "Lee el autor (EXIF Artist, XMP Creator o el nombre del Copyright) de las fotos añadidas antes de que se registraran autores. Las subidas de invitados y los nombres fijados a mano nunca se modifican.",
+      "withCredit": "Con autor",
+      "undecided": "Aún sin leer",
+      "result": "Última ejecución: {{success}} con autor, {{noCredit}} sin nombre en el archivo, {{failed}} inaccesibles",
+      "running": "Leyendo autores...",
+      "noneToRead": "No quedan fotos por leer",
+      "button": "Leer autores del EXIF"
+    },
+    "groups": {
+      "people": "Personas y acceso"
+    },
+    "health": {
+      "title": "Estado de salud",
+      "description": "Fallos en segundo plano que requieren atención — correos atascados, comprobaciones fallidas y limpieza."
+    },
+    "search": {
+      "placeholder": "Buscar en los ajustes…",
+      "label": "Buscar en los ajustes",
+      "noResults": "Ningún ajuste coincide con «{{query}}»."
+    },
+    "features": {
+      "configure": "Configurar",
+      "sidebarInSettings": "Sin entrada en la barra lateral — está en los ajustes"
     }
   },
   "analytics": {
@@ -1375,6 +1651,7 @@
     "activeGalleries": "Galerías activas",
     "storageUsed": "Almacenamiento usado",
     "totalPhotos": "Fotos totales",
+    "totalMedia": "Total de medios",
     "storagePercent": "{{percent}}% del límite {{limit}}",
     "storageSoftLimitConfigured": "Límite configurado: {{limit}}",
     "storageSoftLimitRecommended": "Límite sugerido: {{limit}}",
@@ -1425,6 +1702,7 @@
       "eventUpdated": "Evento \"{{eventName}}\" actualizado",
       "eventDeleted": "Evento \"{{eventName}}\" eliminado",
       "photosUploaded": "{{count}} fotos subidas a \"{{eventName}}\"",
+      "mediaUploaded": "{{media}} subidos a \"{{eventName}}\"",
       "photoDeleted": "Foto eliminada de \"{{eventName}}\"",
       "photosBulkDeleted": "{{count}} fotos eliminadas de \"{{eventName}}\"",
       "eventExpiring": "El evento \"{{eventName}}\" expira en {{days}} días",
@@ -1500,6 +1778,7 @@
       "gallery_opened": "Se abrió la galería «{{eventName}}»",
       "gallery_downloaded": "Se descargaron fotos de «{{eventName}}»",
       "photos_uploaded": "{{count}} fotos subidas a {{eventName}}",
+      "media_uploaded": "{{media}} subidos a {{eventName}}",
       "event_archived": "Evento archivado: {{eventName}}",
       "archive_restored": "Archivo restaurado: {{eventName}}",
       "archive_deleted": "Archivo eliminado: {{eventName}}",
@@ -1548,7 +1827,19 @@
       "password_reset": "Contraseña restablecida para: {{eventName}}",
       "admin_logout": "Administrador {{actorName}} cerró sesión",
       "system_activity": "Actividad del sistema: {{type}}",
-      "unknown": "Actividad desconocida"
+      "unknown": "Actividad desconocida",
+      "folder_created": "Carpeta creada: {{name}}",
+      "folder_updated": "Carpeta modificada en {{eventName}}",
+      "folder_deleted": "Carpeta eliminada: {{name}}",
+      "folders_created": "Carpetas creadas en {{eventName}}: {{count}}",
+      "folder_requested": "Carpetas solicitadas para {{eventName}}: {{count}}",
+      "folder_request_approved": "Solicitud de carpeta aprobada: {{path}}",
+      "folder_request_rejected": "Solicitud de carpeta rechazada: {{path}}",
+      "folder_structure_applied": "Estructura de carpetas aplicada en {{eventName}}",
+      "delivery_first_look_started": "Primera selección iniciada para {{eventName}}",
+      "delivery_completed": "Galería completa entregada: {{eventName}}",
+      "delivery_due_soon": "La galería completa de {{eventName}} vence pronto",
+      "delivery_overdue": "La galería completa de {{eventName}} está atrasada"
     },
     "userManagement": "Gestión de usuarios",
     "inviteUser": "Invitar usuario",
@@ -1576,6 +1867,7 @@
     },
     "photos": {
       "hidden": "Ocultas",
+      "webCopyFailed": "Sin copia web",
       "hideSelected": "Ocultar",
       "showSelected": "Mostrar",
       "hiddenSuccess": "Fotos ocultas a los invitados",
@@ -1587,7 +1879,31 @@
       "rateStars": "Valorar con {{count}} estrellas",
       "markError": "No se pudo guardar tu marca",
       "yourMarkColor": "Tu marca: {{color}}",
-      "yourMarkRating": "Tu valoración: {{count}}"
+      "yourMarkRating": "Tu valoración: {{count}}",
+      "columns": {
+        "credit": "Autor"
+      },
+      "credit": {
+        "label": "Autor",
+        "edit": "Editar",
+        "save": "Guardar nombre",
+        "clear": "Quitar nombre",
+        "saved": "Nombre guardado",
+        "cleared": "Nombre eliminado",
+        "none": "Sin nombre",
+        "unnamedGuest": "Invitado, sin nombre",
+        "manualHint": "Un nombre fijado aquí es definitivo: los datos EXIF no lo sustituyen.",
+        "bulkAction": "Fijar nombre",
+        "bulkTitle": "Fijar el nombre en {{count}} fotos",
+        "filterLabel": "Filtrar por autor",
+        "filterAll": "Todos los nombres",
+        "filterNone": "Sin nombre"
+      },
+      "individualPhotos": "Fotos individuales",
+      "individualVideos": "Vídeos individuales",
+      "collages": "Collages",
+      "noPosterFrame": "Sin fotograma de portada",
+      "noPosterFrameRetry": "Volver a tomar el fotograma de portada"
     },
     "guests": {
       "columns": {
@@ -2006,8 +2322,8 @@
       },
       "fields": {
         "destinationPath": "Ruta de destino",
-        "destinationPathHelp": "Ruta local para almacenar copias",
-        "destinationPathPlaceholder": "/ruta/a/copia/seguridad",
+        "destinationPathHelp": "Directorio tal como lo ve el backend. Con Docker es una ruta dentro del contenedor del backend, no del host: usa un directorio montado en el contenedor.",
+        "destinationPathPlaceholder": "/app/storage/backups",
         "rsyncHost": "Host remoto",
         "rsyncHostHelp": "Hostname o IP SSH",
         "rsyncHostPlaceholder": "backup.example.com",
@@ -2017,9 +2333,6 @@
         "rsyncPath": "Ruta remota",
         "rsyncPathHelp": "Ruta en el servidor remoto",
         "rsyncPathPlaceholder": "/home/backup/photo-sharing",
-        "rsyncSshKey": "Clave privada SSH",
-        "rsyncSshKeyHelp": "Clave privada SSH para autenticación (opcional)",
-        "rsyncSshKeyPlaceholder": "-----BEGIN RSA PRIVATE KEY-----",
         "s3Endpoint": "Endpoint S3",
         "s3EndpointHelp": "Endpoint API S3 (p. ej., s3.amazonaws.com)",
         "s3EndpointPlaceholder": "https://s3.amazonaws.com",
@@ -2416,6 +2729,9 @@
     "pendingApproval": "Pendiente de aprobación",
     "noComments": "Aún no hay comentarios. ¡Sé el primero!",
     "rating": "Valoración",
+    "rateStar_one": "Valorar con {{count}} estrella",
+    "rateStar_other": "Valorar con {{count}} estrellas",
+    "removeRating": "Quitar la valoración",
     "ratePhoto": "Valorar esta foto",
     "yourRating": "Tu valoración",
     "averageRating": "Valoración media",
@@ -2488,6 +2804,7 @@
     "hasFavorites": "Con favoritos",
     "hasComments": "Con comentarios",
     "showingPhotos": "Fotos totales",
+    "showingMedia": "Medios totales",
     "withRatings": "Con valoraciones",
     "colorLabels": "Etiquetas de color",
     "showOnlyColor": "Mostrar solo {{color}}",
@@ -2536,6 +2853,7 @@
     "enableToggle": "Habilitar acceso cliente",
     "enableDescription": "Permitir que clientes revisen y oculten fotos antes de compartir.",
     "pinHelperText": "El cliente usará este PIN para acceder a la revisión.",
+    "linkAfterCreate": "El enlace de acceso del cliente aparece en la página del evento en cuanto se crea el evento.",
     "pinUpdated": "PIN del cliente actualizado",
     "setPin": "Establecer PIN",
     "linkLabel": "Enlace de acceso cliente",
@@ -2562,5 +2880,96 @@
     "filenameAZ": "Nombre de archivo (A-Z)",
     "filenameZA": "Nombre de archivo (Z-A)",
     "dateTaken": "Fecha de captura"
+  },
+  "search": {
+    "groups": {
+      "pages": "Páginas"
+    },
+    "palette": {
+      "label": "Buscar en el área de administración",
+      "placeholder": "Buscar páginas y ajustes…",
+      "noResults": "Nada coincide con «{{query}}».",
+      "open": "Buscar páginas y ajustes"
+    }
+  },
+  "automation": {
+    "empty": {
+      "title": "No hay funciones de automatización activadas",
+      "body": "Activa Workflows o los correos de recordatorio en Ajustes → Funciones para empezar.",
+      "noAccessTitle": "Aquí no hay nada que puedas abrir",
+      "noAccessBody": "Estas funciones están activadas, pero tu rol no puede abrir ninguna de sus páginas. Pide acceso a un administrador."
+    },
+    "subnav": {
+      "approvals": "Aprobaciones"
+    }
+  },
+  "photos": {
+    "folders": {
+      "title": "Carpetas",
+      "galleryRoot": "Nivel principal de la galería",
+      "allPhotos": "Todas las fotos",
+      "breadcrumb": "Ruta de la carpeta",
+      "waitingView": "Esperando solicitudes de carpeta",
+      "waitingChip": "Esperando una carpeta",
+      "noFolders": "Aún no hay carpetas",
+      "name": "Nombre de la carpeta",
+      "newFolder": "Nueva carpeta",
+      "newSubfolder": "Nueva subcarpeta",
+      "newSubfolderIn": "Nueva subcarpeta en \"{{name}}\"",
+      "create": "Crear",
+      "created": "Carpeta creada",
+      "createFailed": "No se pudo crear la carpeta",
+      "rename": "Renombrar",
+      "renameTitle": "Renombrar carpeta",
+      "renamed": "Carpeta renombrada",
+      "move": "Mover",
+      "moveTitle": "Mover \"{{name}}\" a…",
+      "moveHint": "Sus subcarpetas y fotos se mueven con ella. Las carpetas se anidan como máximo {{depth}} niveles.",
+      "moved": "Carpeta movida",
+      "updateFailed": "No se pudo modificar la carpeta",
+      "maxDepthReached": "Las carpetas se anidan como máximo {{depth}} niveles",
+      "delete": "Eliminar carpeta",
+      "deleteTitle": "¿Eliminar la carpeta \"{{name}}\"?",
+      "deleteMessage": "Sus fotos ({{photos}}) y subcarpetas ({{folders}}) pasan a {{parent}}. No se elimina ninguna foto.",
+      "deleted": "Carpeta eliminada",
+      "deleteFailed": "No se pudo eliminar la carpeta",
+      "allowDownloads": "Permitir descargas en esta carpeta",
+      "downloadsAllowed": "Descargas permitidas",
+      "downloadsBlocked": "Descargas bloqueadas",
+      "downloadsOn": "Descargas permitidas en esta carpeta",
+      "downloadsOff": "Descargas bloqueadas en esta carpeta y sus subcarpetas",
+      "downloadsBlockedBy": "Bloqueadas de todos modos por la carpeta superior \"{{name}}\".",
+      "downloadsInherit": "Las subcarpetas lo heredan: una carpeta que bloquea las descargas las bloquea en todas las carpetas que contiene.",
+      "moveToFolder": "Mover a carpeta…",
+      "moveToFolderTitle_one": "Mover {{count}} foto a una carpeta",
+      "moveToFolderTitle_other": "Mover {{count}} fotos a una carpeta",
+      "photosMoved_one": "{{count}} foto movida a {{folder}}",
+      "photosMoved_other": "{{count}} fotos movidas a {{folder}}",
+      "moveFailed": "No se pudieron mover las fotos"
+    },
+    "folderRequests": {
+      "title_one": "{{count}} solicitud de carpeta",
+      "title_other": "{{count}} solicitudes de carpeta",
+      "hint": "Las fotos esperan en la carpeta existente más cercana hasta que decidas.",
+      "photoCount_one": "{{count}} foto",
+      "photoCount_other": "{{count}} fotos",
+      "waitIn": "esperando en {{folder}}",
+      "requestedBy": "solicitada por {{name}}",
+      "approve": "Aprobar",
+      "approveAll": "Aprobar todas",
+      "approveAs": "Aprobar como…",
+      "approveAsTitle": "Poner \"{{path}}\" en una carpeta existente",
+      "approveAsHint": "En lugar de crear la carpeta solicitada, sus fotos pasan a la carpeta que elijas (por ejemplo, \"Samstag\" a \"Saturday\").",
+      "reject": "Rechazar",
+      "approved_one": "Solicitud de carpeta aprobada, {{count}} foto movida",
+      "approved_other": "Solicitud de carpeta aprobada, {{count}} fotos movidas",
+      "approvedAll_one": "Todas las solicitudes de carpeta aprobadas, {{count}} foto movida",
+      "approvedAll_other": "Todas las solicitudes de carpeta aprobadas, {{count}} fotos movidas",
+      "rejected": "Solicitud de carpeta rechazada; sus fotos se quedan donde están",
+      "failed": "No se pudo actualizar la solicitud de carpeta",
+      "showWaiting": "Mostrar fotos en espera",
+      "waitingForAdmin_one": "{{count}} solicitud de carpeta espera a un administrador. Hasta entonces, sus {{photos}} fotos están en la carpeta existente más cercana.",
+      "waitingForAdmin_other": "{{count}} solicitudes de carpeta esperan a un administrador. Hasta entonces, sus {{photos}} fotos están en la carpeta existente más cercana."
+    }
   }
 }

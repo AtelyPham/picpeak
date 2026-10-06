@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { restoreService } = require('../services/restoreService');
 const { adminAuth } = require('../middleware/auth');
-const { requirePermission } = require('../middleware/permissions');
+const { requirePermission, requireSuperAdmin } = require('../middleware/permissions');
 const { body, validationResult } = require('express-validator');
 const logger = require('../utils/logger');
 const { getPagination, safeValidationErrors } = require('../utils/routeHelpers');
@@ -74,8 +74,12 @@ router.get('/status', requirePermission('backup.view'), async (req, res) => {
 
 /**
  * Validate restore request
+ *
+ * Validating and starting a restore are super_admin only: a restore replaces
+ * every table, admin accounts and roles included, so a lesser role able to
+ * run one could restore a Super Admin account of its own.
  */
-router.post('/validate', requirePermission('backup.restore'), [
+router.post('/validate', requireSuperAdmin(), [
   body('source').notEmpty().withMessage('Backup source is required'),
   body('manifestPath').notEmpty().withMessage('Manifest path is required'),
   body('restoreType').isIn(['full', 'database', 'files', 'selective']).withMessage('Invalid restore type'),
@@ -143,9 +147,9 @@ router.post('/validate', requirePermission('backup.restore'), [
 });
 
 /**
- * Start restore operation
+ * Start restore operation (super_admin only, see /validate)
  */
-router.post('/start', requirePermission('backup.restore'), [
+router.post('/start', requireSuperAdmin(), [
   body('source').notEmpty().withMessage('Backup source is required'),
   body('manifestPath').notEmpty().withMessage('Manifest path is required'),
   body('restoreType').isIn(['full', 'database', 'files', 'selective']).withMessage('Invalid restore type'),
@@ -781,7 +785,7 @@ async function getBackupConfig() {
  * (`backup_destination_path` + `backup_manifest_path`), so the disaster-
  * recovery flow is untouched: an operator restoring from a rescued mount
  * already has to point those settings at it for the backup to be listed.
- * RESTORE_ALLOWED_ROOTS (colon-separated) is an escape hatch for unusual
+ * RESTORE_ALLOWED_ROOTS (colon-separated; semicolon on Windows) is an escape hatch for unusual
  * layouts. S3 sources are URLs, not paths, and are validated elsewhere.
  *
  * @returns {Promise<string|null>} an error message, or null when acceptable
@@ -806,7 +810,7 @@ async function checkRestorePathsAllowed({ source, manifestPath }) {
   const roots = [];
   if (config.backup_destination_path) roots.push(config.backup_destination_path);
   if (config.backup_manifest_path) roots.push(config.backup_manifest_path);
-  for (const extra of (process.env.RESTORE_ALLOWED_ROOTS || '').split(':')) {
+  for (const extra of (process.env.RESTORE_ALLOWED_ROOTS || '').split(path.delimiter)) {
     if (extra.trim()) roots.push(extra.trim());
   }
   if (roots.length === 0) {

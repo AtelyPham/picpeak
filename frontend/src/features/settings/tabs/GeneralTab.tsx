@@ -1,7 +1,8 @@
 import React from 'react';
-import { Save, Globe, Mail, User } from 'lucide-react';
-import { Button, Card, Input, Loading } from '../../../components/common';
+import { Globe, Mail, User } from 'lucide-react';
+import { Card, Input, Loading } from '../../../components/common';
 import { useTranslation } from 'react-i18next';
+import { SettingsSaveBar } from '../../../components/admin/SettingsSaveBar';
 import type { GeneralSettings } from '../hooks/useSettingsState';
 import { MAX_FILES_PER_UPLOAD_LIMIT } from '../hooks/useSettingsState';
 import { SUPPORTED_LANGUAGES } from "../../../components/common/LanguageSelector.tsx";
@@ -15,10 +16,14 @@ interface GeneralTabProps {
     mutate: () => void;
     isPending: boolean;
   };
+  isDirty: boolean;
+  onDiscard: () => void;
+  accountDirty: boolean;
+  onDiscardAccount: () => void;
   accountForm: { username: string; email: string };
   accountErrors: Record<string, string>;
   handleAccountChange: (field: 'username' | 'email') => (e: React.ChangeEvent<HTMLInputElement>) => void;
-  handleAccountSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
+  handleAccountSubmit: (e?: React.FormEvent<HTMLFormElement>) => void;
   updateAdminProfileMutation: { isPending: boolean };
   adminProfileLoading: boolean;
 }
@@ -27,6 +32,10 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
   generalSettings,
   setGeneralSettings,
   saveGeneralMutation,
+  isDirty,
+  onDiscard,
+  accountDirty,
+  onDiscardAccount,
   accountForm,
   accountErrors,
   handleAccountChange,
@@ -34,7 +43,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
   updateAdminProfileMutation,
   adminProfileLoading,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   // The public address reaches the CORS allowlist and the
   // Access-Control-Allow-Origin header since #705, not just email links — and
@@ -59,7 +68,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
   return (
     <div className="space-y-6">
       <Card padding="md">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('settings.general.accountSection')}</h2>
+        <h2 className="text-lg font-semibold text-heading mb-4">{t('settings.general.accountSection')}</h2>
         {adminProfileLoading ? (
           <div className="py-8 flex justify-center">
             <Loading size="md" />
@@ -67,7 +76,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
         ) : (
           <form className="space-y-4" onSubmit={handleAccountSubmit}>
             <div>
-              <label htmlFor="admin-account-username" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label htmlFor="admin-account-username" className="block text-sm font-medium text-body mb-1">
                 {t('settings.general.accountUsername')}
               </label>
               <Input
@@ -79,13 +88,13 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 leftIcon={<User className="w-5 h-5 text-neutral-400" />}
                 error={accountErrors.username}
               />
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {t('settings.general.accountUsernameHelp')}
               </p>
             </div>
 
             <div>
-              <label htmlFor="admin-account-email" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label htmlFor="admin-account-email" className="block text-sm font-medium text-body mb-1">
                 {t('settings.general.accountEmail')}
               </label>
               <Input
@@ -97,20 +106,12 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 leftIcon={<Mail className="w-5 h-5 text-neutral-400" />}
                 error={accountErrors.email}
               />
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {t('settings.general.accountEmailHelp')}
               </p>
             </div>
 
             <div className="pt-2">
-              <Button
-                type="submit"
-                variant="primary"
-                leftIcon={<Save className="w-5 h-5" />}
-                isLoading={updateAdminProfileMutation.isPending}
-              >
-                {t('settings.general.accountSaveButton')}
-              </Button>
             </div>
           </form>
         )}
@@ -121,11 +122,11 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
       <MfaSettingsCard />
 
       <Card padding="md">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('settings.general.siteConfiguration')}</h2>
+        <h2 className="text-lg font-semibold text-heading mb-4">{t('settings.general.siteConfiguration')}</h2>
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+            <label className="block text-sm font-medium text-body mb-1">
               {t('settings.general.siteUrl')}
             </label>
             <Input
@@ -138,7 +139,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               error={siteUrlError}
             />
             {!siteUrlError && (
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {generalSettings.site_url_env_pinned
                   ? t('settings.general.siteUrlEnvPinned', 'Pinned by the FRONTEND_URL environment variable, which overrides this setting. Remove it from your .env (or container environment) and restart to manage the address here.')
                   : t('settings.general.siteUrlHelp')}
@@ -148,7 +149,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('settings.general.defaultExpiration')}
               </label>
               <Input
@@ -160,7 +161,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('settings.general.maxFileSize')}
               </label>
               <Input
@@ -172,7 +173,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('settings.general.maxVideoSize', 'Max Video Size (MB)')}
               </label>
               <Input
@@ -181,12 +182,29 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 onChange={(e) => setGeneralSettings(prev => ({ ...prev, max_video_size_mb: parseInt(e.target.value) || 500 }))}
                 min="1"
               />
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {t('settings.general.maxVideoSizeHelp', 'Separate per-file limit for video uploads, so photos can keep a smaller limit.')}
               </p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="flex items-center">
+                <input
+                  type="checkbox"
+                  checked={generalSettings.video_web_rendition}
+                  onChange={(e) => setGeneralSettings(prev => ({ ...prev, video_web_rendition: e.target.checked }))}
+                  className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
+                  data-testid="general-video-web-rendition"
+                />
+                <span className="ml-2 text-sm text-body">
+                  {t('settings.general.videoWebRendition', 'Browser-playable copies of videos')}
+                </span>
+              </label>
+              <p className="text-xs text-muted ml-6 mt-1">
+                {t('settings.general.videoWebRenditionHelp', 'Re-encodes videos a browser cannot play (HEVC, QuickTime, MP4s that are not streamable) into an H.264 MP4 for playback. The original stays the download. Costs CPU per video and a second file; switching it on queues the videos already uploaded.')}
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('settings.general.maxFilesPerUpload')}
               </label>
               <Input
@@ -204,12 +222,12 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 min="1"
                 max={MAX_FILES_PER_UPLOAD_LIMIT}
               />
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {t('settings.general.maxFilesPerUploadHelp', { max: MAX_FILES_PER_UPLOAD_LIMIT })}
               </p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('settings.general.maxUploadBatchSize')}
               </label>
               <Input
@@ -226,14 +244,14 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 }}
                 min="1"
               />
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {t('settings.general.maxUploadBatchSizeHelp')}
               </p>
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+            <label className="block text-sm font-medium text-body mb-1">
               {t('settings.general.allowedFileTypes')}
             </label>
             <Input
@@ -242,7 +260,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               onChange={(e) => setGeneralSettings(prev => ({ ...prev, allowed_file_types: e.target.value }))}
               placeholder="jpg,jpeg,png,gif"
             />
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+            <p className="text-xs text-muted mt-1">
               {t('settings.general.allowedFileTypesHelp')}
             </p>
           </div>
@@ -250,7 +268,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
       </Card>
 
       <Card padding="md">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('settings.general.featureToggles')}</h2>
+        <h2 className="text-lg font-semibold text-heading mb-4">{t('settings.general.featureToggles')}</h2>
 
         <div className="space-y-3">
           <label className="flex items-center">
@@ -260,7 +278,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               onChange={(e) => setGeneralSettings(prev => ({ ...prev, enable_analytics: e.target.checked }))}
               className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
             />
-            <span className="ml-2 text-sm text-neutral-700 dark:text-neutral-300">{t('settings.general.enableAnalytics')}</span>
+            <span className="ml-2 text-sm text-body">{t('settings.general.enableAnalytics')}</span>
           </label>
 
           <label className="flex items-center">
@@ -270,7 +288,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               onChange={(e) => setGeneralSettings(prev => ({ ...prev, enable_registration: e.target.checked }))}
               className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
             />
-            <span className="ml-2 text-sm text-neutral-700 dark:text-neutral-300">{t('settings.general.enableRegistration')}</span>
+            <span className="ml-2 text-sm text-body">{t('settings.general.enableRegistration')}</span>
           </label>
 
           <label className="flex items-center">
@@ -280,7 +298,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
               onChange={(e) => setGeneralSettings(prev => ({ ...prev, maintenance_mode: e.target.checked }))}
               className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
             />
-            <span className="ml-2 text-sm text-neutral-700 dark:text-neutral-300">{t('settings.general.maintenanceMode')}</span>
+            <span className="ml-2 text-sm text-body">{t('settings.general.maintenanceMode')}</span>
           </label>
 
           <div>
@@ -291,9 +309,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 onChange={(e) => setGeneralSettings(prev => ({ ...prev, short_gallery_urls: e.target.checked }))}
                 className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
-              <span className="ml-2 text-sm text-neutral-700 dark:text-neutral-300">{t('settings.general.enableShortGalleryUrls')}</span>
+              <span className="ml-2 text-sm text-body">{t('settings.general.enableShortGalleryUrls')}</span>
             </label>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 ml-6 mt-1">
+            <p className="text-xs text-muted ml-6 mt-1">
               {t('settings.general.enableShortGalleryUrlsHelp')}
             </p>
           </div>
@@ -306,9 +324,9 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 onChange={(e) => setGeneralSettings(prev => ({ ...prev, use_original_filenames_for_downloads: e.target.checked }))}
                 className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
-              <span className="ml-2 text-sm text-neutral-700 dark:text-neutral-300">{t('settings.general.useOriginalFilenames')}</span>
+              <span className="ml-2 text-sm text-body">{t('settings.general.useOriginalFilenames')}</span>
             </label>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 ml-6 mt-1">
+            <p className="text-xs text-muted ml-6 mt-1">
               {t('settings.general.useOriginalFilenamesHelp')}
             </p>
           </div>
@@ -316,23 +334,53 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
       </Card>
 
       <Card padding="md">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('settings.general.language')}</h2>
+        <h2 className="text-lg font-semibold text-heading mb-4">{t('settings.general.language')}</h2>
 
         <div className="space-y-4">
+          {/* Two languages, two scopes, and the order matters: the one the
+              admin is reading right now comes first.
+
+              This one is a per-admin browser preference, not an instance
+              setting — it is the same i18next value the header selector used
+              to write, so it applies the moment it changes and is deliberately
+              NOT part of `generalSettings`. Wiring it into the form state
+              would put a personal preference behind an instance-wide Save
+              button and let Discard revert the language mid-edit. */}
           <div>
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
-              {t('settings.general.language')}
+            <label htmlFor="admin-language" className="block text-sm font-medium text-body mb-2">
+              {t('settings.general.adminLanguage', 'Your admin language')}
             </label>
             <select
-              value={generalSettings.default_language}
-              onChange={(e) => setGeneralSettings(prev => ({ ...prev, default_language: e.target.value }))}
-              className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              id="admin-language"
+              value={i18n.language}
+              onChange={(e) => { void i18n.changeLanguage(e.target.value); }}
+              className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
             >
               {SUPPORTED_LANGUAGES.map(lang => (
                 <option key={lang.code} value={lang.code}>{lang.name}</option>
               ))}
             </select>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+            <p className="text-xs text-muted mt-1">
+              {t('settings.general.adminLanguageHelp', 'Applies to the admin area, for you on this device only. It takes effect immediately — no need to save.')}
+            </p>
+          </div>
+
+          {/* Instance-wide, saved with the rest of the tab. */}
+          <div className="pt-4 border-t border-line">
+            <label htmlFor="gallery-language" className="block text-sm font-medium text-body mb-2">
+              {t('settings.general.customerLanguage', 'Gallery & guest language')}
+            </label>
+            <select
+              id="gallery-language"
+              value={generalSettings.default_language}
+              onChange={(e) => setGeneralSettings(prev => ({ ...prev, default_language: e.target.value }))}
+              className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+            >
+              {SUPPORTED_LANGUAGES.map(lang => (
+                <option key={lang.code} value={lang.code}>{lang.name}</option>
+              ))}
+            </select>
+            <p className="text-xs text-muted mt-1">
               {t('settings.general.defaultLanguageHelp')}
             </p>
           </div>
@@ -340,11 +388,11 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
       </Card>
 
       <Card padding="md">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('settings.general.dateTimeFormat')}</h2>
+        <h2 className="text-lg font-semibold text-heading mb-4">{t('settings.general.dateTimeFormat')}</h2>
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+            <label className="block text-sm font-medium text-body mb-2">
               {t('settings.general.dateFormat')}
             </label>
             <select
@@ -357,20 +405,20 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   date_format: { format, locale }
                 }));
               }}
-              className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
             >
               <option value="dd/MM/yyyy">DD/MM/YYYY (European)</option>
               <option value="MM/dd/yyyy">MM/DD/YYYY (US)</option>
               <option value="yyyy-MM-dd">YYYY-MM-DD (ISO)</option>
               <option value="dd.MM.yyyy">DD.MM.YYYY (German)</option>
             </select>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+            <p className="text-xs text-muted mt-1">
               {t('settings.general.dateFormatHelp')}
             </p>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+            <label className="block text-sm font-medium text-body mb-2">
               {t('settings.general.timeFormat', 'Time format')}
             </label>
             <select
@@ -379,30 +427,42 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                 const time_format = e.target.value === '12h' ? '12h' : '24h';
                 setGeneralSettings(prev => ({ ...prev, time_format }));
               }}
-              className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
             >
               <option value="24h">{t('settings.general.timeFormat24h', '24-hour (14:30)')}</option>
               <option value="12h">{t('settings.general.timeFormat12h', '12-hour (2:30 PM)')}</option>
             </select>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+            <p className="text-xs text-muted mt-1">
               {t('settings.general.timeFormatHelp',
                 'Controls how times render across admin views, customer-facing pages, and PDFs. Storage stays 24-hour (HH:mm); only the display switches.')}
             </p>
           </div>
         </div>
-
-        <div className="mt-6">
-          <Button
-            variant="primary"
-            onClick={() => saveGeneralMutation.mutate()}
-            isLoading={saveGeneralMutation.isPending}
-            disabled={!!siteUrlError}
-            leftIcon={<Save className="w-5 h-5" />}
-          >
-            {t('settings.general.saveGeneralSettings')}
-          </Button>
-        </div>
       </Card>
+
+      {/* One bar for both forms on this tab: the admin account (its own
+
+          mutation and validation) and the general settings. */}
+
+      <SettingsSaveBar
+
+        isDirty={isDirty || accountDirty}
+
+        isSaving={saveGeneralMutation.isPending || updateAdminProfileMutation.isPending}
+
+        canSave={!siteUrlError}
+
+        onSave={() => {
+
+          if (accountDirty) handleAccountSubmit();
+
+          if (isDirty) saveGeneralMutation.mutate();
+
+        }}
+
+        onDiscard={() => { onDiscard(); onDiscardAccount(); }}
+
+      />
     </div>
   );
 };

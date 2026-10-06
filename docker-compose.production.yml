@@ -32,8 +32,18 @@ services:
         # so a non-root reader must be able to read them. The volume is private to
         # these containers and never host-exposed.
         chmod 644 /run/secrets/jwt_secret /run/secrets/db_password /run/secrets/redis_password
+        # Postgres and Redis each mount a volume holding only their own password,
+        # so neither can read jwt_secret (the backend's token signing key).
+        # Refreshed from picpeak-secrets on every run, which also fills them on
+        # an existing install the first time this version starts.
+        mkdir -p /run/db-secret /run/redis-secret
+        cp /run/secrets/db_password /run/db-secret/db_password
+        cp /run/secrets/redis_password /run/redis-secret/redis_password
+        chmod 644 /run/db-secret/db_password /run/redis-secret/redis_password
     volumes:
       - picpeak-secrets:/run/secrets
+      - picpeak-db-secret:/run/db-secret
+      - picpeak-redis-secret:/run/redis-secret
     restart: "no"
 
   postgres:
@@ -42,12 +52,13 @@ services:
     userns_mode: "host"
     environment:
       POSTGRES_USER: ${DB_USER:-picpeak}
-      # Reads the generated (or .env-seeded) password from the shared secrets volume.
+      # Reads the generated (or .env-seeded) password from picpeak-db-secret,
+      # which holds only this password.
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       POSTGRES_DB: ${DB_NAME:-picpeak}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - picpeak-secrets:/run/secrets:ro
+      - picpeak-db-secret:/run/secrets:ro
     depends_on:
       secrets-init:
         condition: service_completed_successfully
@@ -70,11 +81,12 @@ services:
     image: redis:7-alpine
     container_name: picpeak-redis
     userns_mode: "host"
-    # Reads the generated (or .env-seeded) password from the shared secrets volume.
-    command: sh -c 'exec redis-server --requirepass "$$(cat /run/secrets/redis_password)"'
+    # Reads the generated (or .env-seeded) password from picpeak-redis-secret,
+    # which holds only this password.
+    command: sh -c 'exec redis-server --requirepass "$(cat /run/secrets/redis_password)"'
     volumes:
       - redis-data:/data
-      - picpeak-secrets:/run/secrets:ro
+      - picpeak-redis-secret:/run/secrets:ro
     depends_on:
       secrets-init:
         condition: service_completed_successfully
@@ -99,6 +111,12 @@ services:
       - REDIS_HOST=redis
       - STORAGE_PATH=/app/storage
       - PHOTOS_DIR=/app/storage/events
+      # Built-in backups land under /backup (migrations 029 + 030 seed
+      # /backup/picpeak and /backup/database). The entrypoint creates the
+      # subfolders and hands the mount to UID 1001 only when BACKUP_DIR names
+      # it; without the mount below the backend ran as UID 1001 against a
+      # root-owned / and every local backup failed with EACCES (issue 1365).
+      - BACKUP_DIR=/backup
       - PICPEAK_RELEASE_CHANNEL=${PICPEAK_CHANNEL:-stable}
       # Watch-folder auto-import: max photos processed in parallel (default 2).
       - FILE_WATCHER_CONCURRENCY=${FILE_WATCHER_CONCURRENCY:-2}
@@ -116,6 +134,17 @@ services:
       - FACE_ML_URL=${FACE_ML_URL:-http://picpeak-ml:8000}
       - FACE_ML_TOKEN=${FACE_ML_TOKEN:-}
       - FACE_PROCESSOR_CONCURRENCY=${FACE_PROCESSOR_CONCURRENCY:-}
+      # CLAMAV_HOST / _PORT / _TIMEOUT_MS / _MAX_BYTES (#1444, malware scanner
+      # for customer documents) reach the backend through env_file too. With
+      # the opt-in `clamav` service below, set CLAMAV_HOST=clamav in .env.
+      # PICPEAK_EVIDENCE_KEY (#1446) reaches the backend through env_file
+      # above. It encrypts contract signers' names, email addresses and IP
+      # addresses at rest. Unset, a key is generated into
+      # storage/business-docs/keys/evidence.key — that is inside the backup
+      # path, but it is then the only copy of it, so back it up with the
+      # database. See docs/ENVIRONMENT_VARIABLES.md. While rotating it,
+      # PICPEAK_EVIDENCE_KEYS_OLD (same env_file) keeps the earlier keys
+      # readable until scripts/rotate-evidence-key.js reports none left.
     volumes:
       # Defaulted so a .env that simply does not set these still works. Without
       # them compose aborts with "invalid spec: :/app/storage: empty section
@@ -131,6 +160,11 @@ services:
       - ${APP_STORAGE:-./storage}:/app/storage
       - ${LOGS:-./logs}:/app/logs
       - ${APP_DATA:-./data}:/app/data
+      # Where local backups are written (see BACKUP_DIR above). The host
+      # directory is created by Docker on first start and chowned to 1001 by
+      # the entrypoint; keep it outside APP_STORAGE, or the backup would
+      # include itself.
+      - ${APP_BACKUP:-./backup}:/backup
       - picpeak-secrets:/run/secrets:ro
     ports:
       - "${BACKEND_PORT:-3001}:3000"
@@ -195,6 +229,20 @@ services:
       retries: 3
       start_period: 40s
 
+  # Optional malware scanner for customer documents (#1444). Gated behind the
+  # `clamav` profile: `docker compose --profile clamav up -d`, then set
+  # CLAMAV_HOST=clamav in .env. Needs about 1 GB of RAM; no published port.
+  clamav:
+    image: clamav/clamav:stable
+    container_name: picpeak-clamav
+    profiles:
+      - clamav
+    volumes:
+      - clamav-db:/var/lib/clamav
+    networks:
+      - picpeak-network
+    restart: unless-stopped
+
   frontend:
     # Use pre-built image from GitHub Container Registry
     # Uses same channel as backend for consistency
@@ -225,6 +273,31 @@ services:
       timeout: 10s
       retries: 3
 
+  # Optional in-app updater, container packaging (docs/self-update.md). Off by
+  # default: enable with COMPOSE_PROFILES=updater and PICPEAK_PROJECT_DIR in
+  # .env. Prefer the host agent (`picpeak-setup.sh --enable-self-update`) where
+  # you have a shell — this container holds the Docker socket, which is root on
+  # the host.
+  #
+  # It has no port and no network: the backend reaches it only through the
+  # request/status files in ./update. The project directory is mounted
+  # read-only at the IDENTICAL host path, because compose resolves the relative
+  # bind mounts above against it; the updater refuses to run otherwise. The
+  # placeholder default only keeps interpolation from failing on installs that
+  # never enable the profile.
+  updater:
+    image: ghcr.io/picpeak/picpeak/updater:${PICPEAK_UPDATER_TAG:-1}
+    container_name: picpeak-updater
+    profiles: [updater]
+    network_mode: none
+    environment:
+      - PICPEAK_PROJECT_DIR=${PICPEAK_PROJECT_DIR:-/picpeak-project-dir-not-set}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PICPEAK_PROJECT_DIR:-/picpeak-project-dir-not-set}:${PICPEAK_PROJECT_DIR:-/picpeak-project-dir-not-set}:ro
+      - ${APP_UPDATE:-./update}:/update
+    restart: unless-stopped
+
   # Optional: Nginx reverse proxy for production with SSL
   # Uncomment and configure if you want built-in HTTPS support
   # nginx:
@@ -253,6 +326,16 @@ volumes:
   # redis_password). Keep it — deleting it orphans the DB password from the
   # Postgres volume. Back it up alongside postgres-data.
   picpeak-secrets:
+    driver: local
+  # Copies of db_password and redis_password for the postgres and redis
+  # containers alone. secrets-init rebuilds them from picpeak-secrets, so they
+  # need no backup.
+  picpeak-db-secret:
+    driver: local
+  picpeak-redis-secret:
+    driver: local
+  # ClamAV signature database (opt-in `clamav` profile); re-downloadable.
+  clamav-db:
     driver: local
 
 networks:

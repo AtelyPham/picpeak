@@ -79,6 +79,36 @@ async function targetPathForEvent(event) {
 }
 
 /**
+ * Where the browser redirect goes: target_path plus the query string the
+ * short URL was opened with (issue 1733). `/s/wedding?photo=42` has to land
+ * on `/gallery/<slug>?photo=42`, or a link to one photo loses the photo on
+ * the way through the shortener. Only the query is carried, and it is
+ * rebuilt through URLSearchParams so every value is re-encoded; the path
+ * itself always comes from the stored row.
+ */
+function redirectTarget(targetPath, originalUrl) {
+  // Everything after the first `?`: a value may itself contain one
+  // (`?next=/a?photo=42`), which split('?')[1] would cut off.
+  const original = String(originalUrl || '');
+  const qmark = original.indexOf('?');
+  const query = qmark === -1 ? '' : original.slice(qmark + 1);
+  if (!query) return targetPath;
+  const target = String(targetPath);
+  const targetQmark = target.indexOf('?');
+  const path = targetQmark === -1 ? target : target.slice(0, targetQmark);
+  const merged = new URLSearchParams(targetQmark === -1 ? '' : target.slice(targetQmark + 1));
+  // Params already on the stored path keep precedence over the incoming ones;
+  // the check is against the stored set only, so a repeated incoming key
+  // (`?tag=a&tag=b`) keeps every value instead of the first one.
+  const reserved = new Set(merged.keys());
+  for (const [key, value] of new URLSearchParams(query)) {
+    if (!reserved.has(key)) merged.append(key, value);
+  }
+  const serialized = merged.toString();
+  return serialized ? `${path}?${serialized}` : path;
+}
+
+/**
  * Build candidate auto-generated slugs in preference order. Walks each
  * candidate against the UNIQUE constraint and returns the first that's
  * free. Falls back to a 6-char random alphanum if every shaped
@@ -264,6 +294,7 @@ async function recordHit(id) {
 module.exports = {
   validateSlug,
   targetPathForEvent,
+  redirectTarget,
   autoGenerateSlug,
   createShortUrl,
   findByShortSlug,

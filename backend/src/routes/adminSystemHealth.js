@@ -20,6 +20,7 @@ const express = require('express');
 const { query } = require('express-validator');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
+const { isFeatureEnabled } = require('../middleware/requireFeatureFlag');
 const { handleAsync, validateRequest, successResponse } = require('../utils/routeHelpers');
 const { verifyDocumentArtefacts } = require('../services/backupIntegrityService');
 const { getCoverageReport } = require('../services/backupCoverageService');
@@ -32,6 +33,59 @@ const router = express.Router();
 router.use(adminAuth);
 
 const VALID_SCOPES = ['quote', 'contract', 'contract-signature', 'invoice'];
+
+// Every column of signing evidence that fieldEncryption writes (#1446).
+const EVIDENCE_COLUMNS = ['name_enc', 'email_enc', 'ip_enc', 'user_agent_enc', 'decline_reason_enc'];
+// A cap so a large install can't turn the health page into a table scan that
+// reads every signer row; the newest rows are the ones that matter for
+// "is the current key the one in use".
+const EVIDENCE_SCAN_LIMIT = 2000;
+
+/**
+ * How much stored evidence the current key can still read (#1446).
+ *
+ * Each value carries `v1:<keyId>:` in front of it, so the key a row was
+ * written under is a prefix read rather than a decryption — counting is
+ * cheap and never touches the key material.
+ */
+async function evidenceKeyUsage(currentKeyId) {
+  const fieldEncryption = require('../utils/fieldEncryption');
+  const rows = await db('contract_signers')
+    .orderBy('id', 'desc')
+    .limit(EVIDENCE_SCAN_LIMIT)
+    .select('id', ...EVIDENCE_COLUMNS);
+  const byKeyId = {};
+  let values = 0;
+  for (const row of rows) {
+    for (const column of EVIDENCE_COLUMNS) {
+      if (!row[column]) continue;
+      const keyId = fieldEncryption.keyIdOf(row[column]) || 'unreadable';
+      byKeyId[keyId] = (byKeyId[keyId] || 0) + 1;
+      values += 1;
+    }
+  }
+  const underCurrent = byKeyId[currentKeyId] || 0;
+  const otherKeyIds = Object.keys(byKeyId).filter((id) => id !== currentKeyId).sort();
+  // The key ring (#1446): older keys that are still available open their
+  // values; only values under a key nobody has any more are unreadable.
+  const readable = new Set(fieldEncryption.ringKeyIds());
+  const unreadableValues = Object.entries(byKeyId)
+    .filter(([id]) => !readable.has(id))
+    .reduce((sum, [, count]) => sum + count, 0);
+  return {
+    readableKeyIds: [...readable],
+    unreadableValues,
+    valuesUnderOlderKeys: values - underCurrent - unreadableValues,
+    // Kept for the panel that already reads these two: the newest key id in
+    // use, and whether it is the current one.
+    storedKeyId: otherKeyIds.length ? otherKeyIds[0] : (values ? currentKeyId : null),
+    matchesStored: values === 0 ? null : otherKeyIds.length === 0,
+    storedValues: values,
+    storedValuesUnderCurrentKey: underCurrent,
+    storedKeyIds: byKeyId,
+    scanTruncated: rows.length === EVIDENCE_SCAN_LIMIT,
+  };
+}
 
 router.get(
   '/backup-integrity',
@@ -231,10 +285,52 @@ router.get(
       if (offset + WAITING_PAGE_SIZE >= WAITING_SCAN_MAX) scanTruncated = true;
     }
 
+    // Customer documents waiting for a review, or rejected (#1444). Uploads
+    // stay pending until an admin marks them clean, so a growing pending
+    // count is the thing to notice here.
+    // The counts belong to the documents feature: with it off, no route
+    // answers for it, this one included. Ops admins (settings.view /
+    // system.view) see the aggregate, as they do for the rest of this page.
+    // Plus 24-hour abuse signals (slice 9): attempts on other customers'
+    // documents, quota refusals, rate-limit hits.
+    const customerDocuments = await isFeatureEnabled('documents')
+      ? {
+        ...await require('../services/customerDocumentsService').getReviewCounts(),
+        abuse: await require('../services/customerDocumentAbuse').last24hCounts(),
+        // Configured / reachable / last success (slice 8). Never the host.
+        scanner: await require('../services/scanners/clamd').health(),
+      }
+      : null;
+    // Where the key for signing evidence comes from (#1446): the env var, the
+    // file in business-docs (backed up), or not created yet. Never the key.
+    const fieldEncryption = require('../utils/fieldEncryption');
+    const evidenceKey = fieldEncryption.keyStatus();
+    // Stored evidence names the key it was written under. A key that changed
+    // — a rotated env var, a restore that brought back another key file —
+    // leaves names, emails and addresses unreadable and invitations going out
+    // to '', so say so here rather than letting it surface as blank data.
+    //
+    // Counted across every encrypted column rather than read off the newest
+    // row: a key that changed part-way through leaves older rows under the
+    // old id, and looking only at the newest name_enc reported "all fine"
+    // while most of the evidence on the install was unreadable.
+    if (evidenceKey.keyId && await db.schema.hasTable('contract_signers')) {
+      Object.assign(evidenceKey, await evidenceKeyUsage(evidenceKey.keyId));
+    }
+
+    // Enumeration and replay signals on the signing links, last 24 hours
+    // (#1446): counts per kind and the alerts that went out. No addresses.
+    const signingSignals = await db.schema.hasTable('contract_signing_signals')
+      ? await require('../services/contract/signingSignals').summary()
+      : null;
+
     return successResponse(res, {
+      signingSignals,
       stuckEmails: stuckEmails.map(mapEmailRow),
       waitingEmails: waitingEmails.map(mapEmailRow),
       processor: getQueueProcessorStatus(),
+      customerDocuments,
+      evidenceKey,
       counts: {
         stuckEmails: stuckEmails.length,
         waitingEmails: waitingEmails.length,

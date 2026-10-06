@@ -74,11 +74,11 @@ async function billCombinedForCustomer(customerId, { includeHours, includeRebill
 
     if (hours.entries.length) {
       const hourLineIds = hours.entries.map((_, i) => lineByPos.get(i + 1) || null);
-      await customerHoursService.stampBilledEntries(trx, hours.entries, invoiceId, hourLineIds);
+      await customerHoursService.stampBilledEntries(trx, hours.entries, invoiceId, hourLineIds, adminId);
     }
     if (rebills.docs.length) {
       const rebillLineIds = rebills.docs.map((_, i) => lineByPos.get(hoursCount + i + 1) || null);
-      await expenseService.stampBilledRebills(trx, rebills.docs, invoiceId, rebillLineIds);
+      await expenseService.stampBilledRebills(trx, rebills.docs, invoiceId, rebillLineIds, adminId);
     }
 
     logInfo = {

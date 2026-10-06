@@ -18,8 +18,13 @@ const SRC = path.resolve(__dirname, '../../..');
 const read = (rel: string) => fs.readFileSync(path.join(SRC, rel), 'utf8');
 
 // Headings must set a colour explicitly. `text-theme` / `text-muted-theme` are
-// deliberately NOT accepted — they resolve to the same leaking variables.
-const EXPLICIT_COLOR = /\btext-(neutral|white|amber|blue|red|green|primary|accent)\b|\btext-(neutral|amber|blue|red|green|primary)-\d/;
+// deliberately NOT accepted — they resolve to the same leaking variables. The
+// UI token utilities (text-heading, text-body, ...) read --ui-* tokens that
+// applyTheme() never writes, so they count as explicit (STYLING.md).
+// `(?![\w-])` rather than `\b` after the name: `\b` matches before a hyphen,
+// so `text-muted` would have accepted `text-muted-theme`, the themed utility
+// this guard exists to reject.
+const EXPLICIT_COLOR = /\btext-(neutral|white|amber|blue|red|green|primary|accent|heading|body|soft|muted|faint)(?![\w-])|\btext-(neutral|amber|blue|red|green|primary)-\d/;
 
 const HEADING_TAG = /<(h[1-4])(\s[^>]*?)?>/gs;
 
@@ -41,6 +46,10 @@ const ADMIN_ONLY_FILES = [
   'pages/admin/SystemHealthPage.tsx',
   'components/admin/CrmOverviewSection.tsx',
   'components/admin/HoursSection.tsx',
+  // Issue 1741: the whole usage tab was wrapped in `text-theme`, so a
+  // dark-toned branding theme greyed out every control on it in light mode.
+  'features/settings/tabs/ProductUsageTab.tsx',
+  'features/settings/UsageCatalog.tsx',
 ];
 
 const THEMED_TEXT_CLASS = /className="[^"]*\btext-(muted-)?theme\b/;

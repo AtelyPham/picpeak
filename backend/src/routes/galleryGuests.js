@@ -3,23 +3,43 @@ const crypto = require('crypto');
 const router = express.Router();
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
-const { verifyGalleryAccess } = require('../middleware/gallery');
+const { rateLimitKey } = require('../utils/rateLimitKey');
+const { verifyGalleryAccess, denySlideshowToken } = require('../middleware/gallery');
 const { resolveGuest, requireGuest, signGuestToken } = require('../middleware/guestAuth');
 const feedbackService = require('../services/feedbackService');
 const guestRecovery = require('../services/guestRecoveryService');
+const { sanitizeName } = require('../utils/personName');
+const { parseBooleanInput } = require('../utils/parsers');
+const { guestNameModeOf, clearGuestCredits } = require('../services/photoCredit');
 
-const MAX_NAME_LEN = 100;
 const MAX_EMAIL_LEN = 255;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// In-memory rate limit for guest registration (20 per hour per IP). Simple
-// sliding window; on process restart the counters reset which is acceptable.
+// In-memory rate limit for guest registration, per network key (an IPv4
+// address or an IPv6 /64). Simple fixed window; on process restart the
+// counters reset, which is acceptable.
+//
+// 400 an hour (#1561). Since uploader names can be required, every guest who
+// uploads registers once, and a venue's wifi is one network key: at the old
+// 20 an hour the 21st wedding guest could not upload at all. A per-device
+// budget under this one doesn't help: the only device signal here is the
+// User-Agent, which a script rotates and which a room of phones on the same
+// OS version shares.
 const registrationAttempts = new Map();
 const REGISTRATION_WINDOW_MS = 60 * 60 * 1000;
-const REGISTRATION_MAX = 20;
+const REGISTRATION_MAX = 400;
+let registrationSweptAt = 0;
 
 function checkRegistrationRate(ip) {
   const now = Date.now();
+  // Networks that stopped registering leave their entry behind; drop the
+  // expired ones once per window.
+  if (now - registrationSweptAt > REGISTRATION_WINDOW_MS) {
+    registrationSweptAt = now;
+    for (const [key, entry] of registrationAttempts) {
+      if (now - entry.windowStart > REGISTRATION_WINDOW_MS) registrationAttempts.delete(key);
+    }
+  }
   const entry = registrationAttempts.get(ip) || { count: 0, windowStart: now };
   if (now - entry.windowStart > REGISTRATION_WINDOW_MS) {
     entry.count = 0;
@@ -30,16 +50,14 @@ function checkRegistrationRate(ip) {
   return entry.count <= REGISTRATION_MAX;
 }
 
-function sanitizeName(value) {
-  if (typeof value !== 'string') return '';
-  // Strip HTML/control chars, collapse whitespace.
-  const cleaned = value
-    .replace(/[<>&"']/g, '')
-    // eslint-disable-next-line no-control-regex -- intentional: strips control chars from guest input
-    .replace(/[\u0000-\u001F\u007F]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return cleaned.slice(0, MAX_NAME_LEN);
+/**
+ * The scope a guest token issued now carries (scopeGuestToFeedback). Outside
+ * guest identity mode a guest identity exists for the uploader name alone, so
+ * every token issued there (registration, recovery, invite) is upload-scoped
+ * and feedback keeps its anonymous identity.
+ */
+function guestTokenScope(settings) {
+  return settings.feedback_enabled && settings.identity_mode === 'guest' ? {} : { scope: 'upload' };
 }
 
 function sanitizeEmail(value) {
@@ -55,9 +73,12 @@ function sanitizeEmail(value) {
  * that the frontend must send as the x-guest-token header on subsequent
  * feedback requests.
  */
-router.post('/:slug/guest', verifyGalleryAccess, async (req, res) => {
+// denySlideshowToken: a projector link is display-only, and with uploader
+// names on, registration no longer needs feedback — without it a leaked
+// slideshow token could mint guest identities.
+router.post('/:slug/guest', verifyGalleryAccess, denySlideshowToken, async (req, res) => {
   try {
-    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    const ip = rateLimitKey(req) || 'unknown';
     if (!checkRegistrationRate(ip)) {
       return res.status(429).json({ error: 'Too many registration attempts' });
     }
@@ -65,8 +86,11 @@ router.post('/:slug/guest', verifyGalleryAccess, async (req, res) => {
     const event = req.event;
     const settings = await feedbackService.getEventFeedbackSettings(event.id);
 
-    // Guest registration is only meaningful when feedback is enabled.
-    if (!settings.feedback_enabled) {
+    // A guest identity backs feedback, and — since #1561 — the uploader name
+    // on guest uploads. Registration is refused only when neither applies.
+    const uploaderNamesOn = parseBooleanInput(event.allow_user_uploads, false)
+      && guestNameModeOf(event) !== 'off';
+    if (!settings.feedback_enabled && !uploaderNamesOn) {
       return res.status(403).json({ error: 'Feedback is not enabled for this gallery' });
     }
 
@@ -79,7 +103,11 @@ router.post('/:slug/guest', verifyGalleryAccess, async (req, res) => {
     if (email && !EMAIL_REGEX.test(email)) {
       return res.status(400).json({ error: 'Invalid email format', field: 'email' });
     }
-    if (settings.require_name_email && !email) {
+    // require_name_email is a feedback setting. Only in guest identity mode
+    // is this identity the one feedback uses; otherwise it exists only for
+    // the uploader name, which asks for no address.
+    if (settings.feedback_enabled && settings.identity_mode === 'guest'
+      && settings.require_name_email && !email) {
       return res.status(400).json({ error: 'Email is required', field: 'email' });
     }
 
@@ -102,6 +130,7 @@ router.post('/:slug/guest', verifyGalleryAccess, async (req, res) => {
       eventId: event.id,
       identifier: row.identifier,
       name: row.name,
+      ...guestTokenScope(settings),
     });
 
     logger.info('Guest registered', {
@@ -180,6 +209,9 @@ router.delete('/:slug/guest/me', verifyGalleryAccess, resolveGuest, requireGuest
         email: null,
         last_seen_at: db.fn.now(),
       });
+    // Their name on the photos they uploaded goes with them (#1561). After
+    // the soft delete, so an upload still in flight sees it.
+    await clearGuestCredits(req.guest.id);
 
     logger.info('Guest self-forgot', {
       eventId: req.event.id,
@@ -222,7 +254,7 @@ function checkRecoveryRate(ip) {
  */
 router.post('/:slug/guest/recover', verifyGalleryAccess, async (req, res) => {
   try {
-    const ip = req.ip || 'unknown';
+    const ip = rateLimitKey(req) || 'unknown';
     if (!checkRecoveryRate(ip)) {
       return res.status(429).json({ error: 'Too many recovery attempts' });
     }
@@ -270,7 +302,7 @@ router.post('/:slug/guest/recover', verifyGalleryAccess, async (req, res) => {
  */
 router.post('/:slug/guest/verify', verifyGalleryAccess, async (req, res) => {
   try {
-    const ip = req.ip || 'unknown';
+    const ip = rateLimitKey(req) || 'unknown';
     if (!checkRecoveryRate(ip)) {
       return res.status(429).json({ error: 'Too many verification attempts' });
     }
@@ -307,6 +339,7 @@ router.post('/:slug/guest/verify', verifyGalleryAccess, async (req, res) => {
       eventId: event.id,
       identifier: guest.identifier,
       name: guest.name,
+      ...guestTokenScope(await feedbackService.getEventFeedbackSettings(event.id)),
     });
 
     logger.info('Guest recovered via email', { eventId: event.id, guestId: guest.id });
@@ -362,9 +395,20 @@ router.post('/:slug/guest/redeem', verifyGalleryAccess, async (req, res) => {
         .first();
       if (!guest) return { error: 'guest_missing' };
 
-      await trx('guest_invites')
-        .where({ id: invite.id })
+      // Single use is decided by this UPDATE, not by the reads above. Two
+      // redemptions of the same link, or a redemption racing the admin's
+      // revoke, can both read a pending invite under READ COMMITTED; only
+      // the one whose UPDATE still finds both columns NULL mints a session.
+      const claimed = await trx('guest_invites')
+        .where({ id: invite.id, event_id: event.id })
+        .whereNull('redeemed_at')
+        .whereNull('revoked_at')
         .update({ redeemed_at: trx.fn.now() });
+      if (claimed !== 1) {
+        const current = await trx('guest_invites').where({ id: invite.id }).first('revoked_at');
+        if (current?.revoked_at) return { error: 'revoked', guestId: invite.guest_id };
+        return { error: 'already_redeemed', guestId: invite.guest_id };
+      }
 
       await trx('gallery_guests')
         .where({ id: guest.id })
@@ -394,6 +438,7 @@ router.post('/:slug/guest/redeem', verifyGalleryAccess, async (req, res) => {
       eventId: event.id,
       identifier: result.guest.identifier,
       name: result.guest.name,
+      ...guestTokenScope(await feedbackService.getEventFeedbackSettings(event.id)),
     });
 
     logger.info('Invite redeemed', { eventId: event.id, guestId: result.guest.id });

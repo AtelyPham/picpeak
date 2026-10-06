@@ -18,6 +18,7 @@ const logger = require('../utils/logger');
 const { AppError } = require('../utils/errors');
 const { formatBoolean } = require('../utils/dbCompat');
 const { normaliseSchedule } = require('../utils/businessHours');
+const { auditedDelete, auditedInsert, auditedUpdate } = require('./accountingHistory');
 
 const ALLOWED_PROFILE_FIELDS = [
   'company_name',
@@ -46,6 +47,9 @@ const ALLOWED_PROFILE_FIELDS = [
   // Last link in the hour-entry rate chain after the per-entry
   // override and the per-customer default.
   'default_hourly_rate_minor',
+  // Install-wide fallback day rate (migration 220), minor units — used by
+  // per-day quote lines when the customer has no own day rate.
+  'default_day_rate_minor',
   'default_currency',
   'default_locale',
   'default_qr_format',
@@ -210,6 +214,15 @@ function sanitiseProfilePayload(payload) {
       updates.default_hourly_rate_minor = Number.isFinite(n) && n >= 0 ? n : null;
     }
   }
+  // Same rules for the install-wide default day rate (migration 220).
+  if (updates.default_day_rate_minor !== undefined) {
+    if (updates.default_day_rate_minor === null || updates.default_day_rate_minor === '') {
+      updates.default_day_rate_minor = null;
+    } else {
+      const n = parseInt(updates.default_day_rate_minor, 10);
+      updates.default_day_rate_minor = Number.isFinite(n) && n >= 0 ? n : null;
+    }
+  }
 
   // Per-weekday opening hours. Accept the API object (or a JSON string),
   // run it through the shared validator (drops bad blocks, sorts, fills
@@ -273,7 +286,9 @@ async function getProfile(conn = db) {
       // Belt-and-braces: migration 102 seeds id=1, but if a fresh install
       // ran an earlier rollback that wiped the row, re-create it so the
       // service never throws.
-      await conn('business_profile').insert({ id: 1 });
+      await auditedInsert(conn, 'business_profile', { id: 1 }, {
+        actor: 'system', source: 'business_profile.seed',
+      });
       profile = await conn('business_profile').where({ id: 1 }).first();
     }
 
@@ -294,7 +309,9 @@ async function updateProfile(payload, adminId) {
   updates.updated_at = new Date();
 
   await withRetry(async () => {
-    await db('business_profile').where({ id: 1 }).update(updates);
+    await auditedUpdate(db, 'business_profile', { id: 1 }, updates, {
+      actor: adminId, source: 'business_profile.update',
+    });
   });
 
   // The email footer signature is built from these same columns, so any
@@ -325,13 +342,14 @@ async function createBankAccount(payload, adminId) {
   // accidentally becoming default just because the form omitted the field.
   if (data.is_default === undefined) data.is_default = formatBoolean(false);
 
+  const history = { actor: adminId, source: 'bank_account.create' };
   return await db.transaction(async (trx) => {
     if (data.is_default && (data.is_default === true || data.is_default === 1)) {
-      await trx('business_bank_accounts')
-        .where({ business_profile_id: 1, currency: data.currency })
-        .update({ is_default: formatBoolean(false), updated_at: new Date() });
+      await auditedUpdate(trx, 'business_bank_accounts',
+        { business_profile_id: 1, currency: data.currency },
+        { is_default: formatBoolean(false), updated_at: new Date() }, history);
     }
-    const inserted = await trx('business_bank_accounts').insert(data).returning('id');
+    const inserted = await auditedInsert(trx, 'business_bank_accounts', data, history);
     const id = typeof inserted[0] === 'object' ? inserted[0].id : inserted[0];
 
     logger.info('Business bank account created', {
@@ -345,6 +363,7 @@ async function createBankAccount(payload, adminId) {
 async function updateBankAccount(id, payload, adminId) {
   const data = sanitiseBankPayload(payload);
   data.updated_at = new Date();
+  const history = { actor: adminId, source: 'bank_account.update' };
 
   return await db.transaction(async (trx) => {
     const existing = await trx('business_bank_accounts').where({ id }).first();
@@ -354,12 +373,11 @@ async function updateBankAccount(id, payload, adminId) {
     // Honour the per-currency single-default rule.
     if (data.is_default === true || data.is_default === 1 || data.is_default === formatBoolean(true)) {
       const targetCurrency = data.currency || existing.currency;
-      await trx('business_bank_accounts')
-        .where({ business_profile_id: 1, currency: targetCurrency })
-        .andWhereNot({ id })
-        .update({ is_default: formatBoolean(false), updated_at: new Date() });
+      await auditedUpdate(trx, 'business_bank_accounts',
+        (q) => q.where({ business_profile_id: 1, currency: targetCurrency }).andWhereNot({ id }),
+        { is_default: formatBoolean(false), updated_at: new Date() }, history);
     }
-    await trx('business_bank_accounts').where({ id }).update(data);
+    await auditedUpdate(trx, 'business_bank_accounts', { id }, data, history);
 
     logger.info('Business bank account updated', { adminId, id });
 
@@ -373,7 +391,9 @@ async function deleteBankAccount(id, adminId) {
     if (!existing) {
       throw new AppError('Bank account not found', 404);
     }
-    await db('business_bank_accounts').where({ id }).del();
+    await auditedDelete(db, 'business_bank_accounts', { id }, {
+      actor: adminId, source: 'bank_account.delete',
+    });
     logger.info('Business bank account deleted', { adminId, id });
     return { deleted: true };
   });

@@ -1,5 +1,5 @@
 import { api } from '../config/api';
-import type { Event } from '../types';
+import type { Event, GuestNameMode } from '../types';
 import { normalizeRequirePassword } from '../utils/accessControl';
 import { toBoolean } from '../utils/parsers';
 
@@ -36,6 +36,9 @@ interface CreateEventData {
   expiration_days?: number;
   allow_user_uploads?: boolean;
   upload_category_id?: number | null;
+  // Uploader names (#1561); omitted = the Event Defaults value.
+  guest_name_mode?: GuestNameMode;
+  show_credits_to_guests?: boolean;
   feedback_enabled?: boolean;
   allow_ratings?: boolean;
   allow_likes?: boolean;
@@ -46,11 +49,19 @@ interface CreateEventData {
   moderate_comments?: boolean;
   show_feedback_to_guests?: boolean;
   photo_cap?: number | null;
+  download_limit?: number | null;
   default_photo_sort?: string;
   // Customer accounts assigned to this event (#354). Optional array of
   // customer_accounts.id; backend service diffs against the existing
   // assignments and applies inserts/deletes inside the same transaction.
   customer_account_ids?: number[];
+  // Custom styling switch; off = follow the global Branding theme.
+  custom_theme_enabled?: boolean;
+  // Photo source; import_now starts the folder's first import on create.
+  source_mode?: 'managed' | 'reference';
+  external_path?: string;
+  external_watch?: boolean;
+  import_now?: boolean;
 }
 
 interface UpdateEventData {
@@ -72,6 +83,8 @@ interface UpdateEventData {
   expires_at?: string;
   is_active?: boolean;
   allow_user_uploads?: boolean;
+  guest_name_mode?: GuestNameMode;
+  show_credits_to_guests?: boolean;
   // Reveal mode (#838)
   reveal_mode?: boolean;
   reveal_at?: string | null;
@@ -81,6 +94,7 @@ interface UpdateEventData {
   external_path?: string | null;
   external_watch?: boolean;
   photo_cap?: number | null;
+  download_limit?: number | null;
   default_photo_sort?: string;
   // Per-event opt-in for hero photo as social-share preview (#474).
   og_image_share_enabled?: boolean;
@@ -89,7 +103,52 @@ interface UpdateEventData {
   customer_account_ids?: number[];
 }
 
-export type EventStatusFilter = 'active' | 'inactive' | 'archived' | 'draft' | 'expiring';
+/** Two-stage delivery state of one gallery (issue 1562). */
+export interface DeliveryState {
+  status: 'complete' | 'partial';
+  expected_count: number | null;
+  due_at: string | null;
+  /** 'manual' | 'default' */
+  due_source: string | null;
+  badge_label: string | null;
+  completed_at: string | null;
+  delivered_count: number;
+  first_look_count: number;
+  /** First-look photos whose original filename arrived again in the full set. */
+  duplicate_count: number;
+}
+
+export interface CompleteDeliveryResult {
+  completed: boolean;
+  email_queued: boolean;
+  duplicate_photo_ids: number[];
+  state: DeliveryState;
+}
+
+export interface DownloadLimitUsage {
+  download_limit: number | null;
+  downloads_used: number;
+  downloads_remaining: number | null;
+}
+
+export type EventStatusFilter = 'active' | 'inactive' | 'archived' | 'draft' | 'expiring' | 'awaiting_delivery';
+
+/**
+ * Columns the events list can be ordered by. Mirrors SORTABLE in
+ * backend/src/routes/adminEvents/listSort.js — `photo_count` and `status` are
+ * expressions there, not stored columns. Anything else falls back to
+ * created_at desc server-side rather than erroring.
+ */
+export type EventSortBy =
+  | 'event_name'
+  | 'event_type'
+  | 'event_date'
+  | 'created_at'
+  | 'updated_at'
+  | 'expires_at'
+  | 'slug'
+  | 'photo_count'
+  | 'status';
 
 interface EventsListResponse {
   events: Event[];
@@ -101,16 +160,27 @@ interface EventsListResponse {
   };
 }
 
+/** Query options for the admin events list. */
+export interface EventsListParams {
+  page?: number;
+  limit?: number;
+  status?: EventStatusFilter;
+  search?: string;
+  /** event_types.slug_prefix, as stored on events.event_type. */
+  type?: string;
+  sortBy?: EventSortBy;
+  sortOrder?: 'asc' | 'desc';
+}
+
 export const eventsService = {
-  // Get all events (admin)
-  async getEvents(
-    page: number = 1,
-    limit: number = 20,
-    status?: EventStatusFilter,
-    search?: string,
-    sortBy?: string,
-    sortOrder?: 'asc' | 'desc'
-  ): Promise<EventsListResponse> {
+  // Get all events (admin).
+  //
+  // Takes an options object rather than positional arguments: with page,
+  // limit, status, search, type, sortBy and sortOrder the positional form had
+  // callers writing `getEvents(1, 100, undefined, undefined, 'event_date')`,
+  // where one misplaced undefined silently sorts by the wrong column.
+  async getEvents(options: EventsListParams = {}): Promise<EventsListResponse> {
+    const { page = 1, limit = 20, status, search, type, sortBy, sortOrder } = options;
     const params = new URLSearchParams({
       page: page.toString(),
       limit: limit.toString(),
@@ -121,6 +191,9 @@ export const eventsService = {
     }
     if (search) {
       params.append('search', search);
+    }
+    if (type) {
+      params.append('type', type);
     }
     if (sortBy) {
       params.append('sortBy', sortBy);
@@ -146,15 +219,44 @@ export const eventsService = {
   },
 
   // Create new event (admin)
-  async createEvent(data: CreateEventData): Promise<Event> {
-    const response = await api.post<Event>('/admin/events', data);
-    return normalizeEvent(response.data as Event);
+  async createEvent(data: CreateEventData): Promise<Event & { import_started?: boolean }> {
+    const response = await api.post<Event & { import_started?: boolean }>('/admin/events', data);
+    return { ...normalizeEvent(response.data as Event), import_started: response.data.import_started === true };
+  },
+
+  // Download limit usage (issue 1560). The limit itself is set through
+  // updateEvent; these read and reset what the gallery has used.
+  async getDownloadLimitUsage(id: number): Promise<DownloadLimitUsage> {
+    const response = await api.get<DownloadLimitUsage>(`/admin/events/${id}/download-limit`);
+    return response.data;
+  },
+
+  async resetDownloadLimitUsage(id: number): Promise<DownloadLimitUsage> {
+    const response = await api.post<DownloadLimitUsage>(`/admin/events/${id}/download-limit/reset`);
+    return response.data;
   },
 
   // Update event (admin)
   // Reveal now (#838): stamps revealed_at so the gallery opens for guests.
   async revealEvent(id: number): Promise<{ revealed_at: string }> {
     const response = await api.post(`/admin/events/${id}/reveal`);
+    return response.data;
+  },
+
+  // Two-stage delivery (issue 1562): the state read-out for the Delivery
+  // section and the event header.
+  async getDelivery(id: number): Promise<DeliveryState> {
+    const response = await api.get<DeliveryState>(`/admin/events/${id}/delivery`);
+    return response.data;
+  },
+
+  // "Full gallery is ready". Returns the first-look photos that arrived again
+  // in the full set; the caller deletes them through the regular photo delete
+  // when the admin asked for it.
+  async completeDelivery(id: number, options: { sendEmail: boolean }): Promise<CompleteDeliveryResult> {
+    const response = await api.post<CompleteDeliveryResult>(`/admin/events/${id}/delivery/complete`, {
+      send_email: options.sendEmail,
+    });
     return response.data;
   },
 

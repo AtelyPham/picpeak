@@ -6,9 +6,8 @@ import { Button, Card } from '../common';
 interface CategoryOption {
   id: number;
   name: string;
-  // #1160: moving photos into a folder takes them OUT of the main grid, which is
-  // a materially different outcome from tagging them with a filter category.
-  // The option is labelled so the admin knows which one they picked.
+  // Folders (#1160) have their own slot since issue 1786 (photos.folder_id)
+  // and their own "Move to folder" action; they are not offered here.
   is_folder?: boolean;
 }
 
@@ -31,6 +30,7 @@ export const BulkCategoryModal: React.FC<BulkCategoryModalProps> = ({
 }) => {
   const { t } = useTranslation();
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
+  const filterCategories = categories.filter((category) => !category.is_folder);
 
   if (!isOpen) return null;
 
@@ -48,35 +48,33 @@ export const BulkCategoryModal: React.FC<BulkCategoryModalProps> = ({
       <Card className="w-full max-w-md">
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">
+            <h2 className="text-xl font-semibold text-heading">
               {t('photos.moveToCategory', 'Move {{count}} photos to category', { count: photoCount })}
             </h2>
             <button
               onClick={handleClose}
-              className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-700 rounded-lg transition-colors"
+              className="p-1 hover:bg-hover rounded-lg transition-colors"
               disabled={isLoading}
             >
-              <X className="w-5 h-5 text-neutral-500 dark:text-neutral-400" />
+              <X className="w-5 h-5 text-muted" />
             </button>
           </div>
 
           <div className="mb-6">
-            <label htmlFor="category-select" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+            <label htmlFor="category-select" className="block text-sm font-medium text-body mb-2">
               {t('photos.selectCategory', 'Select category')}
             </label>
             <select
               id="category-select"
               value={selectedCategoryId ?? ''}
               onChange={(e) => setSelectedCategoryId(e.target.value === '' ? null : Number(e.target.value))}
-              className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+              className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
               disabled={isLoading}
             >
               <option value="">{t('photos.uncategorized', 'Uncategorized')}</option>
-              {categories.map((category) => (
+              {filterCategories.map((category) => (
                 <option key={category.id} value={category.id}>
-                  {category.is_folder
-                    ? t('photos.folderOption', '{{name}} (folder — hidden from the main grid)', { name: category.name })
-                    : category.name}
+                  {category.name}
                 </option>
               ))}
             </select>

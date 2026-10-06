@@ -32,6 +32,7 @@
 const { ensureCrmEmailTemplatesSeeded } = require('./crmEmailTemplates');
 const { ensureContractEmailTemplatesSeeded } = require('./contractEmailTemplates');
 const { ensureEventReminderTemplatesSeeded } = require('./eventReminderTemplates');
+const { ensureGalleryDeliveryTemplatesSeeded } = require('./galleryDeliveryTemplates');
 
 /**
  * Run all three template seeders, then recover any email_queue rows
@@ -54,6 +55,7 @@ async function seedEmailTemplatesAndRecoverQueue(db, logger) {
     ensureCrmEmailTemplatesSeeded,
     ensureContractEmailTemplatesSeeded,
     ensureEventReminderTemplatesSeeded,
+    ensureGalleryDeliveryTemplatesSeeded,
   ]) {
     try {
       const inserted = await seedFn(db, log);

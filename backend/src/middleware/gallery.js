@@ -2,10 +2,12 @@ const jwt = require('jsonwebtoken');
 const { db, withRetry } = require('../database/db');
 const { getGalleryTokenFromRequest } = require('../utils/tokenUtils');
 const logger = require('../utils/logger');
+const { AppError } = require('../utils/errors');
+const { isSessionExpired, touchSession } = require('./sessionTimeout');
 const access = require('../services/galleryAccessService');
 
 // Cookie first: a coexisting gallery Bearer must not shadow an admin preview.
-function decodeAdminPreview(req) {
+function readAdminPreview(req) {
   if (req.query?.admin_preview !== '1') return null;
   const candidates = [req.cookies?.admin_token];
   const header = req.headers?.authorization;
@@ -15,10 +17,14 @@ function decodeAdminPreview(req) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET, {
         issuer: 'picpeak-auth', algorithms: ['HS256'],
       });
-      if (decoded.type === 'admin') return decoded;
+      if (decoded.type === 'admin') return { token, decoded };
     } catch { /* try the next candidate */ }
   }
   return null;
+}
+
+function decodeAdminPreview(req) {
+  return readAdminPreview(req)?.decoded || null;
 }
 
 // Signature-only predicate retained for UI-intent callers. It never authorizes.
@@ -43,8 +49,9 @@ function attachAccess(req, event, grant) {
 
 async function verifyAdminPreview(req, event) {
   if (req.isAdminPreview && req.galleryAccess && (!event || event.id === req.event?.id)) return true;
-  const decoded = decodeAdminPreview(req);
-  if (!decoded) return false;
+  const preview = readAdminPreview(req);
+  if (!preview) return false;
+  const { token, decoded } = preview;
   try {
     const slug = req.params?.slug || req.requestedSlug;
     if (!event && !slug) return false;
@@ -52,6 +59,17 @@ async function verifyAdminPreview(req, event) {
     if (!event) return false;
     const grant = access.grant(event, 'admin', decoded);
     await access.authorize(event, grant);
+    // sessionTimeoutMiddleware only guards /api/admin, so an admin session
+    // that idled out there could still preview galleries until its exp.
+    // Checked after authorize: a caller who may not open this gallery (a
+    // revoked token, a scoped admin on another owner's draft) gets that
+    // refusal, which reads as not found, not a timeout that reveals the draft.
+    if (await isSessionExpired(token, decoded)) {
+      throw new AppError('Session expired', 401, 'SESSION_TIMEOUT');
+    }
+    // An authorized preview is activity, so the timeout stays an idle
+    // timeout rather than a fixed preview lifetime.
+    touchSession(token);
     attachAccess(req, event, grant);
     return true;
   } catch (error) {

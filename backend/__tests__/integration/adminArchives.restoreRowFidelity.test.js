@@ -69,6 +69,7 @@ describe('archive restore rebuilds the photo row faithfully', () => {
 
   beforeEach(async () => {
     await db('photos').del();
+    await db('gallery_guests').del();
     await db('photo_categories').del();
     await db('events').del();
   });
@@ -286,6 +287,318 @@ describe('archive restore rebuilds the photo row faithfully', () => {
     const photo = await db('photos').where('event_id', eventId).first();
     expect(photo.media_type).toBe('video');
     expect(photo.mime_type).toBe('video/mp4');
+  });
+
+  it('restores credits, except the name of a guest erased while archived', async () => {
+    // Seeded first: the manifest below names the event's guests by id.
+    const eventId = await seedArchivedEvent(path.join('archives', 'credits.zip'), 'credits-event');
+    const guest = async (name, deleted) => {
+      const [row] = await db('gallery_guests').insert({
+        event_id: eventId, name, identifier: `g-${name}`, is_deleted: deleted ? 1 : 0,
+      }).returning('id');
+      return typeof row === 'object' ? row.id : row;
+    };
+    const anna = await guest('Anna', false);
+    const bea = await guest('Removed', true);
+    // The manifest is written with the archive, so it predates the erasure.
+    const manifest = [
+      { filename: 'kept.jpg', type: 'individual', uploaded_by: 'guest', credit_name: 'Anna', credit_source: 'guest', uploader_guest_id: anna },
+      { filename: 'shown.jpg', type: 'individual', uploaded_by: 'guest', credit_name: 'Anna', credit_source: 'guest', uploader_guest_id: anna, credit_visible_to_guests: true },
+      { filename: 'erased.jpg', type: 'individual', uploaded_by: 'guest', credit_name: 'Bea', credit_source: 'guest', uploader_guest_id: bea },
+      { filename: 'cleared.jpg', type: 'individual', uploaded_by: 'admin', credit_name: null, credit_source: 'manual', uploader_guest_id: null },
+      // An admin's name on a guest's upload goes with that guest.
+      { filename: 'renamed-erased.jpg', type: 'individual', uploaded_by: 'guest', credit_name: 'Bea Real', credit_source: 'manual', uploader_guest_id: bea },
+      { filename: 'renamed-kept.jpg', type: 'individual', uploaded_by: 'guest', credit_name: 'Anna Real', credit_source: 'manual', uploader_guest_id: anna },
+    ];
+    await writeArchive('credits.zip', {
+      'individual/kept.jpg': BYTES,
+      'individual/shown.jpg': BYTES,
+      'individual/erased.jpg': BYTES,
+      'individual/cleared.jpg': BYTES,
+      'individual/renamed-erased.jpg': BYTES,
+      'individual/renamed-kept.jpg': BYTES,
+      'photos_manifest.json': manifestOf(manifest),
+    });
+
+    await restore(eventId);
+
+    const rows = Object.fromEntries((await db('photos').where('event_id', eventId)).map((p) => [p.filename, p]));
+    expect(rows['kept.jpg']).toMatchObject({ uploaded_by: 'guest', credit_name: 'Anna', credit_source: 'guest', uploader_guest_id: anna });
+    expect(rows['erased.jpg']).toMatchObject({ uploaded_by: 'guest', credit_name: null, credit_source: null, uploader_guest_id: null });
+    // A cleared credit stays decided, so the EXIF backfill cannot put one back.
+    expect(rows['cleared.jpg']).toMatchObject({ credit_name: null, credit_source: 'manual' });
+    // The guest's visibility snapshot comes back; a manifest without one is not shown.
+    expect(Boolean(rows['kept.jpg'].credit_visible_to_guests)).toBe(false);
+    expect(Boolean(rows['shown.jpg'].credit_visible_to_guests)).toBe(true);
+    expect(rows['renamed-erased.jpg']).toMatchObject({ credit_name: null, credit_source: 'manual', uploader_guest_id: null });
+    expect(rows['renamed-kept.jpg']).toMatchObject({ credit_name: 'Anna Real', credit_source: 'manual', uploader_guest_id: anna });
+  });
+
+  it('puts an original-name entry back under its canonical key and keeps the retained row', async () => {
+    // With general_use_original_filenames_for_downloads on at archive time,
+    // archiveService names the entry after the original filename but keeps
+    // the photo row, whose path names the internal file. Restoring the
+    // entry under the name the zip gave it leaves that row pointing at an
+    // object the archive deleted, and the lookup by entry basename misses
+    // the row and inserts a second one.
+    const slug = 'original-name-event';
+    const archiveRelPath = await writeArchive('original-name.zip', {
+      'individual/DSC_0001.jpg': BYTES,
+      'photos_manifest.json': manifestOf([
+        { filename: 'ev_001.jpg', original_filename: 'DSC_0001.jpg', type: 'individual' },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, slug);
+    const canonicalKey = `events/active/${slug}/individual/ev_001.jpg`;
+    await db('photos').insert({
+      event_id: eventId,
+      filename: 'ev_001.jpg',
+      original_filename: 'DSC_0001.jpg',
+      path: canonicalKey,
+      type: 'individual',
+      size_bytes: BYTES.length,
+    });
+
+    await restore(eventId);
+
+    const rows = await db('photos').where('event_id', eventId);
+    expect(rows.map((r) => r.filename)).toEqual(['ev_001.jpg']);
+    await expect(fs.promises.access(path.join(storagePath, canonicalKey))).resolves.toBeUndefined();
+    await expect(fs.promises.access(path.join(storagePath, `events/active/${slug}/individual/DSC_0001.jpg`)))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps both files when a legacy archive sends two entries to one canonical name', async () => {
+    // No zip_path recorded (older archive) and original-name downloads were
+    // on: row A's original equals row B's internal name. By name, entry
+    // b.jpg (row A's bytes) resolves to canonical b.jpg and so does c.jpg
+    // (row B's), so the second put would overwrite the first. The group
+    // falls back to the names the zip gave it; nothing is lost.
+    const slug = 'legacy-collision-event';
+    const A = Buffer.from('bytes of row A');
+    const C = Buffer.from('bytes of row B');
+    const archiveRelPath = await writeArchive('legacy-collision.zip', {
+      'individual/b.jpg': A,
+      'individual/c.jpg': C,
+      'photos_manifest.json': manifestOf([
+        { filename: 'a.jpg', original_filename: 'b.jpg', type: 'individual' },
+        { filename: 'b.jpg', original_filename: 'c.jpg', type: 'individual' },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, slug);
+
+    await restore(eventId);
+
+    const dir = path.join(storagePath, `events/active/${slug}/individual`);
+    const written = Object.fromEntries(fs.readdirSync(dir).map((f) => [f, fs.readFileSync(path.join(dir, f))]));
+    const contents = Object.values(written).map((b) => b.toString());
+    expect(contents).toEqual(expect.arrayContaining(['bytes of row A', 'bytes of row B']));
+    expect(Object.keys(written).sort()).toEqual(['b.jpg', 'c.jpg']);
+  });
+
+  it('keeps every file when a fallback name collides with another entry in turn', async () => {
+    // Recorded zip paths make the lookup exact, and an archive written before
+    // the duplicate-row cleanup can carry two rows with one internal filename.
+    // Entries z.jpg and k.jpg both resolve to k.jpg, so both fall back to
+    // their own names; w.jpg resolves to z.jpg and now meets z.jpg's
+    // fallback. A single pass never rechecks that and overwrites one file.
+    const slug = 'legacy-chain-collision-event';
+    const archiveRelPath = await writeArchive('legacy-chain.zip', {
+      'individual/z.jpg': Buffer.from('bytes Z'),
+      'individual/k.jpg': Buffer.from('bytes K'),
+      'individual/w.jpg': Buffer.from('bytes W'),
+      'photos_manifest.json': manifestOf([
+        { filename: 'k.jpg', zip_path: 'individual/z.jpg', type: 'individual' },
+        { filename: 'k.jpg', zip_path: 'individual/k.jpg', type: 'individual' },
+        { filename: 'z.jpg', zip_path: 'individual/w.jpg', type: 'individual' },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, slug);
+
+    await restore(eventId);
+
+    const dir = path.join(storagePath, `events/active/${slug}/individual`);
+    const contents = fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f)).toString()).sort();
+    expect(contents).toEqual(['bytes K', 'bytes W', 'bytes Z']);
+  });
+
+  it('rebuilds a missing row under the canonical name when the entry carries the original', async () => {
+    const slug = 'original-name-norow-event';
+    const archiveRelPath = await writeArchive('original-name-norow.zip', {
+      'individual/DSC_0002.jpg': BYTES,
+      'photos_manifest.json': manifestOf([
+        { filename: 'ev_002.jpg', original_filename: 'DSC_0002.jpg', type: 'individual' },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, slug);
+
+    await restore(eventId);
+
+    const photo = await db('photos').where('event_id', eventId).first();
+    expect(photo).toMatchObject({
+      filename: 'ev_002.jpg',
+      original_filename: 'DSC_0002.jpg',
+      path: `events/active/${slug}/individual/ev_002.jpg`,
+    });
+  });
+
+  it('matches by the recorded zip path when two photos share an original name', async () => {
+    // Two rows with the same original: the writer emits `SHARED.jpg` and
+    // `SHARED_1.jpg`, and the alias is dropped as ambiguous. The basename
+    // alone cannot say which row is which; the zip path the writer records
+    // per row can.
+    const slug = 'shared-original-event';
+    const archiveRelPath = await writeArchive('shared-original.zip', {
+      'individual/SHARED.jpg': BYTES,
+      'individual/SHARED_1.jpg': Buffer.concat([BYTES, BYTES]),
+      'photos_manifest.json': manifestOf([
+        { filename: 'a_stored.jpg', original_filename: 'SHARED.jpg', type: 'individual', zip_path: 'individual/SHARED.jpg' },
+        { filename: 'b_stored.jpg', original_filename: 'SHARED.jpg', type: 'individual', zip_path: 'individual/SHARED_1.jpg' },
+      ]),
+    });
+    const eventId = await seedArchivedEvent(archiveRelPath, slug);
+    for (const name of ['a_stored.jpg', 'b_stored.jpg']) {
+      await db('photos').insert({
+        event_id: eventId,
+        filename: name,
+        original_filename: 'SHARED.jpg',
+        path: `events/active/${slug}/individual/${name}`,
+        type: 'individual',
+      });
+    }
+
+    await restore(eventId);
+
+    const rows = await db('photos').where('event_id', eventId).orderBy('filename');
+    expect(rows.map((r) => r.filename)).toEqual(['a_stored.jpg', 'b_stored.jpg']);
+    const dir = path.join(storagePath, 'events/active', slug, 'individual');
+    expect((await fs.promises.readdir(dir)).sort()).toEqual(['a_stored.jpg', 'b_stored.jpg']);
+    // Each file under the row it was written from, not swapped.
+    expect((await fs.promises.stat(path.join(dir, 'a_stored.jpg'))).size).toBe(BYTES.length);
+    expect((await fs.promises.stat(path.join(dir, 'b_stored.jpg'))).size).toBe(BYTES.length * 2);
+  });
+
+  it('round-trips two photos sharing an original name through the real writer', async () => {
+    // The writer records the emitted zip path; without it the previous test's
+    // manifest is a fiction. Original-name archiving on, two rows with the
+    // same original, archive, then restore into the same storage.
+    jest.doMock('../../src/services/downloadFilenameService', () => ({
+      getUseOriginalFilenames: async () => true,
+    }));
+    jest.doMock('../../src/services/emailProcessor', () => ({
+      queueEmail: async () => {},
+      getSupportEmail: async () => 'support@example.com',
+    }));
+    const { archiveEvent } = require('../../src/services/archiveService');
+
+    const slug = 'writer-round-trip';
+    const [row] = await db('events').insert({
+      slug,
+      event_type: 'wedding',
+      event_name: slug,
+      event_date: '2026-06-27',
+      host_email: 'h@example.com',
+      admin_email: null,
+      password_hash: 'x',
+      share_link: `${slug}-share`,
+      expires_at: new Date().toISOString(),
+    }).returning('id');
+    const eventId = typeof row === 'object' ? row.id : row;
+    const dir = path.join(storagePath, 'events/active', slug, 'individual');
+    await fs.promises.mkdir(dir, { recursive: true });
+    const seeded = { 'a_stored.jpg': BYTES, 'b_stored.jpg': Buffer.concat([BYTES, BYTES]) };
+    for (const [name, bytes] of Object.entries(seeded)) {
+      await fs.promises.writeFile(path.join(dir, name), bytes);
+      await db('photos').insert({
+        event_id: eventId,
+        filename: name,
+        original_filename: 'SHARED.jpg',
+        path: `events/active/${slug}/individual/${name}`,
+        type: 'individual',
+        size_bytes: bytes.length,
+      });
+    }
+
+    await archiveEvent(await db('events').where('id', eventId).first());
+    // The originals are gone (the directory itself is left behind).
+    expect(await fs.promises.readdir(dir)).toEqual([]);
+
+    await restore(eventId);
+
+    const rows = await db('photos').where('event_id', eventId).orderBy('filename');
+    expect(rows.map((r) => r.filename)).toEqual(['a_stored.jpg', 'b_stored.jpg']);
+    for (const [name, bytes] of Object.entries(seeded)) {
+      expect(Buffer.compare(await fs.promises.readFile(path.join(dir, name)), bytes)).toBe(0);
+    }
+  });
+
+  it('drops the browser-playable copy on archive and queues it again on restore (issue 1430)', async () => {
+    jest.doMock('../../src/services/emailProcessor', () => ({
+      queueEmail: async () => {},
+      getSupportEmail: async () => 'support@example.com',
+    }));
+    const { archiveEvent } = require('../../src/services/archiveService');
+    const videoRendition = require('../../src/services/videoRenditionService');
+
+    const slug = 'web-copy-round-trip';
+    const [row] = await db('events').insert({
+      slug,
+      event_type: 'wedding',
+      event_name: slug,
+      event_date: '2026-06-27',
+      host_email: 'h@example.com',
+      admin_email: null,
+      password_hash: 'x',
+      share_link: `${slug}-share`,
+      expires_at: new Date().toISOString(),
+    }).returning('id');
+    const eventId = typeof row === 'object' ? row.id : row;
+    const dir = path.join(storagePath, 'events/active', slug, 'individual');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.mkdir(path.join(storagePath, 'videos'), { recursive: true });
+    const seed = async (name, extra) => {
+      await fs.promises.writeFile(path.join(dir, name), BYTES);
+      const [r] = await db('photos').insert({
+        event_id: eventId,
+        filename: name,
+        original_filename: name,
+        path: `events/active/${slug}/individual/${name}`,
+        type: 'individual',
+        size_bytes: BYTES.length,
+        media_type: 'video',
+        mime_type: 'video/quicktime',
+        processing_status: 'complete',
+        ...extra,
+      }).returning('id');
+      return typeof r === 'object' ? r.id : r;
+    };
+    // One video with a copy, one the probe had passed as playable.
+    const copied = await seed('phone.mov', { web_path: 'videos/web_x_phone.mp4', web_status: 'complete' });
+    const playable = await seed('cam.mov', { web_status: 'skipped' });
+    await fs.promises.writeFile(path.join(storagePath, 'videos/web_x_phone.mp4'), BYTES);
+
+    await archiveEvent(await db('events').where('id', eventId).first());
+
+    // The copy is gone with the originals, and the row no longer names it:
+    // a `complete` row pointing at nothing could never be queued again.
+    await expect(fs.promises.access(path.join(storagePath, 'videos/web_x_phone.mp4'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await db('photos').where('id', copied).first()).toMatchObject({ web_path: null, web_status: null });
+    // No copy to lose, and the original comes back byte for byte: the verdict stays.
+    expect(await db('photos').where('id', playable).first()).toMatchObject({ web_status: 'skipped' });
+
+    // Restore with the setting on queues the video again.
+    await db('app_settings').insert({ setting_key: 'general_video_web_rendition', setting_value: JSON.stringify(true), setting_type: 'general' }).catch(async () => {
+      await db('app_settings').where({ setting_key: 'general_video_web_rendition' }).update({ setting_value: JSON.stringify(true) });
+    });
+    videoRendition.clearCache();
+    try {
+      await restore(eventId);
+      expect(await db('photos').where('id', copied).first()).toMatchObject({ web_status: 'pending' });
+      expect(await db('photos').where('id', playable).first()).toMatchObject({ web_status: 'skipped' });
+    } finally {
+      await db('app_settings').where({ setting_key: 'general_video_web_rendition' }).del();
+      videoRendition.clearCache();
+    }
   });
 
   it('keeps the original upload time rather than stamping the restore time', async () => {

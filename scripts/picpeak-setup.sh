@@ -25,6 +25,8 @@ readonly DEFAULT_PORT=3001
 readonly NATIVE_APP_DIR="/opt/picpeak"
 readonly NATIVE_APP_USER="picpeak"
 readonly DOCKER_APP_DIR="$HOME/picpeak"
+readonly UPDATER_LIB_DIR="/usr/local/lib/picpeak"
+readonly UPDATER_UNIT_DIR="/etc/systemd/system"
 
 # Color codes for output
 readonly RED='\033[0;31m'
@@ -35,8 +37,12 @@ readonly PURPLE='\033[0;35m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m' # No Color
 
-# Logging
-readonly LOG_FILE="/tmp/picpeak-setup-$(date +%Y%m%d-%H%M%S).log"
+# Logging. mktemp creates the transcript exclusively with mode 0600, so the
+# path cannot be pre-created or symlinked by another local user and the file
+# is never group/world-readable. Bootstrap secrets are additionally kept out
+# of it — see print_secret_line.
+LOG_FILE="$(mktemp /tmp/picpeak-setup-XXXXXXXX.log)" || { echo "Cannot create a log file in /tmp" >&2; exit 1; }
+readonly LOG_FILE
 exec 1> >(tee -a "$LOG_FILE")
 exec 2>&1
 
@@ -62,6 +68,8 @@ UNATTENDED=false
 UPDATE_MODE=false
 UNINSTALL_MODE=false
 FORCE_ADMIN_PASSWORD_RESET=false
+ENABLE_SELF_UPDATE=false   # install the in-app updater host agent (Docker only)
+DISABLE_SELF_UPDATE=false  # remove the host agent and turn the flag off
 
 ################################################################################
 # Helper Functions
@@ -152,10 +160,11 @@ review_and_confirm() {
     echo "  Install method : ${INSTALL_METHOD}"
     echo "  Directory      : $([[ "$INSTALL_METHOD" == "docker" ]] && docker_default_dir || echo "$NATIVE_APP_DIR")"
     [[ "$INSTALL_METHOD" == "docker" ]] && echo "  Release channel: ${PICPEAK_CHANNEL}"
+    [[ "$INSTALL_METHOD" == "docker" ]] && echo "  In-app updates : $([[ "$ENABLE_SELF_UPDATE" == "true" ]] && echo "enabled (host agent)" || echo "off")"
     echo "  Domain         : ${DOMAIN_NAME:-（none — local IP over HTTP）}"
     echo "  HTTPS          : ${HTTPS_MODE}"
     echo "  Admin email    : ${ADMIN_EMAIL}"
-    echo "  Admin account  : $([[ -n "$ADMIN_PASSWORD" ]] && echo "seeded from --admin-password" || echo "created in browser (one-time /setup token)")"
+    echo "  Admin account  : $([[ -n "$ADMIN_PASSWORD" ]] && echo "seeded with the supplied password" || echo "created in browser (one-time /setup token)")"
     echo "  Email/SMTP     : ${SMTP_HOST:-not configured}"
     echo "  Access URL     : $(base_url)"
     echo
@@ -188,6 +197,17 @@ run_wizard() {
         echo "Release channel: 'stable' (recommended) or 'beta' (newest features)."
         local ch; read -p "Channel [${PICPEAK_CHANNEL}]: " ch
         PICPEAK_CHANNEL="${ch:-$PICPEAK_CHANNEL}"
+    fi
+
+    # 3b) In-app updates (Docker only): installs a small systemd agent that runs
+    # `docker compose pull && up -d` when an admin presses "Update now".
+    if [[ "$INSTALL_METHOD" == "docker" && "$ENABLE_SELF_UPDATE" != "true" ]]; then
+        echo
+        echo "In-app updates let an admin update PicPeak from the browser, without a terminal."
+        echo "This installs a small systemd agent on this server (see docs/self-update.md)."
+        if confirm "Enable in-app updates?" "n"; then
+            ENABLE_SELF_UPDATE=true
+        fi
     fi
 
     # 4) Domain
@@ -228,6 +248,9 @@ validate_unattended() {
 
     if [[ "$ENABLE_SSL" == "true" && -z "$DOMAIN_NAME" ]]; then
         die "--enable-ssl requires --domain in unattended mode."
+    fi
+    if [[ "$ENABLE_SELF_UPDATE" == "true" && "$INSTALL_METHOD" != "docker" ]]; then
+        die "--enable-self-update is only available for Docker installs."
     fi
     # Resolve HTTPS mode for unattended runs.
     if [[ -n "$DOMAIN_NAME" ]]; then
@@ -280,6 +303,48 @@ die() {
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Write stdin to a secret-bearing file (.env) as mode 0600. The file is created
+# under a private umask so it is never observable as 0644; the chmod afterwards
+# also tightens a pre-existing permissive file that is being rewritten.
+write_private_file() {
+    local target="$1"
+    ( umask 077; cat > "$target" ) && chmod 600 "$target" \
+        || die "Could not write $target with mode 0600"
+}
+
+# Copy a secret-bearing file (.env backups) so the copy is mode 0600 from the
+# moment it exists.
+copy_private_file() {
+    local src="$1" dst="$2"
+    ( umask 077; cp "$src" "$dst" ) && chmod 600 "$dst"
+}
+
+# Show a bootstrap secret (seeded admin password, one-time setup token) on the
+# terminal only. stdout is duplicated into the transcript in LOG_FILE, so the
+# line goes straight to /dev/tty; without a terminal the fallback is printed
+# instead, pointing at the protected file that holds the value.
+print_secret_line() {
+    local line="$1" fallback="$2"
+    if ! { echo -e "$line" > /dev/tty; } 2>/dev/null; then
+        echo -e "$fallback"
+    fi
+}
+
+# Read a secret for --admin-password-file / --smtp-pass-file. The file must be a
+# regular file with no group/other permission bits; only its first line is
+# used. Keeps the value out of argv (process list) and shell history. Called
+# inside $(...), so diagnostics go to stderr instead of the captured stdout.
+read_secret_file() {
+    local path="$1" flag="$2" mode value=""
+    [[ -f "$path" && ! -L "$path" ]] || die "$flag: $path is not a regular file" >&2
+    mode=$(stat -c '%a' "$path" 2>/dev/null) || die "$flag: cannot stat $path" >&2
+    (( (8#$mode & 8#077) == 0 )) || die "$flag: $path must be mode 0600 or stricter (is $mode)" >&2
+    IFS= read -r value < "$path" || true
+    value="${value%$'\r'}"
+    [[ -n "$value" ]] || die "$flag: $path is empty" >&2
+    printf '%s' "$value"
 }
 
 ensure_storage_layout() {
@@ -581,6 +646,12 @@ setup_docker_installation() {
         app_dir="/home/$SUDO_USER/picpeak"
     fi
     
+    # A re-run of the installer must not silently drop an agent that is already
+    # installed: the .env below is rewritten wholesale.
+    if update_agent_installed; then
+        ENABLE_SELF_UPDATE=true
+    fi
+
     log_step "Preparing application directory at $app_dir"
     local app_parent_dir
     app_parent_dir=$(dirname "$app_dir")
@@ -636,6 +707,12 @@ setup_docker_installation() {
         host_uid=$(id -u 2>/dev/null || echo 1000)
         host_gid=$(id -g 2>/dev/null || echo 1000)
     fi
+
+    # The install dir holds .env and the admin credentials file: make it the
+    # operator's and deny traversal to other local users. Bind mounts are
+    # unaffected (Docker resolves the mount source as root).
+    chmod 700 "$app_dir" || die "Could not restrict permissions on $app_dir"
+    chown "$host_uid":"$host_gid" "$app_dir" 2>/dev/null || true
 
     # Generate machine secrets. Written to .env so they are stable across
     # restarts; the compose secrets-init service reuses these exact values
@@ -693,13 +770,16 @@ setup_docker_installation() {
     if [ -f "$app_dir/.env" ]; then
         # The rewrite below is wholesale, so losing this copy loses every other
         # hand-edit in the file. Fail loudly rather than proceeding without it.
-        if ! cp "$app_dir/.env" "$app_dir/.env.backup-$(date +%Y%m%d-%H%M%S)-$$"; then
+        local env_backup
+        env_backup="$app_dir/.env.backup-$(date +%Y%m%d-%H%M%S)-$$"
+        if ! copy_private_file "$app_dir/.env" "$env_backup"; then
             log_error "Could not back up $app_dir/.env before rewriting it — aborting rather than overwriting it."
             exit 1
         fi
+        chown "$host_uid":"$host_gid" "$env_backup" 2>/dev/null || true
     fi
     log_step "Creating configuration..."
-    cat > "$app_dir/.env" <<EOF
+    write_private_file "$app_dir/.env" <<EOF
 # PicPeak Configuration — generated by picpeak-setup.sh on $(date)
 # Runs docker-compose.production.yml (prebuilt images from GHCR).
 
@@ -709,6 +789,7 @@ COMPOSE_FILE=docker-compose.production.yml
 # Release channel: stable | beta
 PICPEAK_CHANNEL=$PICPEAK_CHANNEL
 NODE_ENV=production
+$(if [[ "$ENABLE_SELF_UPDATE" == "true" ]]; then printf '\n# In-app updates via the host agent (docs/self-update.md)\nPICPEAK_SELF_UPDATE=true\n'; fi)
 
 # Machine secrets. Written explicitly only when this file already pinned them or
 # there is no picpeak-secrets volume to own them; otherwise left commented so the
@@ -730,6 +811,7 @@ BACKEND_PORT=3001
 APP_STORAGE=./storage
 APP_DATA=./data
 LOGS=./logs
+APP_BACKUP=./backup
 
 # Admin — the account is created in the browser via a one-time /setup token.
 ADMIN_EMAIL=$ADMIN_EMAIL
@@ -749,6 +831,9 @@ SMTP_USER=$SMTP_USER
 SMTP_PASS=$SMTP_PASS
 EMAIL_FROM=${SMTP_USER:-noreply@localhost}
 EOF
+    # .env is 0600 (write_private_file); hand it to the operator so they can
+    # keep running docker compose in this directory without sudo.
+    chown "$host_uid":"$host_gid" "$app_dir/.env" 2>/dev/null || true
 
     # Ensure bind mounts are writable by the invoking user (the container
     # self-heals ownership on boot via wait-for-db.sh, this just lets the
@@ -797,6 +882,10 @@ EOF
       sleep 2
     done
 
+    if [[ "$ENABLE_SELF_UPDATE" == "true" ]]; then
+        install_update_agent "$app_dir"
+    fi
+
     # Admin access. Two paths:
     #   - Seeded (ADMIN_PASSWORD set, or --force-admin-password-reset): the
     #     migration/reset script writes ADMIN_CREDENTIALS.txt — copy it to the host.
@@ -816,6 +905,100 @@ EOF
     fi
 
     log_success "Docker installation completed!"
+}
+
+################################################################################
+# In-app updater (host agent)
+################################################################################
+
+# The host packaging of updater/picpeak-updater.sh: a systemd path unit that
+# runs one update whenever the backend files a request. Nothing in a container
+# holds the Docker socket. See docs/self-update.md.
+
+update_agent_installed() {
+    [[ -f "$UPDATER_UNIT_DIR/picpeak-updater.path" ]]
+}
+
+# Sets KEY=VALUE in an env file, replacing an existing line or appending one.
+set_env_value() {
+    local file="$1" key="$2" value="$3"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        printf '\n%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+# Installs or refreshes the agent from the checkout in $1. Re-running it is how
+# the agent itself gets updated (`--update` does that): it never fetches code to
+# run as root on its own.
+install_update_agent() {
+    local app_dir="$1"
+    local update_dir="$app_dir/update"
+
+    # systemctl also exists on WSL and in containers where systemd is not PID 1;
+    # daemon-reload would then fail after the stack is already up.
+    if [[ ! -d /run/systemd/system ]]; then
+        log_warn "systemd is not running here, so the in-app updater was not installed. Use the container variant instead (docs/self-update.md)."
+        return 0
+    fi
+    if [[ ! -f "$app_dir/updater/picpeak-updater.sh" ]]; then
+        log_warn "$app_dir/updater/picpeak-updater.sh is missing, so the in-app updater was not installed."
+        return 0
+    fi
+
+    # The unit files quote these paths; a quote or backslash in them would need
+    # systemd's own escaping on top, and a newline breaks the sed that renders
+    # them. Not worth it for a path nobody chooses.
+    if [[ "$app_dir" == *[\"\\]* || "$app_dir" == *$'\n'* ]]; then
+        log_warn "The install path $app_dir contains a quote, backslash or newline, so the in-app updater was not installed."
+        return 0
+    fi
+
+    log_step "Installing the in-app updater (host agent)..."
+
+    # request/ belongs to the backend (UID 1001), which files requests there.
+    # status/ belongs to the agent alone; the backend only reads it.
+    mkdir -p "$update_dir/request" "$update_dir/status"
+    chown 1001:1001 "$update_dir/request"
+    chmod 0750 "$update_dir/request"
+    chown root:root "$update_dir/status"
+    chmod 0755 "$update_dir/status"
+
+    install -d -m 0755 "$UPDATER_LIB_DIR"
+    install -m 0755 "$app_dir/updater/picpeak-updater.sh" "$UPDATER_LIB_DIR/picpeak-updater.sh"
+
+    local unit project_value update_value
+    project_value=$(systemd_sed_value "$app_dir")
+    update_value=$(systemd_sed_value "$update_dir")
+    for unit in picpeak-updater.path picpeak-updater.service; do
+        sed -e "s#@PROJECT_DIR@#${project_value}#g" -e "s#@UPDATE_DIR@#${update_value}#g" \
+            "$app_dir/updater/systemd/${unit}.in" > "$UPDATER_UNIT_DIR/$unit"
+    done
+    systemctl daemon-reload
+
+    PICPEAK_PROJECT_DIR="$app_dir" PICPEAK_UPDATE_DIR="$update_dir" \
+        "$UPDATER_LIB_DIR/picpeak-updater.sh" init \
+        || log_warn "The updater could not write its initial status."
+
+    systemctl enable --now picpeak-updater.path
+    log_success "In-app updater installed ($("$UPDATER_LIB_DIR/picpeak-updater.sh" version))."
+}
+
+# A path made safe for a systemd unit (`%` starts a specifier) and then for the
+# replacement side of the `s#…#…#` above (`\`, `&` and the `#` delimiter).
+systemd_sed_value() {
+    local v="${1//%/%%}"
+    printf '%s' "$v" | sed -e 's/[\\&#]/\\&/g'
+}
+
+remove_update_agent() {
+    update_agent_installed || return 0
+    log_step "Removing the in-app updater..."
+    systemctl disable --now picpeak-updater.path 2>/dev/null || true
+    rm -f "$UPDATER_UNIT_DIR/picpeak-updater.path" "$UPDATER_UNIT_DIR/picpeak-updater.service"
+    rm -rf "$UPDATER_LIB_DIR"
+    systemctl daemon-reload
 }
 
 ################################################################################
@@ -958,13 +1141,13 @@ setup_native_installation() {
     if [ -f "$NATIVE_APP_DIR/app/backend/.env" ]; then
         # The rewrite below is wholesale, so losing this copy loses every other
         # hand-edit in the file. Fail loudly rather than proceeding without it.
-        if ! cp "$NATIVE_APP_DIR/app/backend/.env" \
+        if ! copy_private_file "$NATIVE_APP_DIR/app/backend/.env" \
                 "$NATIVE_APP_DIR/app/backend/.env.backup-$(date +%Y%m%d-%H%M%S)-$$"; then
             log_error "Could not back up $NATIVE_APP_DIR/app/backend/.env before rewriting it — aborting rather than overwriting it."
             exit 1
         fi
     fi
-    cat > "$NATIVE_APP_DIR/app/backend/.env" <<EOF
+    write_private_file "$NATIVE_APP_DIR/app/backend/.env" <<EOF
 # PicPeak Native Configuration
 # Generated: $(date)
 
@@ -1251,7 +1434,9 @@ print_success_message() {
         email_line=$(grep -m1 '^Email:' "$cred_file" || true)
         pass_line=$(grep -m1 '^Password:' "$cred_file" || true)
         echo -e "Email:    ${CYAN}${email_line#Email: }${NC}"
-        echo -e "Password: ${CYAN}${pass_line#Password: }${NC}"
+        # Terminal only — the transcript in LOG_FILE must not hold the password.
+        print_secret_line "Password: ${CYAN}${pass_line#Password: }${NC}" \
+            "Password: (not shown without a terminal — read it from ${cred_file})"
         echo -e "Saved to: ${cred_file} ${YELLOW}(delete after recording)${NC}"
         echo -e "${YELLOW}⚠️  Change this password on first login.${NC}"
     else
@@ -1265,7 +1450,9 @@ print_success_message() {
         echo "  2. Enter your email and a password."
         if [[ -n "$token" ]]; then
             echo "  3. When prompted, paste this one-time setup token:"
-            echo -e "     ${CYAN}${token}${NC}"
+            # Terminal only — the transcript in LOG_FILE must not hold the token.
+            print_secret_line "     ${CYAN}${token}${NC}" \
+                "     (not shown without a terminal — read it from ${token_file})"
         elif [[ "$INSTALL_METHOD" == "docker" ]]; then
             echo "  3. Get the one-time setup token from the logs:"
             echo -e "     ${CYAN}cd $app_dir && docker compose logs backend | grep -i 'setup token'${NC}"
@@ -1291,6 +1478,9 @@ print_success_message() {
         echo "Stop:         cd $app_dir && docker compose down"
         echo "Start:        cd $app_dir && docker compose up -d"
         echo "Update:       cd $app_dir && git pull && docker compose pull && docker compose up -d"
+        if [[ "$ENABLE_SELF_UPDATE" == "true" ]]; then
+            echo "Updater log:  sudo journalctl -u picpeak-updater"
+        fi
     else
         echo
         echo "🔧 Service Commands:"
@@ -1333,6 +1523,10 @@ update_installation() {
         docker_detected=true
     fi
 
+    if [[ "$native_detected" == true && "$ENABLE_SELF_UPDATE" == "true" ]]; then
+        die "--enable-self-update is only available for Docker installs."
+    fi
+
     if [[ "$native_detected" == true ]]; then
         INSTALL_METHOD="native"
         update_native_installation
@@ -1352,11 +1546,21 @@ update_docker_installation() {
     
     cd "$app_dir"
     
-    # Backup current configuration
-    cp .env .env.backup-$(date +%Y%m%d-%H%M%S)
-    
+    # Backup current configuration (0600, same owner as .env)
+    local env_backup
+    env_backup=".env.backup-$(date +%Y%m%d-%H%M%S)"
+    copy_private_file .env "$env_backup"
+    chown --reference=.env "$env_backup" 2>/dev/null || true
+
     # Pull latest code (new compose file / defaults) and refresh the images.
     git pull
+
+    # Before `up`, so the backend starts with the flag set.
+    if [[ "$DISABLE_SELF_UPDATE" == "true" ]]; then
+        set_env_value .env PICPEAK_SELF_UPDATE false
+    elif [[ "$ENABLE_SELF_UPDATE" == "true" ]]; then
+        set_env_value .env PICPEAK_SELF_UPDATE true
+    fi
 
     # Production compose uses prebuilt GHCR images, so pull rather than build.
     # COMPOSE_FILE in .env points every command at docker-compose.production.yml.
@@ -1385,6 +1589,16 @@ update_docker_installation() {
       sleep 2
     done
 
+    # Installs the agent fresh, or refreshes an installed one from the code just
+    # pulled. This is the only way the host agent itself gets updated, which is
+    # also why turning it off means removing it: a disabled unit would come back
+    # on the next --update.
+    if [[ "$DISABLE_SELF_UPDATE" == "true" ]]; then
+        remove_update_agent
+    elif [[ "$ENABLE_SELF_UPDATE" == "true" ]] || update_agent_installed; then
+        install_update_agent "$app_dir"
+    fi
+
     log_success "Docker installation updated successfully!"
 }
 
@@ -1402,7 +1616,7 @@ update_native_installation() {
     
     # Backup current configuration
     if [[ -f "$NATIVE_APP_DIR/app/backend/.env" ]]; then
-      cp "$NATIVE_APP_DIR/app/backend/.env" "$NATIVE_APP_DIR/app/backend/.env.backup-$(date +%Y%m%d-%H%M%S)-$$"
+      copy_private_file "$NATIVE_APP_DIR/app/backend/.env" "$NATIVE_APP_DIR/app/backend/.env.backup-$(date +%Y%m%d-%H%M%S)-$$"
     fi
     
     # Pull latest code
@@ -1487,6 +1701,8 @@ uninstall_docker() {
     
     log_step "Removing Docker installation..."
     
+    remove_update_agent
+
     cd "$app_dir"
     docker compose down -v
     
@@ -1545,7 +1761,12 @@ parse_arguments() {
                 shift 2
                 ;;
             --admin-password)
+                log_warn "--admin-password puts the password in the process list and shell history; use --admin-password-file instead."
                 ADMIN_PASSWORD="$2"
+                shift 2
+                ;;
+            --admin-password-file)
+                ADMIN_PASSWORD="$(read_secret_file "$2" --admin-password-file)"
                 shift 2
                 ;;
             --install-dir)
@@ -1569,7 +1790,12 @@ parse_arguments() {
                 shift 2
                 ;;
             --smtp-pass)
+                log_warn "--smtp-pass puts the password in the process list and shell history; use --smtp-pass-file instead."
                 SMTP_PASS="$2"
+                shift 2
+                ;;
+            --smtp-pass-file)
+                SMTP_PASS="$(read_secret_file "$2" --smtp-pass-file)"
                 shift 2
                 ;;
             --force-admin-password-reset)
@@ -1586,6 +1812,14 @@ parse_arguments() {
                 ;;
             --update)
                 UPDATE_MODE=true
+                shift
+                ;;
+            --enable-self-update)
+                ENABLE_SELF_UPDATE=true
+                shift
+                ;;
+            --disable-self-update)
+                DISABLE_SELF_UPDATE=true
                 shift
                 ;;
             --uninstall)
@@ -1620,19 +1854,31 @@ Options:
   --unattended        Run without prompts (uses defaults + the flags below)
   --domain DOMAIN     Domain name (enables HTTPS URLs)
   --email EMAIL       Admin email address (default: admin@example.com)
-  --admin-password P  Seed the admin account with this password (headless).
-                      Omit to create the admin in the browser via a one-time
-                      /setup token (recommended).
+  --admin-password-file FILE
+                      Seed the admin account with the password in FILE
+                      (headless). FILE must be a regular file with mode 0600
+                      or stricter; its first line is used. Omit to create the
+                      admin in the browser via a one-time /setup token
+                      (recommended).
+  --admin-password P  Deprecated: same as above but the password is visible
+                      in the process list and shell history.
   --install-dir DIR   Install directory (Docker; default: ~/picpeak)
   --channel CHANNEL   Image channel for Docker: stable (default) or beta
   --smtp-host HOST    SMTP server hostname
   --smtp-port PORT    SMTP server port
   --smtp-user USER    SMTP username
-  --smtp-pass PASS    SMTP password
+  --smtp-pass-file FILE
+                      SMTP password read from FILE (mode 0600 or stricter)
+  --smtp-pass PASS    Deprecated: SMTP password on the command line
   --force-admin-password-reset  Regenerate admin credentials after setup
   --enable-ssl        Native only: provision HTTPS via Caddy (needs --domain)
   --port PORT         Custom user-facing port
   --update            Update existing installation
+  --enable-self-update  Docker only: install the in-app updater host agent, so
+                      admins can update from the browser (docs/self-update.md).
+                      Works on a new install and together with --update.
+  --disable-self-update  With --update: remove the host agent and set
+                      PICPEAK_SELF_UPDATE=false.
   --uninstall         Remove PicPeak installation
   --help              Show this help message
 
@@ -1643,9 +1889,11 @@ Examples:
   # Unattended Docker install, admin created in the browser afterwards
   sudo $0 --docker --unattended --email admin@example.com
 
-  # Unattended Docker install behind your own reverse proxy, seeded admin
+  # Unattended Docker install behind your own reverse proxy, seeded admin.
+  # The password comes from a private file, never from the command line:
+  (umask 077; read -rsp 'Admin password: ' p; printf '%s\\n' "\$p" > ~/picpeak-admin.pass; echo)
   sudo $0 --docker --unattended --domain photos.example.com \\
-    --email admin@example.com --admin-password 'S0me-Str0ng-Pass'
+    --email admin@example.com --admin-password-file ~/picpeak-admin.pass
 
   # Native install on a Raspberry Pi with automatic HTTPS via Caddy
   sudo $0 --native --domain photos.example.com --enable-ssl
@@ -1661,6 +1909,13 @@ main() {
     
     # Parse command line arguments
     parse_arguments "$@"
+
+    if [[ "$ENABLE_SELF_UPDATE" == "true" && "$DISABLE_SELF_UPDATE" == "true" ]]; then
+        die "--enable-self-update and --disable-self-update cannot be combined."
+    fi
+    if [[ "$DISABLE_SELF_UPDATE" == "true" && "$UPDATE_MODE" != "true" ]]; then
+        die "--disable-self-update only works together with --update."
+    fi
     
     # Handle special modes
     if [[ "$UPDATE_MODE" == "true" ]]; then

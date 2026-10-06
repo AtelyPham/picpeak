@@ -12,7 +12,8 @@ const validator = require('validator');
 const { db, logActivity } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
 const { adminAuth } = require('../middleware/auth');
-const { requirePermission, userHasAnyPermission } = require('../middleware/permissions');
+const { requirePermission, userHasAnyPermission, isSuperAdminUser } = require('../middleware/permissions');
+const { ForbiddenError } = require('../utils/errors');
 const { clearMaintenanceCache } = require('../middleware/maintenance');
 const { clearSettingsCache, initializeRateLimiters, RATE_LIMIT_DEFAULTS } = require('../services/rateLimitService');
 const { SETTING_KEY: GALLERY_PASSWORD_SETTING, purgeRecoverablePasswords, purgePlanForSettingWrite } = require('../utils/galleryPasswordVault');
@@ -34,11 +35,17 @@ const { errorResponse, safeValidationErrors } = require('../utils/routeHelpers')
 const { measureLocalStorageUsage } = require('../services/localStorageUsage');
 const logger = require('../utils/logger');
 const router = express.Router();
-const { clearMaxFilesPerUploadCache, MAX_ALLOWED_FILES_PER_UPLOAD, clearMaxFileSizeCache, clearMaxVideoSizeCache, MAX_ALLOWED_FILE_SIZE_MB } = require('../services/uploadSettings');
+
+// What a stored secret looks like on GET; a save that carries it back means
+// "unchanged", never "set the secret to this".
+const SECRET_MASK = '••••••••';
+const { normaliseDownloadLimit } = require('../services/downloadQuota');
+const { GUEST_NAME_MODES } = require('../services/photoCredit');
+const { clearMaxFilesPerUploadCache, MAX_ALLOWED_FILES_PER_UPLOAD, clearMaxFileSizeCache, clearMaxVideoSizeCache, MAX_ALLOWED_FILE_SIZE_MB, clearAllowedTypesCache } = require('../services/uploadSettings');
 const watermarkService = require('../services/watermarkService');
 const watermarkGeneratorService = require('../services/watermarkGeneratorService');
 
-const getStoragePath = () => process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
+const { getStoragePath } = require('../config/storage');
 
 // Reserved first-run bootstrap keys — never writable through the generic
 // settings upserts in this file: setup_wizard_completed is a one-way marker
@@ -64,9 +71,19 @@ const RESERVED_SETTING_KEYS = [
 // built AT the standard resolution, so changing it has to invalidate those
 // zips and re-validate the value against the preset list. A generic upsert
 // would do neither, leaving galleries handing out archives at the old size.
+// Every transfer_upload_* / transfer_max_upload_* key is reserved (#1544) for
+// the same reason: PUT /transfers is gated on the `transfers` feature flag and
+// refuses an empty allowlist, and it is the ONLY writer that does. Left
+// unreserved, a settings.edit holder could set transfer_upload_accept_all
+// through the generic /general writer with the feature flag off, and the public
+// upload route — which reads the key directly — would start accepting every
+// file type. A backend flag gate that another endpoint can write around is not
+// a gate.
 const isReservedSettingKey = (key) => RESERVED_SETTING_KEYS.includes(key)
   || key.startsWith('oidc_')
   || key.startsWith('download_')
+  || key.startsWith('transfer_upload_')
+  || key === 'transfer_max_upload_size_mb'
   // Derived, read-only fields the GET response adds for the General tab
   // (#705). They are computed from the environment, never stored, so a
   // round-trip of the GET payload must not create phantom setting rows.
@@ -78,6 +95,40 @@ const stripReservedSettingKeys = (settings) => {
   }
   return settings;
 };
+// Keys owned by a dedicated, separately permission-checked writer. Those
+// routes apply their own permission rules and validate the values; a generic
+// upsert would skip all of that. Writers only — the generic reads still
+// return these rows.
+//   backup_* / database_backup_*  PUT /admin/backup/config and
+//                                 /admin/database-backup/config (super_admin
+//                                 for destinations and the manifest location)
+//   rate_limit_*                  PUT /admin/settings/security/rate-limit
+//                                 (settings.security; range-validated — a
+//                                 settings.edit holder could otherwise switch
+//                                 the limiter off through /general)
+//   max_image_requests_*          PUT /admin/image-security/settings
+//                                 (image_security.manage)
+//   ledger_*                      PATCH /admin/ledger/mappings/settings
+//                                 (accounting.manage)
+//   restore_*                     PUT /admin/restore/settings (backup.restore;
+//                                 restore_allow_force and
+//                                 restore_require_pre_backup gate restore-start)
+const DEDICATED_ROUTE_KEY_PREFIXES = [
+  'backup_', 'database_backup_', 'rate_limit_', 'max_image_requests_', 'ledger_', 'restore_',
+];
+const isDedicatedRouteOwnedKey = (key) => DEDICATED_ROUTE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+// 400 (naming the keys) when a generic write carries route-owned keys, rather
+// than dropping them silently; returns true if the request was rejected.
+const rejectDedicatedRouteOwnedKeys = (settings, res) => {
+  const keys = Object.keys(settings).filter(isDedicatedRouteOwnedKey);
+  if (keys.length === 0) return false;
+  res.status(400).json({
+    error: 'These settings are saved through their own configuration endpoint, not the general settings',
+    code: 'SETTINGS_OWNED_ELSEWHERE',
+    keys,
+  });
+  return true;
+};
 
 // Migration 174 hardening — per-key permission boundary for the GENERIC settings
 // writers. /general, /analytics, /seo and /security all upsert arbitrary
@@ -88,10 +139,46 @@ const stripReservedSettingKeys = (settings) => {
 // the caller isn't permitted to write is stripped before the upsert. The
 // dedicated routes still work because their caller holds the matching perm
 // (e.g. PUT /accounting is gated by settings.banking, so accounting_* survives).
+// analytics_umami_enabled belongs here too: publicSettings gates umami_url and
+// umami_website_id on it and App.tsx ORs it into the provider check, so it is
+// the on/off switch for the whole Umami path, not a selector. The Analytics
+// tab derives it from the provider dropdown, which is protected by the same
+// permission, so a legitimate save never newly 403s on it.
+const TRACKER_CODE_KEYS = new Set([
+  'analytics_tracker_provider',
+  'analytics_umami_enabled',
+  'analytics_umami_url',
+  'analytics_rybbit_url',
+  'analytics_custom_head_html',
+]);
+const parseStoredSetting = (row) => {
+  if (!row) return undefined;
+  try { return JSON.parse(row.setting_value); } catch (_) { return row.setting_value; }
+};
+// What a protected key reads as when it has no row yet, so a save that sends
+// the effective value back unchanged is not treated as a change. The provider
+// falls back to the legacy umami flag exactly like the Analytics tab does.
+const effectiveMissingSetting = async (key) => {
+  if (key === 'analytics_tracker_provider') {
+    const umami = parseStoredSetting(await db('app_settings').where({ setting_key: 'analytics_umami_enabled' }).first());
+    return umami === true || umami === 'true' ? 'umami' : 'none';
+  }
+  if (key === 'analytics_umami_enabled') return false;
+  return null;
+};
+// A rule names either the owning `perm`, or `superAdmin: true` when the key is
+// a super-admin decision that no delegable permission can grant.
 const PROTECTED_SETTING_KEY_PERMS = [
   { match: (k) => k === 'general_site_url', perm: 'settings.domains' },
   { match: (k) => k.startsWith('security_'), perm: 'settings.security' },
   { match: (k) => k.startsWith('accounting_'), perm: 'settings.banking' },
+  // The tracker provider/URL and the custom head HTML decide which JavaScript
+  // the app serves from its own origin (the tracker proxy re-serves the
+  // configured script same-origin) and runs in every visitor's session,
+  // including a super admin's. Whoever picks that code can act as any account
+  // that loads it, so no delegable permission (settings.integrations
+  // included) may grant it — super admins only, like the SSO provider.
+  { match: (k) => TRACKER_CODE_KEYS.has(k), superAdmin: true },
 ];
 // Returns the list of {key, perm} the caller tried to CHANGE without the owning
 // permission. Callers 403 when it's non-empty rather than silently no-op'ing a
@@ -106,17 +193,17 @@ const collectUnauthorizedProtectedKeys = async (settings, adminId) => {
   for (const key of Object.keys(settings)) {
     const rule = PROTECTED_SETTING_KEY_PERMS.find((r) => r.match(key));
     if (!rule) continue;
-    if (await userHasAnyPermission(adminId, [rule.perm])) continue;
+    const allowed = rule.superAdmin
+      ? await isSuperAdminUser(adminId)
+      : await userHasAnyPermission(adminId, [rule.perm]);
+    if (allowed) continue;
     const row = await db('app_settings').where({ setting_key: key }).first();
-    let stored = null;
-    if (row) {
-      try { stored = JSON.parse(row.setting_value); } catch (_) { stored = row.setting_value; }
-    }
+    const stored = row ? parseStoredSetting(row) : await effectiveMissingSetting(key);
     if (String(stored ?? '') === String(settings[key] ?? '')) {
       delete settings[key]; // unchanged — let the rest of the save through
       continue;
     }
-    denied.push({ key, perm: rule.perm });
+    denied.push({ key, perm: rule.superAdmin ? 'super_admin' : rule.perm });
   }
   return denied;
 };
@@ -558,6 +645,99 @@ router.put('/slideshow', adminAuth, requirePermission('settings.edit'), async (r
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// PicTransfer upload policy (#1544). Its own endpoints rather than a field on
+// the general settings page because this list is NOT `general_allowed_file_types`
+// — that one governs gallery photos, which the media pipeline decodes, and
+// widening it to carry a client's .psd would widen what sharp is handed.
+//
+// Behind the `transfers` feature flag on the BACKEND, not only in the sidebar:
+// a disabled feature must not be configurable by a direct API hit.
+// ──────────────────────────────────────────────────────────────────────────
+
+const { requireFeatureFlag: requireFlag } = require('../middleware/requireFeatureFlag');
+
+router.get('/transfers',
+  adminAuth,
+  requirePermission('settings.view'),
+  requireFlag('transfers'),
+  async (req, res) => {
+    try {
+      const { getTransferUploadPolicy } = require('../services/transferUploadPolicy');
+      const policy = await getTransferUploadPolicy();
+      res.json({
+        accept_all: policy.acceptAll,
+        allowed_types: policy.allowedTypes,
+        max_size_mb: policy.maxSizeMb,
+      });
+    } catch (error) {
+      errorResponse(res, error, 500, 'Failed to load transfer settings');
+    }
+  });
+
+router.put('/transfers',
+  adminAuth,
+  requirePermission('settings.edit'),
+  requireFlag('transfers'),
+  async (req, res) => {
+    try {
+      const { normalizeAllowedTypes } = require('../services/transferUploadPolicy');
+      const has = (k) => Object.prototype.hasOwnProperty.call(req.body, k);
+
+      // Validate EVERY field before writing any of them. Interleaving the two
+      // meant `{ allowed_types, max_size_mb: 0 }` saved the list and then
+      // answered 400 — the caller is told the save failed while half of it
+      // landed, and a retry with the size fixed is now a different change.
+      const writes = [];
+
+      if (has('allowed_types')) {
+        // normalizeAllowedTypes drops anything that isn't a well-formed
+        // `type/subtype`, so a typo cannot land in the setting and silently
+        // match nothing. An empty result would make the policy fall back to
+        // the legacy key, which is not what "I cleared the list" means, so
+        // refuse it and say why.
+        const cleaned = normalizeAllowedTypes(req.body.allowed_types);
+        if (!cleaned.length) {
+          return res.status(400).json({
+            error: 'Add at least one file type, or turn on "Accept all file types".',
+            code: 'EMPTY_ALLOWLIST',
+          });
+        }
+        writes.push(['transfer_upload_allowed_types', JSON.stringify(cleaned), 'general']);
+      }
+
+      if (has('accept_all')) {
+        const acceptAll = req.body.accept_all === true || req.body.accept_all === 'true';
+        writes.push(['transfer_upload_accept_all', JSON.stringify(acceptAll), 'boolean']);
+      }
+
+      if (has('max_size_mb')) {
+        const mb = Math.round(Number(req.body.max_size_mb));
+        if (!Number.isFinite(mb) || mb < 1 || mb > 100000) {
+          return res.status(400).json({ error: 'Maximum file size must be between 1 and 100000 MB', code: 'BAD_SIZE' });
+        }
+        writes.push(['transfer_max_upload_size_mb', JSON.stringify(mb), 'number']);
+      }
+
+      const updated = [];
+      for (const [key, value, type] of writes) {
+        await upsertAppSetting(key, value, type);
+        updated.push(key);
+      }
+
+      await logActivity(
+        'settings_updated',
+        { category: 'transfers', changes: updated },
+        null,
+        { type: 'admin', id: req.admin.id, name: req.admin.username },
+      );
+
+      return res.json({ message: 'Transfer settings updated', updated });
+    } catch (error) {
+      return errorResponse(res, error, 500, 'Failed to save transfer settings');
+    }
+  });
+
+// ──────────────────────────────────────────────────────────────────────────
 // Download resolutions (#858). The standard resolution is what every ordinary
 // download hands out; the picker is an opt-in modal letting guests choose a
 // different size. Dedicated endpoints because a change here has to invalidate
@@ -765,6 +945,33 @@ router.put('/sso', adminAuth, requirePermission('settings.security'), [
       }
     }
 
+    // A stored client secret belongs to the provider that issued it. Pointing
+    // SSO at another issuer or client must not send that secret there, so
+    // changing either needs the secret entered again.
+    const nextIssuer = req.body.oidc_issuer_url !== undefined ? String(req.body.oidc_issuer_url).trim() : undefined;
+    const nextClientId = req.body.oidc_client_id !== undefined ? String(req.body.oidc_client_id).trim() : undefined;
+    const providerChanged = (nextIssuer !== undefined && nextIssuer !== (current.issuerUrl || ''))
+      || (nextClientId !== undefined && nextClientId !== (current.clientId || ''));
+    const secretEntered = typeof req.body.oidc_client_secret === 'string' && req.body.oidc_client_secret.length > 0;
+    // The provider is the trust anchor for every SSO login, and email linking
+    // hands whoever completes SSO the matching local account, super admins
+    // included. A settings.security holder who could point the app at a
+    // provider of their own choosing could mint a token for a super admin's
+    // address and take that account over — the role-mapping containment
+    // below never sees that path. Repointing the provider (issuer or client
+    // ID) is therefore a super-admin decision; everything else on this tab,
+    // mappings included, stays with settings.security under the containment
+    // checks (Codex security audit 2026-09-30).
+    if (providerChanged && !(await isSuperAdminUser(req.admin.id))) {
+      return res.status(403).json({
+        error: 'Only a super admin can change the identity provider (issuer URL or client ID)',
+        code: 'SUPER_ADMIN_REQUIRED',
+      });
+    }
+    if (providerChanged && current.clientSecret && !secretEntered && (nextIssuer ?? current.issuerUrl)) {
+      return res.status(400).json({ error: 'Enter the client secret again when changing the issuer URL or client ID' });
+    }
+
     // Default role must exist — a typo here would brick JIT provisioning.
     if (req.body.oidc_default_role !== undefined) {
       const role = await db('roles').where('name', req.body.oidc_default_role).first();
@@ -783,6 +990,50 @@ router.put('/sso', adminAuth, requirePermission('settings.security'), [
         if (unknown.length > 0) {
           return res.status(400).json({ error: `Unknown role(s) in mapping: ${unknown.join(', ')}` });
         }
+      }
+    }
+
+    // The role an SSO login lands in is a grant. Below super_admin, a
+    // settings.security holder must not map anyone, themselves included, into
+    // super_admin or into a role holding permissions their own role lacks.
+    // Only targets that change are checked, so resaving a mapping a Super
+    // Admin set up keeps working. A new provider, a new roles claim or newly
+    // enabled mapping or provisioning decides afresh who reaches every target
+    // that stays, so then all of them count.
+    const loginSourceChanged = providerChanged
+      || (req.body.oidc_roles_claim !== undefined && (String(req.body.oidc_roles_claim).trim() || 'roles') !== current.rolesClaim)
+      || (req.body.oidc_role_mapping_enabled === true && !current.roleMappingEnabled)
+      || (req.body.oidc_autoprovision === true && !current.autoprovision);
+    const changedRoleTargets = new Set();
+    const nextDefaultRole = req.body.oidc_default_role !== undefined
+      ? String(req.body.oidc_default_role).trim()
+      : current.defaultRole;
+    if (nextDefaultRole && (loginSourceChanged || nextDefaultRole !== current.defaultRole)) {
+      changedRoleTargets.add(nextDefaultRole);
+    }
+    const nextMappings = req.body.oidc_role_mappings !== undefined ? req.body.oidc_role_mappings : current.roleMappings;
+    for (const [idpRole, target] of Object.entries(nextMappings || {})) {
+      const next = String(target).trim();
+      if (next && (loginSourceChanged || current.roleMappings[String(idpRole).trim()] !== next)) {
+        changedRoleTargets.add(next);
+      }
+    }
+    if (changedRoleTargets.size > 0 && !(await isSuperAdminUser(req.admin.id))) {
+      if (changedRoleTargets.has('super_admin')) {
+        return res.status(403).json({ error: 'Only a Super Admin can map SSO users to the Super Admin role' });
+      }
+      const targetPermissions = await db('role_permissions')
+        .join('roles', 'roles.id', 'role_permissions.role_id')
+        .join('permissions', 'permissions.id', 'role_permissions.permission_id')
+        .whereIn('roles.name', [...changedRoleTargets])
+        .pluck('permissions.name');
+      try {
+        await require('../services/userManagementService').assertActorMayGrant(req.admin.id, targetPermissions);
+      } catch (err) {
+        if (err instanceof ForbiddenError) {
+          return res.status(403).json({ error: 'You can only map SSO users to roles whose permissions your own role already holds' });
+        }
+        throw err;
       }
     }
 
@@ -1431,6 +1682,7 @@ router.put('/theme', adminAuth, requirePermission('settings.edit'), async (req, 
 router.put('/general', adminAuth, requirePermission('settings.edit'), async (req, res) => {
   try {
     const settings = stripReservedSettingKeys({ ...req.body });
+    if (rejectDedicatedRouteOwnedKeys(settings, res)) return;
     let uploadLimitTouched = false;
 
     // Migration 174: drop any protected key (site URL / security / accounting)
@@ -1470,6 +1722,11 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
       }
       settings.general_site_url = siteUrl;
     }
+
+    // Customer documents (#1444): checked and normalised before storing.
+    const documentSettingsError = require('../utils/customerDocumentSettings')
+      .normaliseCustomerDocumentSettings(settings);
+    if (documentSettingsError) return res.status(400).json({ error: documentSettingsError });
 
     const publicSiteKeysTouched = Object.keys(settings).some((key) => key.startsWith('general_public_site_'));
 
@@ -1520,6 +1777,68 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
       }
 
       settings.general_max_video_size_mb = normalizedValue;
+    }
+
+    // Browser-playable video copies (issue 1430, item 8): a plain boolean.
+    if (Object.prototype.hasOwnProperty.call(settings, 'general_video_web_rendition')) {
+      const raw = settings.general_video_web_rendition;
+      settings.general_video_web_rendition = raw === true || raw === 'true' || raw === 1 || raw === '1';
+    }
+
+    // Default download limit for new events (issue 1560). Empty, 0 or null
+    // clears it (unlimited); anything else must be a positive integer.
+    if (Object.prototype.hasOwnProperty.call(settings, 'event_default_download_limit')) {
+      const raw = settings.event_default_download_limit;
+      if (raw === null || raw === '' || raw === 0 || raw === '0') {
+        settings.event_default_download_limit = null;
+      } else {
+        const normalized = normaliseDownloadLimit(raw);
+        if (normalized === null) {
+          return res.status(400).json({
+            error: 'event_default_download_limit must be a positive integer, or empty for unlimited'
+          });
+        }
+        settings.event_default_download_limit = normalized;
+      }
+    }
+
+    // Uploader-name defaults for new events (#1561).
+    if (Object.prototype.hasOwnProperty.call(settings, 'event_default_guest_name_mode')
+      && !GUEST_NAME_MODES.includes(settings.event_default_guest_name_mode)) {
+      return res.status(400).json({
+        error: `event_default_guest_name_mode must be one of: ${GUEST_NAME_MODES.join(', ')}`
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(settings, 'event_default_show_credits_to_guests')) {
+      const raw = settings.event_default_show_credits_to_guests;
+      settings.event_default_show_credits_to_guests = raw === true || raw === 'true' || raw === 1 || raw === '1';
+    }
+
+    // Folders (issue 1786) and two-stage delivery (issue 1562).
+    for (const key of ['event_default_folder_structure', 'first_look_keyword_detection']) {
+      if (Object.prototype.hasOwnProperty.call(settings, key)) {
+        const raw = settings[key];
+        settings[key] = raw === true || raw === 'true' || raw === 1 || raw === '1';
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(settings, 'first_look_folder_keywords')) {
+      const raw = settings.first_look_folder_keywords;
+      const list = (Array.isArray(raw) ? raw : String(raw || '').split(','))
+        .map((k) => String(k).replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      // Refused, not trimmed: a keyword dropped silently is a folder that
+      // quietly stops starting a first look.
+      if (list.length > 20 || list.some((k) => k.length > 60 || k.replace(/[^\p{L}\p{N}]/gu, '').length < 3)) {
+        return res.status(400).json({ error: 'first_look_folder_keywords: at most 20 keywords, each with at least 3 letters or digits and at most 60 characters' });
+      }
+      settings.first_look_folder_keywords = [...new Set(list)];
+    }
+    if (Object.prototype.hasOwnProperty.call(settings, 'event_default_delivery_days')) {
+      const days = Number(settings.event_default_delivery_days);
+      if (!Number.isInteger(days) || days < 1 || days > 365) {
+        return res.status(400).json({ error: 'event_default_delivery_days must be an integer between 1 and 365' });
+      }
+      settings.event_default_delivery_days = days;
     }
 
     if (publicSiteKeysTouched) {
@@ -1585,8 +1904,31 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
       clearMaxFileSizeCache();
       clearMaxVideoSizeCache();
     }
+    // The allowed-types list is cached for a minute like the caps above, but
+    // nothing was dropping it. An admin who added a format to accept a batch
+    // of files got a full minute of "Invalid file type. Check allowed file
+    // types in system settings." on the setting they had just changed.
+    if (Object.prototype.hasOwnProperty.call(settings, 'general_allowed_file_types')) {
+      clearAllowedTypesCache();
+    }
     if (Object.prototype.hasOwnProperty.call(settings, 'general_short_gallery_urls')) {
       clearShareLinkSettingsCache();
+    }
+    // Switching the video copies on queues the back catalogue: every video
+    // never looked at or whose last attempt failed. The queue probes each
+    // one and skips what already plays. Off leaves the rows as they are; the
+    // workers idle until it is on again.
+    if (Object.prototype.hasOwnProperty.call(settings, 'general_video_web_rendition')) {
+      const videoRendition = require('../services/videoRenditionService');
+      videoRendition.clearCache();
+      if (settings.general_video_web_rendition) {
+        try {
+          const queued = await videoRendition.backfillPending();
+          if (queued > 0) logger.info(`videoRendition: queued ${queued} existing video(s) after the setting was enabled`);
+        } catch (e) {
+          logger.warn('videoRendition: failed to queue existing videos:', e.message);
+        }
+      }
     }
     // The public origin is cached (it now sits in per-request CORS paths and
     // in a synchronous accessor); drop it immediately on write so a corrected
@@ -1627,8 +1969,19 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
 router.put('/security', adminAuth, requirePermission('settings.security'), async (req, res) => {
   try {
     const settings = stripReservedSettingKeys({ ...req.body });
+    if (rejectDedicatedRouteOwnedKeys(settings, res)) return;
     // A settings.security holder still can't write domain/accounting keys here.
     if (await rejectUnauthorizedProtectedKeys(settings, req, res)) return;
+
+    // The reCAPTCHA secret goes out masked on GET, and the Security tab sends
+    // every security_* key back on save, mask included. Writing the mask
+    // would replace the stored secret with eight bullets and every
+    // captcha-gated login would then fail closed until it is re-entered.
+    // Analytics and backup already skip the sentinel; this tab did not
+    // (security review 2026-09-29).
+    if (settings.security_recaptcha_secret_key === SECRET_MASK) {
+      delete settings.security_recaptcha_secret_key;
+    }
 
     // Update or insert each setting
     const galleryPasswordPurge = await galleryPasswordPurgePlan(settings);
@@ -1670,6 +2023,7 @@ router.put('/security', adminAuth, requirePermission('settings.security'), async
 router.put('/analytics', adminAuth, requirePermission('settings.edit'), async (req, res) => {
   try {
     const settings = stripReservedSettingKeys({ ...req.body });
+    if (rejectDedicatedRouteOwnedKeys(settings, res)) return;
     if (await rejectUnauthorizedProtectedKeys(settings, req, res)) return;
 
     // Validate the provider switch (#663 Phase 1). Reject unknown values
@@ -1730,6 +2084,7 @@ router.put('/analytics', adminAuth, requirePermission('settings.edit'), async (r
 router.put('/seo', adminAuth, requirePermission('settings.edit'), async (req, res) => {
   try {
     const settings = stripReservedSettingKeys({ ...req.body });
+    if (rejectDedicatedRouteOwnedKeys(settings, res)) return;
     if (await rejectUnauthorizedProtectedKeys(settings, req, res)) return;
 
     // Validate seo_blocked_ai_agents is an array of strings
@@ -1820,16 +2175,19 @@ router.get('/storage/info', adminAuth, requirePermission('settings.view'), async
       .whereNotNull('archive_path')
       .select('archive_path');
 
+    // The zip lives wherever archiveService put it: the storage backend, not
+    // necessarily the local STORAGE_PATH. The backend also refuses a key that
+    // climbs out of its root, which a raw path.join did not.
     let archiveStorage = 0;
+    const { getStorage } = require('../services/storage');
     for (const archive of archives) {
       if (archive.archive_path) {
         try {
-          const storagePath = getStoragePath();
-          const fullArchivePath = path.join(storagePath, archive.archive_path);
-          const stats = await fs.stat(fullArchivePath);
-          archiveStorage += stats.size;
+          const stats = await getStorage().stat(archive.archive_path);
+          if (stats) archiveStorage += stats.size;
+          else logger.error('Archive file not found:', archive.archive_path);
         } catch (error) {
-          logger.error('Archive file not found:', archive.archive_path, error.message);
+          logger.error('Archive file not readable:', archive.archive_path, error.message);
         }
       }
     }

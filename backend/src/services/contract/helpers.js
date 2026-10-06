@@ -6,6 +6,8 @@ const logger = require('../../utils/logger');
 const { getAppSetting } = require('../../utils/appSettings');
 const { AppError } = require('../../utils/errors');
 const { nextDocumentNumber } = require('../../utils/documentSequences');
+const { hasColumnCached } = require('../../utils/schemaCache');
+const { auditedUpdate } = require('../accountingHistory');
 
 
 const SECTIONS_ORDER = ['basics', 'scope', 'privacy', 'commercial', 'nda', 'closing'];
@@ -123,12 +125,66 @@ function ensureCustomerActive(customer) {
     throw new AppError('Customer is deactivated', 409);
   }
 }
+/**
+ * A contract that asked for the customer's details and was never sent with
+ * them (#1446): still waiting, or expired or cancelled while it waited.
+ * Nothing of it but its number is shown to the customer.
+ */
+function neverFrozen(contract) {
+  return contract.status === 'awaiting_data' || (!!contract.data_request && !contract.sent_at);
+}
+
+// Statuses a contract can die into without ever being signed, that should
+// release the source quote's converted_contract_id back-pointer so a
+// replacement contract can be created from it. 'expired' is the signing
+// lifecycle's end for a contract nobody signed in time (issue 1446).
+const QUOTE_RELEASING_CONTRACT_STATUSES = ['cancelled', 'declined', 'expired'];
+
+/**
+ * Release a quote's converted_contract_id back-pointer when the contract
+ * it points at dies unsigned (cancelled / declined — see
+ * QUOTE_RELEASING_CONTRACT_STATUSES above). Must run in the same
+ * transaction as the contract's status change.
+ *
+ * The `where` guards on both the quote id AND the current back-pointer
+ * value so a race can't clobber a different quote's newer pointer (e.g.
+ * the quote was already re-converted to a fresh contract by the time this
+ * transition lands).
+ *
+ * `hasBackPointer` is resolved by the caller BEFORE opening its
+ * transaction — hasColumnCached reads via the global db and deadlocks the
+ * single-connection SQLite pool when evaluated with a trx already open
+ * (same landmine documented in conversions.js). Left undefined it's
+ * resolved here instead, for callers (tests) that invoke this outside
+ * that hot path.
+ *
+ * `quotes` is an audited table (accountingHistory.js), so the write goes
+ * through auditedUpdate rather than a raw trx update.
+ */
+async function releaseQuoteOnDeadContract(trx, contractId, sourceQuoteId, hasBackPointer, context = { actor: { type: 'system' }, source: 'contract.quote_release' }) {
+  if (!sourceQuoteId) return;
+  const columnPresent = hasBackPointer === undefined
+    ? await hasColumnCached('quotes', 'converted_contract_id')
+    : hasBackPointer;
+  if (!columnPresent) return;
+  await auditedUpdate(
+    trx,
+    'quotes',
+    { id: sourceQuoteId, converted_contract_id: contractId },
+    { converted_contract_id: null, updated_at: new Date().toISOString() },
+    context,
+  );
+}
+
 module.exports = {
   SECTIONS_ORDER,
+  neverFrozen,
   adminActor,
   customerPublicActor,
   emitContractEvent,
   maybeStoreIp,
   nextContractNumber,
   ensureCustomerActive,
+  QUOTE_RELEASING_CONTRACT_STATUSES,
+  releaseQuoteOnDeadContract,
 };

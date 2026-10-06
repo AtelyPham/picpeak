@@ -15,15 +15,17 @@
  * owner grants those explicitly via the role editor.
  *
  * The solo_photographer preset itself is seeded (with all-perms-at-seed-time) by
- * migration 174; this pass only ensures it exists so a partially-migrated or
+ * migration 175; this pass only ensures it exists so a partially-migrated or
  * hand-restored DB still shows the preset. Its grants are never re-synced.
  *
  * Idempotent and best-effort: any failure is logged and swallowed so a boot is
  * never blocked by permission housekeeping.
  */
 
+const { CUSTOMER_SUPPORT } = require('../../migrations/core/259_gallery_admin_cleanup');
+
 // Preset roles shipped with the app. `permissions: 'ALL'` = every current perm.
-// Kept in sync with migration 174 (PRESET_ROLES). This boot pass only ensures a
+// Kept in sync with migration 175 (PRESET_ROLES) and 259 (customer_support). This boot pass only ensures a
 // preset EXISTS (create + grant if missing) so a partially-migrated or restored
 // DB still shows it; it never re-syncs an existing preset's grants (frozen).
 const PRESETS = [
@@ -47,6 +49,7 @@ const PRESETS = [
       'customers.view', 'quotes.view', 'bills.view',
     ],
   },
+  CUSTOMER_SUPPORT,
 ];
 
 async function ensureSuperAdminHasAllPermissions(db, logger) {
@@ -79,6 +82,16 @@ async function ensurePreset(db, logger, preset) {
   const existing = await db('roles').where({ name: preset.name }).first();
   if (existing) return; // frozen — never re-sync its grants
 
+  // A listed preset whose permissions are not all in the catalog yet (the
+  // server started against a database its migrations have not reached) is
+  // left for the migration that adds them. Seeding it now would freeze it
+  // with a partial grant set: the migration skips a preset that exists.
+  let listed = null;
+  if (preset.permissions !== 'ALL') {
+    listed = await db('permissions').whereIn('name', preset.permissions).select('id');
+    if (listed.length < preset.permissions.length) return;
+  }
+
   await db('roles').insert({
     name: preset.name,
     display_name: preset.display_name,
@@ -95,8 +108,7 @@ async function ensurePreset(db, logger, preset) {
   if (preset.permissions === 'ALL') {
     permIds = (await db('permissions').select('id')).map((p) => p.id);
   } else {
-    const rows = await db('permissions').whereIn('name', preset.permissions).select('id');
-    permIds = rows.map((p) => p.id);
+    permIds = listed.map((p) => p.id);
   }
   if (permIds.length > 0) {
     const inserts = permIds.map((id) => ({ role_id: role.id, permission_id: id }));
@@ -123,6 +135,18 @@ async function seedPermissionsAtBoot(db, logger) {
       granted = await ensureSuperAdminHasAllPermissions(db, logger);
     } catch (err) {
       logger?.warn?.('Permissions self-heal: super_admin backfill failed:', err.message);
+    }
+    // folders.manage (migration 265) is gone after restoring a backup taken
+    // before it; re-seed it and its projection onto settings.edit holders,
+    // or folder editing would silently need super_admin.
+    try {
+      if (!(await db('permissions').where({ name: 'folders.manage' }).first('id'))) {
+        await require('../../migrations/core/265_nested_folders_and_delivery_stages').seedFolderPermissions(db);
+        granted += 1;
+        logger?.info?.('Permissions self-heal: re-seeded folders.manage');
+      }
+    } catch (err) {
+      logger?.warn?.('Permissions self-heal: folders.manage failed:', err.message);
     }
     for (const preset of PRESETS) {
       try {

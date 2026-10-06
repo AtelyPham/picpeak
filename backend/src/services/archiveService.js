@@ -1,5 +1,5 @@
 const archiver = require('archiver');
-const { neutralizeSpreadsheetFormula } = require('../utils/spreadsheetSafe');
+const { objectsToCsv } = require('../utils/spreadsheetSafe');
 const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
@@ -12,6 +12,7 @@ const feedbackService = require('./feedbackService');
 const { getStorage } = require('./storage');
 const { resolvePhotoStorageKey } = require('./photoResolver');
 const { getUseOriginalFilenames } = require('./downloadFilenameService');
+const { createArchiveStreamGuard } = require('../utils/archiveStreamGuard');
 const {
   sanitizeForZipEntry,
   uniquifyZipNames,
@@ -32,9 +33,10 @@ async function archiveEvent(event) {
     // extracted files alone. Persisting a manifest inside the archive lets a
     // future restore round-trip recover those fields. Falls back to bare
     // filename for archives produced before this lands (see restore path).
-    let photosManifestEntry = null;
+    // Serialized further down, once the zip entry names are known.
+    let manifestRows = [];
     try {
-      const manifestRows = await db('photos')
+      manifestRows = await db('photos')
         .leftJoin('photo_categories', 'photos.category_id', 'photo_categories.id')
         .where('photos.event_id', event.id)
         .select(
@@ -49,15 +51,40 @@ async function archiveEvent(event) {
           'photos.media_type',
           'photos.mime_type',
           'photos.uploaded_at',
+          // Photo credits (#1561): who uploaded it and the name on it, which
+          // no file carries (a guest name, an admin correction), and the
+          // guest's visibility snapshot. The ZIP is a snapshot: a guest
+          // erased later is not rewritten out of an existing archive — the
+          // restore drops the credit of any guest no longer on the event.
+          'photos.uploaded_by',
+          'photos.credit_name',
+          'photos.credit_source',
+          'photos.uploader_guest_id',
+          'photos.credit_visible_to_guests',
           'photo_categories.name as category_name',
+          // For resolving the row's storage key below, not written out.
+          'photos.path',
+          'photos.source_origin',
+          // Turned into folder_path below (issue 1786), not written out.
+          'photos.folder_id',
+          'photos.first_look',
         );
-      if (manifestRows.length > 0) {
-        photosManifestEntry = {
-          name: 'photos_manifest.json',
-          buffer: Buffer.from(JSON.stringify(manifestRows, null, 2), 'utf8'),
-        };
-        logger.info(`Photos manifest prepared: ${manifestRows.length} entries`);
-      }
+      // The folder a photo lives in, as a path ("Saturday/Activity B"):
+      // folder ids do not survive a restore into a fresh database, names do.
+      const folders = await require('./folderTreeService').eventFolders(event.id);
+      const byId = new Map(folders.map((f) => [Number(f.id), f]));
+      const pathOf = (id) => {
+        const names = [];
+        let cur = byId.get(Number(id));
+        const seen = new Set();
+        while (cur && !seen.has(cur.id)) {
+          seen.add(cur.id);
+          names.unshift(cur.name);
+          cur = cur.parent_id ? byId.get(Number(cur.parent_id)) : null;
+        }
+        return names.length ? names.join('/') : null;
+      };
+      manifestRows = manifestRows.map((row) => ({ ...row, folder_path: row.folder_id ? pathOf(row.folder_id) : null }));
     } catch (error) {
       logger.error(`Error building photos manifest for event ${event.slug}:`, error);
       // Non-fatal — restore will fall back to filename as original_filename
@@ -132,24 +159,60 @@ async function archiveEvent(event) {
     });
     const dedupedNames = uniquifyZipNames(photoNames);
 
+    // Each manifest row records the entry name its file was emitted under,
+    // so restore can match entry to row exactly. Matching on the basename
+    // cannot always: with original names on, two photos sharing an original
+    // are emitted as `X.jpg` and `X_1.jpg`, and an original can equal another
+    // row's internal name. Both are undecidable from the basename alone.
+    let photosManifestEntry = null;
+    if (manifestRows.length > 0) {
+      const zipPathByKey = new Map(photoEntries.map((entry, i) => [entry.key, dedupedNames[i]]));
+      const manifest = manifestRows.map((row) => {
+        const { path: _path, source_origin: _origin, folder_id: _folder, ...fields } = row;
+        let zipPath = null;
+        try {
+          const key = resolvePhotoStorageKey(event, row);
+          if (key) zipPath = zipPathByKey.get(key) || null;
+        } catch {
+          // No managed key (empty path on a legacy row): restore falls back
+          // to the basename for this one, as it does for older archives.
+        }
+        return { ...fields, zip_path: zipPath };
+      });
+      photosManifestEntry = {
+        name: 'photos_manifest.json',
+        buffer: Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'),
+      };
+      logger.info(`Photos manifest prepared: ${manifest.length} entries`);
+    }
+
     let totalBytes = 0;
     await new Promise((resolve, reject) => {
       const output = fs.createWriteStream(tmpArchive);
       const archive = archiver('zip', { zlib: { level: 9 } });
+      // Bound and reclaim the storage reads, as the download builders do:
+      // archiver drains one source at a time, so opening a read per photo in
+      // the loop parked every other body on an S3 socket until its turn,
+      // and a large event held most of the shared agent pool. Two in flight;
+      // every open read is destroyed on any failure.
+      const guard = createArchiveStreamGuard({
+        onFatalError: (err) => { guard.destroyAll(); archive.abort(); reject(err); },
+      });
 
       output.on('close', () => {
         totalBytes = archive.pointer();
         resolve();
       });
-      archive.on('error', reject);
+      output.on('error', (err) => { guard.destroyAll(); archive.abort(); reject(err); });
+      archive.on('error', (err) => { guard.destroyAll(); reject(err); });
       archive.pipe(output);
 
       const append = async () => {
         for (let i = 0; i < photoEntries.length; i += 1) {
           const entry = photoEntries[i];
           const nameInZip = dedupedNames[i];
-          const stream = await storage.get(entry.key);
-          archive.append(stream, { name: nameInZip });
+          if (!await guard.acquire()) return;
+          archive.append(guard.track(await storage.get(entry.key)), { name: nameInZip });
         }
         for (const f of feedbackEntries) {
           archive.append(f.buffer, { name: f.name });
@@ -160,7 +223,7 @@ async function archiveEvent(event) {
         archive.finalize();
       };
 
-      append().catch(reject);
+      append().catch((err) => { guard.destroyAll(); reject(err); });
     });
 
     // Upload the finalized zip to the storage backend.
@@ -230,6 +293,19 @@ async function archiveEvent(event) {
       if (photo.preview_path) {
         await storage.delete(photo.preview_path).catch(() => {});
       }
+      // Browser-playable video copy (issue 1430): the original is in the
+      // zip, the copy is not. The row is reset with it: a row left at
+      // `complete` would name a copy storage no longer has, and the
+      // switch-on backfill only takes NULL and failed rows, so the restored
+      // video could never get its copy back. The restore route re-queues it.
+      // `skipped` rows have no copy and the original comes back byte for
+      // byte, so that verdict stays.
+      if (photo.web_path || (photo.web_status && photo.web_status !== 'skipped')) {
+        if (photo.web_path) await storage.delete(photo.web_path).catch(() => {});
+        await db('photos').where({ id: photo.id }).update({
+          web_path: null, web_status: null, web_started_at: null, web_error: null,
+        });
+      }
       // Outside the guard: a tier can exist when the canonical rendition never
       // did, so keying cleanup off preview_path would strand phone-only photos.
       await require('./imageProcessor').deletePreviewTiers(photo);
@@ -297,26 +373,10 @@ async function archiveEvent(event) {
   }
 }
 
-// Helper function to convert JSON to CSV
+// Feedback rows to CSV; quoting and formula neutralisation (GHSA-q82f)
+// are the shared csvCell.
 function convertToCSV(data) {
-  if (!data || data.length === 0) return '';
-
-  const headers = Object.keys(data[0]);
-  const csvHeaders = headers.join(',');
-
-  const csvRows = data.map(row => {
-    return headers.map(header => {
-      // Formula-neutralize before quoting (guest_name/comment_text are
-      // user-controlled); the old check didn't even escape \n/\r (GHSA-q82f).
-      const value = neutralizeSpreadsheetFormula(row[header]);
-      if (value.includes(',') || value.includes('"') || value.includes('\n') || value.includes('\r')) {
-        return `"${value.replace(/"/g, '""')}"`;
-      }
-      return value;
-    }).join(',');
-  });
-
-  return [csvHeaders, ...csvRows].join('\n');
+  return objectsToCsv(data);
 }
 
 module.exports = { archiveEvent };

@@ -132,6 +132,20 @@ describe('dashboard scoping (GHSA-c2jj / gqx7 / jhcf)', () => {
     expect(Number(res.body.catalogedBytes)).toBe(1000);
   });
 
+  it('/stats counts an epoch-ms expiry as expiring, like the events list does (issue 1733)', async () => {
+    // The extend endpoint bound a Date, which SQLite stored as a number; the
+    // tile compared it to ISO text and left it out while status=expiring
+    // listed it next to the tile.
+    const before = await request(app).get('/api/admin/dashboard/stats')
+      .set('Authorization', `Bearer ${superToken}`);
+    const extended = await mkEvent('ms-expiring', null);
+    await db('events').where({ id: extended }).update({ expires_at: Date.now() + 3 * 864e5 });
+    const after = await request(app).get('/api/admin/dashboard/stats')
+      .set('Authorization', `Bearer ${superToken}`);
+    expect(Number(after.body.expiringEvents)).toBe(Number(before.body.expiringEvents) + 1);
+    await db('events').where({ id: extended }).del();
+  });
+
   it('/stats reports disk usage unscoped, because disk is not per-event', async () => {
     // storageUsed is a measurement of the storage root (#1164), so it is the
     // same number for every admin by design. Pinned so a future reviewer
@@ -188,6 +202,24 @@ describe('dashboard scoping (GHSA-c2jj / gqx7 / jhcf)', () => {
     const actors = res.body.map((a) => a.actorName);
     expect(actors).toContain('own-actor');
     expect(actors).not.toContain('foreign-actor');
+  });
+
+  it('/activity sends a zone-less SQLite timestamp as UTC (issue 1815)', async () => {
+    // The column default writes CURRENT_TIMESTAMP: UTC, no zone marker. Sent
+    // as is, a browser west of UTC reads it as local time and shows the entry
+    // in the future.
+    await db('activity_logs').insert({
+      activity_type: 'gallery_viewed', actor_type: 'guest', actor_name: 'tz-actor',
+      event_id: ownEventId, created_at: '2026-10-05 14:00:00',
+    });
+    const res = await request(app)
+      .get('/api/admin/dashboard/activity')
+      .set('Authorization', `Bearer ${superToken}`);
+    expect(res.status).toBe(200);
+    const entry = res.body.find((a) => a.actorName === 'tz-actor');
+    expect(entry.createdAt).toBe('2026-10-05T14:00:00.000Z');
+    // Every entry carries an explicit zone, whatever shape was stored.
+    for (const a of res.body) expect(a.createdAt).toMatch(/Z$/);
   });
 
   it('leaves super_admin unscoped across all three', async () => {

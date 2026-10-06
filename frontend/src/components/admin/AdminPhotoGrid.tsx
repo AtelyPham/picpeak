@@ -1,24 +1,32 @@
 import React, { useState } from 'react';
-import { Check, Download, Trash2, Eye, EyeOff, Heart, Package, MessageSquare, Star, Video, FolderOpen, Cog, AlertTriangle, RefreshCw, LayoutGrid, List } from 'lucide-react';
+import { Check, Download, Trash2, Eye, EyeOff, Heart, Package, MessageSquare, Star, Video, FolderOpen, FolderInput, Cog, AlertTriangle, RefreshCw, LayoutGrid, List, UserRound } from 'lucide-react';
 import { COLOR_LABEL_SWATCHES, type ColorLabel } from '../../services/feedback.service';
 import { toast } from 'react-toastify';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 
-import { AdminPhoto } from '../../services/photos.service';
+import { AdminPhoto, type PhotoSortKey } from '../../services/photos.service';
 import { photosService } from '../../services/photos.service';
 import { uploadsService } from '../../services/uploads.service';
 import { useLocalizedDate } from '../../hooks/useLocalizedDate';
 import { getPhotoViewMode, setPhotoViewMode, type PhotoViewMode } from '../../utils/photoViewPrefs';
-import { Button } from '../common';
+import { defaultCategoryLabel, isVideoItem, mediaSplitLabel, selectLabel, splitMediaCount } from '../../utils/mediaCounts';
+import { Button, ColumnMenuHeader } from '../common';
+import type { ColumnMenuOption } from '../common';
 import { PermissionGate } from './PermissionGate';
 import { AdminAuthenticatedImage } from './AdminAuthenticatedImage';
 import { BulkCategoryModal } from './BulkCategoryModal';
+import { BulkCreditModal } from './BulkCreditModal';
+import { FolderPickerModal } from './folders/FolderPickerModal';
+import { invalidateFolderViews } from './folders/folderQueries';
+import type { GalleryFolder } from '../../services/folders.service';
+import { folderPathLabel } from '../../utils/folderTree';
 
 interface CategoryOption {
   id: number;
   name: string;
-  // #1160: folders are categories too; the move dialog labels them.
+  // Folders (#1160, issue 1786) are photo_categories rows too; the move
+  // dialog leaves them out, they have their own "Move to folder".
   is_folder?: boolean;
 }
 
@@ -29,6 +37,13 @@ interface AdminPhotoGridProps {
   onPhotosDeleted: () => void;
   onSelectionChange?: (selectedIds: number[]) => void;
   categories?: CategoryOption[];
+  /** The event's folders (issue 1786); "Move to folder" is offered when there are any. */
+  folders?: GalleryFolder[];
+  // The list's sort, owned by the parent together with the filter bar's
+  // select. Without onSortChange the list headers are plain text.
+  sortBy?: PhotoSortKey;
+  sortOrder?: 'asc' | 'desc';
+  onSortChange?: (sort: PhotoSortKey, order: 'asc' | 'desc') => void;
 }
 
 export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
@@ -37,11 +52,17 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
   onPhotoClick,
   onPhotosDeleted,
   onSelectionChange,
-  categories = []
+  categories = [],
+  folders = [],
+  sortBy,
+  sortOrder,
+  onSortChange
 }) => {
   const { t } = useTranslation();
   const { format: formatDate } = useLocalizedDate();
   const queryClient = useQueryClient();
+  // The same test the tiles below use to tell a video from a photo.
+  const videoCount = photos.filter(isVideoItem).length;
   const [selectedPhotos, setSelectedPhotos] = useState<Set<number>>(new Set());
   // Where a shift-click measures its range from: the last tile clicked without
   // the shift key (#1212). The index is what a range needs — a span of the
@@ -57,8 +78,81 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
   const [deletingPhotos, setDeletingPhotos] = useState<Set<number>>(new Set());
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [isUpdatingCategory, setIsUpdatingCategory] = useState(false);
+  // Move to folder (issue 1786)
+  const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
+  const [isMovingToFolder, setIsMovingToFolder] = useState(false);
+  // Photo credits (#1561)
+  const [isCreditModalOpen, setIsCreditModalOpen] = useState(false);
+  const [isUpdatingCredit, setIsUpdatingCredit] = useState(false);
   // Layout toggle (Grid / List) persisted per admin via localStorage.
   const [viewMode, setViewMode] = useState<PhotoViewMode>(() => getPhotoViewMode());
+
+  // Retry for a complete video on the placeholder tile (issue 1430, item 6);
+  // the grid tile and the list row offer the same control.
+  const retryPosterFrame = async (photoId: number) => {
+    try {
+      await uploadsService.retryPhoto(photoId);
+      toast.success(t('admin.photos.retryQueued', 'Retry queued'));
+      queryClient.invalidateQueries({ queryKey: ['admin-event-photos'] });
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || 'Retry failed');
+    }
+  };
+
+  // Sort menus on the list headers (issue 1739). Each option value is the
+  // `sort:order` pair, the same shape the events list uses.
+  const sortValue = sortBy && sortOrder ? `${sortBy}:${sortOrder}` : null;
+  const NAME_SORT: ColumnMenuOption[] = [
+    { value: 'name:asc', label: t('events.sortNameAsc', 'A – Z') },
+    { value: 'name:desc', label: t('events.sortNameDesc', 'Z – A') },
+  ];
+  const UPLOADED_SORT: ColumnMenuOption[] = [
+    { value: 'date:desc', label: t('events.sortDateNewest', 'Newest first') },
+    { value: 'date:asc', label: t('events.sortDateOldest', 'Oldest first') },
+  ];
+  const RATING_SORT: ColumnMenuOption[] = [
+    { value: 'rating:desc', label: t('admin.photos.sort.ratingHighest', 'Best rated first') },
+    { value: 'rating:asc', label: t('admin.photos.sort.ratingLowest', 'Lowest rated first') },
+  ];
+  const SIZE_SORT: ColumnMenuOption[] = [
+    { value: 'size:desc', label: t('admin.photos.sort.sizeLargest', 'Largest first') },
+    { value: 'size:asc', label: t('admin.photos.sort.sizeSmallest', 'Smallest first') },
+  ];
+  const listHeader = (
+    label: string,
+    cell: string,
+    align: 'left' | 'right',
+    options?: ColumnMenuOption[],
+    menuLabel?: string,
+  ) => {
+    if (!options || !onSortChange) {
+      // The label sits in the same inline-flex box a menu header uses, so
+      // plain and sortable headers share one baseline in the row.
+      return (
+        <th className={`${cell} ${align === 'right' ? 'text-right' : 'text-left'} text-xs`}>
+          <span className="inline-flex items-center align-middle font-medium text-muted uppercase tracking-wider">
+            {label}
+          </span>
+        </th>
+      );
+    }
+    const selected = sortValue && options.some((o) => o.value === sortValue) ? sortValue : null;
+    return (
+      <ColumnMenuHeader
+        label={label}
+        menuLabel={menuLabel}
+        options={options}
+        value={selected}
+        state={selected ? (sortOrder ?? null) : null}
+        onSelect={(value) => {
+          const [sort, order] = value.split(':');
+          onSortChange(sort as PhotoSortKey, order as 'asc' | 'desc');
+        }}
+        align={align}
+        className={`${cell} text-xs`}
+      />
+    );
+  };
 
   // Persist on user action only — writing in an effect would re-save the
   // value on every mount (i.e. each time the Photos tab is opened), even
@@ -228,18 +322,63 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
     }
   };
 
+  const handleMoveToFolder = async (folderId: number | null) => {
+    if (selectedPhotos.size === 0) return;
+    setIsMovingToFolder(true);
+    const selectedIds = Array.from(selectedPhotos);
+    try {
+      await photosService.bulkUpdatePhotos(eventId, selectedIds, { folder_id: folderId });
+      toast.success(t('photos.folders.photosMoved', '{{count}} photos moved to {{folder}}', {
+        count: selectedIds.length,
+        folder: folderId === null
+          ? t('photos.folders.galleryRoot', 'Gallery root')
+          : folderPathLabel(folders, folderId),
+      }));
+      setSelectedPhotos(new Set());
+      setAnchor(null);
+      setIsSelectionMode(false);
+      onSelectionChange?.([]);
+      setIsFolderModalOpen(false);
+      invalidateFolderViews(queryClient, eventId);
+      onPhotosDeleted(); // Refresh the photo list
+    } catch (error: unknown) {
+      const e = error as { response?: { data?: { error?: string } } };
+      toast.error(e.response?.data?.error || t('photos.folders.moveFailed', 'The photos could not be moved'));
+    } finally {
+      setIsMovingToFolder(false);
+    }
+  };
+
+  const handleSetCredit = async (creditName: string | null) => {
+    setIsUpdatingCredit(true);
+    try {
+      await photosService.bulkUpdatePhotos(eventId, Array.from(selectedPhotos), { credit_name: creditName });
+      toast.success(creditName === null
+        ? t('admin.photos.credit.cleared')
+        : t('admin.photos.credit.saved'));
+      setIsCreditModalOpen(false);
+      queryClient.invalidateQueries({ queryKey: ['admin-photo-credits', eventId] });
+      onPhotosDeleted(); // Refresh the photo list
+    } catch (error: any) {
+      // The server says why a name was refused (e.g. nothing left once sanitised).
+      toast.error(error?.response?.data?.error || t('common.error'));
+    } finally {
+      setIsUpdatingCredit(false);
+    }
+  };
+
   return (
     <div>
       {/* Action Bar */}
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Button
             variant={isSelectionMode ? "primary" : "outline"}
             size="sm"
             onClick={toggleSelectionMode}
             leftIcon={<Package className="w-4 h-4" />}
           >
-            {isSelectionMode ? t('gallery.cancelSelection', 'Cancel Selection') : t('gallery.selectPhotos', 'Select Photos')}
+            {isSelectionMode ? t('gallery.cancelSelection', 'Cancel Selection') : selectLabel(t, videoCount > 0)}
           </Button>
           
           {(isSelectionMode || selectedPhotos.size > 0) && (
@@ -254,7 +393,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
               
               {selectedPhotos.size > 0 && (
                 <>
-                  <span className="text-sm text-neutral-600 dark:text-neutral-400">
+                  <span className="text-sm text-soft">
                     {t('gallery.photosSelected', { count: selectedPhotos.size })}
                   </span>
                   <PermissionGate permission="photos.edit">
@@ -265,6 +404,24 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                       leftIcon={<FolderOpen className="w-4 h-4" />}
                     >
                       {t('photos.moveToCategory', 'Move to Category')}
+                    </Button>
+                    {folders.length > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setIsFolderModalOpen(true)}
+                        leftIcon={<FolderInput className="w-4 h-4" />}
+                      >
+                        {t('photos.folders.moveToFolder', 'Move to folder…')}
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setIsCreditModalOpen(true)}
+                      leftIcon={<UserRound className="w-4 h-4" />}
+                    >
+                      {t('admin.photos.credit.bulkAction')}
                     </Button>
                     <Button
                       variant="outline"
@@ -312,12 +469,16 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
         </div>
         
         <div className="flex items-center gap-3">
-          <div className="text-sm text-neutral-600 dark:text-neutral-400">
-            {t('gallery.photosCount', { count: photos.length })}
+          <div className="text-sm text-soft">
+            {/* Counted by type once the list holds a video: three clips are
+                not "3 photos". A list of photos only reads as it always did. */}
+            {videoCount > 0
+              ? mediaSplitLabel(t, splitMediaCount(photos.length, videoCount))
+              : t('gallery.photosCount', { count: photos.length })}
           </div>
           {/* Layout toggle: Grid / List — radiogroup so a screen reader
               announces the two options as one mutually-exclusive set. */}
-          <div className="inline-flex rounded-lg border border-neutral-300 dark:border-neutral-600 overflow-hidden" role="radiogroup" aria-label={t('admin.photos.viewMode', 'View mode')}>
+          <div className="inline-flex rounded-lg border border-line-strong overflow-hidden" role="radiogroup" aria-label={t('admin.photos.viewMode', 'View mode')}>
             <button
               type="button"
               role="radio"
@@ -327,7 +488,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
               className={`p-1.5 transition-colors ${
                 viewMode === 'grid'
                   ? 'bg-primary-500 text-white'
-                  : 'bg-white dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700'
+                  : 'bg-panel text-body hover:bg-hover'
               }`}
             >
               <LayoutGrid className="w-4 h-4" />
@@ -338,10 +499,10 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
               onClick={() => selectView('list')}
               aria-checked={viewMode === 'list'}
               title={t('admin.photos.listView', 'List view')}
-              className={`p-1.5 transition-colors border-l border-neutral-300 dark:border-neutral-600 ${
+              className={`p-1.5 transition-colors border-l border-line-strong ${
                 viewMode === 'list'
                   ? 'bg-primary-500 text-white'
-                  : 'bg-white dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700'
+                  : 'bg-panel text-body hover:bg-hover'
               }`}
             >
               <List className="w-4 h-4" />
@@ -366,7 +527,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
             <div
               key={photo.id}
               data-testid={`admin-photo-tile-${photo.id}`}
-              className={`relative group cursor-pointer rounded-lg overflow-hidden bg-neutral-100 dark:bg-neutral-800 transition-opacity ${
+              className={`relative group cursor-pointer rounded-lg overflow-hidden bg-subtle transition-opacity ${
                 isSelectionMode ? 'ring-2 ring-offset-2 ' + (selectedPhotos.has(photo.id) ? 'ring-primary-500' : 'ring-transparent') : ''
               } ${isDeleting ? 'opacity-50' : ''}`}
               onClick={() => !isDeleting && onPhotoClick(photo, index)}
@@ -476,6 +637,12 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                     Original: {photo.original_filename}
                   </p>
                 )}
+                {photo.credit_name && (
+                  <p className="text-white/80 text-[11px] truncate mb-1 flex items-center gap-1" data-testid="admin-photo-credit">
+                    <UserRound className="w-3 h-3 flex-shrink-0" aria-hidden="true" />
+                    {photo.credit_name}
+                  </p>
+                )}
                 <p className="text-white/80 text-xs mb-2">
                   {photosService.formatBytes(photo.size)}
                 </p>
@@ -505,20 +672,63 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
             </div>
 
             {/* Category Badge - move to top-left and prevent overlap with select checkbox */}
-            {photo.category_name && (
+            {defaultCategoryLabel(t, photo) && (
               <div className={`absolute left-2 ${isHidden ? 'top-9' : 'top-2'} pointer-events-none`}>
                 <span className="px-2 py-1 text-xs font-medium bg-white/90 text-neutral-700 rounded max-w-[70%] whitespace-nowrap overflow-hidden text-ellipsis">
-                  {photo.category_name}
+                  {defaultCategoryLabel(t, photo)}
                 </span>
               </div>
             )}
 
+            {/* A complete video on the placeholder tile (issue 1430, item 6):
+                the row is fine, the poster frame is not. Same Retry as the
+                failed placeholder above. One row above the video pill and
+                the colour label, which own the bottom-left corner, the way
+                the category badge drops a row under the hidden badge. */}
+            {photo.processing_status === 'complete' && photo.processing_error && (
+              <div
+                className="absolute bottom-9 left-2 z-20 flex items-center gap-1"
+                data-testid={`admin-photo-poster-note-${photo.id}`}
+              >
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/90 text-white text-[10px] font-medium"
+                  title={photo.processing_error}
+                >
+                  <AlertTriangle className="w-3 h-3" />
+                  {t('admin.photos.noPosterFrame', 'No poster frame')}
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); void retryPosterFrame(photo.id); }}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/90 text-neutral-700 text-[10px] font-medium"
+                  title={t('admin.photos.noPosterFrameRetry', 'Take the poster frame again') as string}
+                >
+                  <RefreshCw className="w-2.5 h-2.5" />
+                  {t('common.retry', 'Retry')}
+                </button>
+              </div>
+            )}
+
             {isVideo && (
-              <div className="absolute bottom-2 left-2 pointer-events-none">
+              <div className="absolute bottom-2 left-2 pointer-events-none flex items-center gap-1">
                 <span className="px-2 py-1 text-[11px] font-semibold bg-black/70 text-white rounded flex items-center gap-1">
                   <Video className="w-3 h-3" />
                   {t('common.video', 'Video')}
                 </span>
+                {/* The browser-playable copy could not be made (issue 1430,
+                    item 8): the original still streams, so this is a note,
+                    not a failed tile. Switching the setting off and on
+                    queues failed copies again. */}
+                {photo.web_status === 'failed' && (
+                  <span
+                    className="px-2 py-1 text-[11px] font-semibold bg-amber-500/90 text-white rounded flex items-center gap-1"
+                    title={photo.web_error || undefined}
+                    data-testid={`admin-photo-web-copy-failed-${photo.id}`}
+                  >
+                    <AlertTriangle className="w-3 h-3" />
+                    {t('admin.photos.webCopyFailed', 'No web copy')}
+                  </span>
+                )}
               </div>
             )}
             
@@ -597,35 +807,22 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
 
       {/* Photo List */}
       {viewMode === 'list' && (
-      <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-700">
+      <div className="overflow-x-auto rounded-lg border border-line">
         <table className="w-full">
-          <thead className="bg-neutral-50 dark:bg-neutral-800 border-b border-neutral-200 dark:border-neutral-700">
+          <thead className="bg-subtle border-b border-line">
             <tr>
               <th className="w-8 px-3 py-2" />
-              <th className="px-3 py-2 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                {t('admin.photos.columns.photo', 'Photo')}
-              </th>
-              <th className="hidden lg:table-cell px-3 py-2 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                {t('admin.photos.columns.category', 'Category')}
-              </th>
-              <th className="hidden md:table-cell px-3 py-2 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                {t('admin.photos.columns.uploaded', 'Uploaded')}
-              </th>
-              <th className="hidden xl:table-cell px-3 py-2 text-right text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                {t('admin.photos.columns.engagement', 'Engagement')}
-              </th>
-              <th className="hidden sm:table-cell px-3 py-2 text-right text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                {t('admin.photos.columns.feedback', 'Feedback')}
-              </th>
-              <th className="px-3 py-2 text-right text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                {t('admin.photos.columns.size', 'Size')}
-              </th>
-              <th className="w-px px-3 py-2 text-right text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
-                {t('admin.photos.columns.actions', 'Actions')}
-              </th>
+              {listHeader(t('admin.photos.columns.photo', 'Photo'), 'px-3 py-2', 'left', NAME_SORT, t('gallery.sortByName', 'Sort by Name'))}
+              {listHeader(t('admin.photos.columns.category', 'Category'), 'hidden lg:table-cell px-3 py-2', 'left')}
+              {listHeader(t('admin.photos.columns.credit'), 'hidden lg:table-cell px-3 py-2', 'left')}
+              {listHeader(t('admin.photos.columns.uploaded', 'Uploaded'), 'hidden md:table-cell px-3 py-2', 'left', UPLOADED_SORT, t('gallery.sortByDate', 'Sort by Date'))}
+              {listHeader(t('admin.photos.columns.engagement', 'Engagement'), 'hidden xl:table-cell px-3 py-2', 'right')}
+              {listHeader(t('admin.photos.columns.feedback', 'Feedback'), 'hidden sm:table-cell px-3 py-2', 'right', RATING_SORT, t('gallery.sortByRating', 'Sort by Rating'))}
+              {listHeader(t('admin.photos.columns.size', 'Size'), 'px-3 py-2', 'right', SIZE_SORT, t('gallery.sortBySize', 'Sort by Size'))}
+              {listHeader(t('admin.photos.columns.actions', 'Actions'), 'w-px px-3 py-2', 'right')}
             </tr>
           </thead>
-          <tbody className="bg-white dark:bg-neutral-800 divide-y divide-neutral-200 dark:divide-neutral-700">
+          <tbody className="bg-panel divide-y divide-line">
             {photos.map((photo, index) => {
               const isRowDeleting = deletingPhotos.has(photo.id);
               const commentCount = photo.comment_count ?? 0;
@@ -661,7 +858,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                       <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
                         isSelected
                           ? 'bg-accent-dark border-accent-dark'
-                          : 'border-neutral-300 dark:border-neutral-500 group-hover:border-neutral-400'
+                          : 'border-line-strong group-hover:border-neutral-400'
                       }`}>
                         {isSelected && <Check className="w-3.5 h-3.5 text-white" />}
                       </div>
@@ -671,7 +868,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                   {/* Thumbnail + filename + badges */}
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-3 min-w-0">
-                      <div className="flex-shrink-0 w-10 h-10 rounded overflow-hidden bg-neutral-100 dark:bg-neutral-700">
+                      <div className="flex-shrink-0 w-10 h-10 rounded overflow-hidden bg-inset">
                         {status === 'pending' || status === 'processing' ? (
                           <div className="w-full h-full flex items-center justify-center text-amber-600 dark:text-amber-300">
                             <Cog className="w-4 h-4 animate-spin" />
@@ -700,13 +897,38 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100 truncate">
+                          <p className="text-sm font-medium text-heading truncate">
                             {photo.filename}
                           </p>
                           {isVideo && (
-                            <span className="flex-shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-600 text-neutral-700 dark:text-neutral-200 text-[10px] font-medium">
+                            <span className="flex-shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-fill text-body text-[10px] font-medium">
                               <Video className="w-3 h-3" />
                               {t('common.video', 'Video')}
+                            </span>
+                          )}
+                          {/* The same note and Retry as the grid tile, for admins on the list view. */}
+                          {status === 'complete' && photo.processing_error && (
+                            <span
+                              className="flex-shrink-0 inline-flex items-center gap-1"
+                              data-testid={`admin-photo-poster-note-${photo.id}`}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <span
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/90 text-white text-[10px] font-medium"
+                                title={photo.processing_error}
+                              >
+                                <AlertTriangle className="w-3 h-3" />
+                                {t('admin.photos.noPosterFrame', 'No poster frame')}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); void retryPosterFrame(photo.id); }}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-fill text-body text-[10px] font-medium hover:bg-hover-soft"
+                                title={t('admin.photos.noPosterFrameRetry', 'Take the poster frame again') as string}
+                              >
+                                <RefreshCw className="w-2.5 h-2.5" />
+                                {t('common.retry', 'Retry')}
+                              </button>
                             </span>
                           )}
                           {isHidden && (
@@ -720,7 +942,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                           )}
                         </div>
                         {photo.original_filename && photo.original_filename !== photo.filename && (
-                          <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate">
+                          <p className="text-xs text-muted truncate">
                             {photo.original_filename}
                           </p>
                         )}
@@ -729,17 +951,26 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                   </td>
 
                   {/* Category */}
-                  <td className="hidden lg:table-cell px-3 py-2 max-w-[12rem] truncate text-sm text-neutral-600 dark:text-neutral-400">
-                    {photo.category_name || '—'}
+                  <td className="hidden lg:table-cell px-3 py-2 max-w-[12rem] truncate text-sm text-soft">
+                    {defaultCategoryLabel(t, photo) || '—'}
+                  </td>
+
+                  {/* Credit (#1561) */}
+                  <td className="hidden lg:table-cell px-3 py-2 max-w-[12rem] text-sm text-soft">
+                    {photo.credit_name ? (
+                      <span className="block truncate" title={photo.credit_name}>{photo.credit_name}</span>
+                    ) : photo.uploaded_by === 'guest' ? (
+                      <span className="text-neutral-400">{t('admin.photos.credit.unnamedGuest')}</span>
+                    ) : '—'}
                   </td>
 
                   {/* Uploaded date */}
-                  <td className="hidden md:table-cell px-3 py-2 whitespace-nowrap text-sm text-neutral-600 dark:text-neutral-400">
+                  <td className="hidden md:table-cell px-3 py-2 whitespace-nowrap text-sm text-soft">
                     {photo.uploaded_at ? formatDate(photo.uploaded_at) : '—'}
                   </td>
 
                   {/* Engagement: views / downloads / likes */}
-                  <td className="hidden xl:table-cell px-3 py-2 text-right text-xs text-neutral-500 dark:text-neutral-400 tabular-nums">
+                  <td className="hidden xl:table-cell px-3 py-2 text-right text-xs text-muted tabular-nums">
                     <div className="flex items-center justify-end gap-3">
                       <span className="inline-flex items-center gap-1" title={t('admin.photos.columns.views', 'Views')}>
                         <Eye className="w-3.5 h-3.5" />
@@ -757,7 +988,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                   </td>
 
                   {/* Feedback: rating + comments */}
-                  <td className="hidden sm:table-cell px-3 py-2 text-right text-xs text-neutral-600 dark:text-neutral-400">
+                  <td className="hidden sm:table-cell px-3 py-2 text-right text-xs text-soft">
                     {averageRating > 0 || commentCount > 0 ? (
                       <div className="flex items-center justify-end gap-2">
                         {averageRating > 0 && (
@@ -777,7 +1008,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                   </td>
 
                   {/* Size */}
-                  <td className="px-3 py-2 text-right text-sm text-neutral-500 dark:text-neutral-400 whitespace-nowrap tabular-nums">
+                  <td className="px-3 py-2 text-right text-sm text-muted whitespace-nowrap tabular-nums">
                     {photosService.formatBytes(photo.size)}
                   </td>
 
@@ -788,7 +1019,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
                         <PermissionGate permission="photos.download">
                           <button
                             onClick={(e) => handleDownload(photo, e)}
-                            className="p-1.5 text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-600 rounded"
+                            className="p-1.5 text-muted hover:text-heading hover:bg-hover rounded"
                             title={t('common.download', 'Download')}
                           >
                             <Download className="w-4 h-4" />
@@ -817,9 +1048,30 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
 
       {photos.length === 0 && (
         <div className="text-center py-12">
-          <p className="text-neutral-500 dark:text-neutral-400">{t('gallery.noMedia', 'No media uploaded yet')}</p>
+          <p className="text-muted">{t('gallery.noMedia', 'No media uploaded yet')}</p>
         </div>
       )}
+
+      {/* Bulk credit (#1561) */}
+      <BulkCreditModal
+        isOpen={isCreditModalOpen}
+        onClose={() => setIsCreditModalOpen(false)}
+        onConfirm={handleSetCredit}
+        photoCount={selectedPhotos.size}
+        isLoading={isUpdatingCredit}
+      />
+
+      {/* Move to folder (issue 1786): the gallery root is a target too. */}
+      <FolderPickerModal
+        isOpen={isFolderModalOpen}
+        onClose={() => setIsFolderModalOpen(false)}
+        onConfirm={handleMoveToFolder}
+        title={t('photos.folders.moveToFolderTitle', 'Move {{count}} photos to a folder', { count: selectedPhotos.size })}
+        confirmLabel={t('photos.movePhotos', 'Move Photos')}
+        folders={folders}
+        allowRoot
+        isLoading={isMovingToFolder}
+      />
 
       {/* Bulk Category Modal */}
       <BulkCategoryModal

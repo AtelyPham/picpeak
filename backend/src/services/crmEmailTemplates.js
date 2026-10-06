@@ -25,12 +25,13 @@ const CRM_EMAIL_TEMPLATES = {
   quote_sent: {
     category: 'quotes', feature_flag: 'quotes',
     variables: ['quote_number', 'customer_name', 'response_url', 'accept_url', 'decline_url',
-      'valid_until', 'event_name', 'total_amount'],
+      'valid_until', 'event_name', 'total_amount', 'has_add_ons'],
     en: {
       subject: 'Your quote {{quote_number}} is ready',
       body_html: `<h2>Quote {{quote_number}}</h2>
 <p>Dear {{customer_name}},</p>
 <p>Please find the attached quote {{quote_number}}{{#if event_name}} for "{{event_name}}"{{/if}}. Total amount: <strong>{{total_amount}}</strong>.</p>
+{{#if has_add_ons}}<p>This quote has optional add-ons. Choose them online before you accept.</p>{{/if}}
 <p>You can accept or decline this quote directly via the buttons below:</p>
 <p style="text-align: center; margin: 30px 0;">
   <a href="{{accept_url}}" class="button">Accept quote</a>
@@ -40,13 +41,14 @@ const CRM_EMAIL_TEMPLATES = {
 <p>Or open the full quote in your browser:<br>
 <span style="word-break: break-all; font-size: 13px;">{{response_url}}</span></p>
 {{#if valid_until}}<p style="font-size: 13px; color: #666;">This quote is valid until {{valid_until}}.</p>{{/if}}`,
-      body_text: 'Quote {{quote_number}}\n\nDear {{customer_name}},\n\nPlease find the attached quote {{quote_number}}. Total: {{total_amount}}.\n\nRespond: {{response_url}}\nAccept: {{accept_url}}\nDecline: {{decline_url}}\n\n{{#if valid_until}}Valid until {{valid_until}}.{{/if}}',
+      body_text: 'Quote {{quote_number}}\n\nDear {{customer_name}},\n\nPlease find the attached quote {{quote_number}}. Total: {{total_amount}}.\n\n{{#if has_add_ons}}This quote has optional add-ons. Choose them online before you accept.\n\n{{/if}}Respond: {{response_url}}\nAccept: {{accept_url}}\nDecline: {{decline_url}}\n\n{{#if valid_until}}Valid until {{valid_until}}.{{/if}}',
     },
     de: {
       subject: 'Ihr Angebot {{quote_number}} ist bereit',
       body_html: `<h2>Angebot {{quote_number}}</h2>
 <p>Sehr geehrte/r {{customer_name}},</p>
 <p>im Anhang finden Sie das Angebot {{quote_number}}{{#if event_name}} für "{{event_name}}"{{/if}}. Gesamtbetrag: <strong>{{total_amount}}</strong>.</p>
+{{#if has_add_ons}}<p>Dieses Angebot enthält optionale Zusatzleistungen. Wählen Sie sie online aus, bevor Sie annehmen.</p>{{/if}}
 <p>Sie können das Angebot direkt über die Schaltflächen unten annehmen oder ablehnen:</p>
 <p style="text-align: center; margin: 30px 0;">
   <a href="{{accept_url}}" class="button">Angebot annehmen</a>
@@ -56,23 +58,28 @@ const CRM_EMAIL_TEMPLATES = {
 <p>Oder öffnen Sie das vollständige Angebot im Browser:<br>
 <span style="word-break: break-all; font-size: 13px;">{{response_url}}</span></p>
 {{#if valid_until}}<p style="font-size: 13px; color: #666;">Dieses Angebot ist gültig bis {{valid_until}}.</p>{{/if}}`,
-      body_text: 'Angebot {{quote_number}}\n\nSehr geehrte/r {{customer_name}},\n\nim Anhang finden Sie das Angebot {{quote_number}}. Gesamtbetrag: {{total_amount}}.\n\nAnsehen: {{response_url}}\nAnnehmen: {{accept_url}}\nAblehnen: {{decline_url}}\n\n{{#if valid_until}}Gültig bis {{valid_until}}.{{/if}}',
+      body_text: 'Angebot {{quote_number}}\n\nSehr geehrte/r {{customer_name}},\n\nim Anhang finden Sie das Angebot {{quote_number}}. Gesamtbetrag: {{total_amount}}.\n\n{{#if has_add_ons}}Dieses Angebot enthält optionale Zusatzleistungen. Wählen Sie sie online aus, bevor Sie annehmen.\n\n{{/if}}Ansehen: {{response_url}}\nAnnehmen: {{accept_url}}\nAblehnen: {{decline_url}}\n\n{{#if valid_until}}Gültig bis {{valid_until}}.{{/if}}',
     },
   },
   quote_accepted_admin: {
     category: 'quotes', feature_flag: 'quotes',
-    variables: ['quote_number', 'customer_email', 'event_name', 'total_amount', 'admin_dashboard_url'],
+    variables: ['quote_number', 'customer_email', 'event_name', 'total_amount', 'admin_dashboard_url',
+      'booked_add_ons', 'customer_message'],
     en: {
       subject: 'Quote {{quote_number}} accepted by {{customer_email}}',
       body_html: `<h2>Quote accepted</h2><p>{{customer_email}} just accepted quote <strong>{{quote_number}}</strong>{{#if event_name}} for "{{event_name}}"{{/if}}. Total: {{total_amount}}.</p>
+{{#if booked_add_ons}}<p>Booked add-ons: {{booked_add_ons}}</p>{{/if}}
+{{#if customer_message}}<p><strong>Message from the customer:</strong><br>{{customer_message}}</p>{{/if}}
 <p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Open in admin</a></p>`,
-      body_text: 'Quote {{quote_number}} accepted by {{customer_email}}. Open: {{admin_dashboard_url}}',
+      body_text: 'Quote {{quote_number}} accepted by {{customer_email}}.{{#if booked_add_ons}} Booked add-ons: {{booked_add_ons}}.{{/if}}{{#if customer_message}} Message: {{customer_message}}{{/if}} Open: {{admin_dashboard_url}}',
     },
     de: {
       subject: 'Angebot {{quote_number}} von {{customer_email}} angenommen',
       body_html: `<h2>Angebot angenommen</h2><p>{{customer_email}} hat soeben das Angebot <strong>{{quote_number}}</strong>{{#if event_name}} für "{{event_name}}"{{/if}} angenommen. Gesamtbetrag: {{total_amount}}.</p>
+{{#if booked_add_ons}}<p>Gebuchte Zusatzleistungen: {{booked_add_ons}}</p>{{/if}}
+{{#if customer_message}}<p><strong>Nachricht des Kunden:</strong><br>{{customer_message}}</p>{{/if}}
 <p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Im Admin-Bereich öffnen</a></p>`,
-      body_text: 'Angebot {{quote_number}} von {{customer_email}} angenommen. Öffnen: {{admin_dashboard_url}}',
+      body_text: 'Angebot {{quote_number}} von {{customer_email}} angenommen.{{#if booked_add_ons}} Gebuchte Zusatzleistungen: {{booked_add_ons}}.{{/if}}{{#if customer_message}} Nachricht: {{customer_message}}{{/if}} Öffnen: {{admin_dashboard_url}}',
     },
   },
   quote_declined_admin: {
@@ -89,6 +96,32 @@ const CRM_EMAIL_TEMPLATES = {
       body_html: `<p>{{customer_email}} hat das Angebot <strong>{{quote_number}}</strong>{{#if event_name}} für "{{event_name}}"{{/if}} abgelehnt.</p>
 <p><a href="{{admin_dashboard_url}}">Angebot im Admin-Bereich öffnen</a></p>`,
       body_text: 'Angebot {{quote_number}} von {{customer_email}} abgelehnt. Öffnen: {{admin_dashboard_url}}',
+    },
+  },
+  // #1451: sent to the customer whenever the business changes the add-ons of
+  // an accepted quote; the updated quote PDF is attached.
+  quote_addons_updated: {
+    category: 'quotes', feature_flag: 'quotes',
+    variables: ['quote_number', 'customer_name', 'event_name', 'total_amount', 'booked_list', 'removed_list', 'has_pdf'],
+    en: {
+      subject: 'Your quote {{quote_number}} has been updated',
+      body_html: `<h2>Quote {{quote_number}} updated</h2>
+<p>Dear {{customer_name}},</p>
+<p>we have updated the add-ons of your accepted quote {{quote_number}}{{#if event_name}} for "{{event_name}}"{{/if}}.</p>
+{{#if booked_list}}<p>Now booked: {{booked_list}}</p>{{/if}}
+{{#if removed_list}}<p>No longer booked: {{removed_list}}</p>{{/if}}
+<p>New total: <strong>{{total_amount}}</strong>.{{#if has_pdf}} The updated quote is attached.{{/if}}</p>`,
+      body_text: 'Quote {{quote_number}} updated\n\nDear {{customer_name}},\n\nwe have updated the add-ons of your accepted quote {{quote_number}}.\n{{#if booked_list}}Now booked: {{booked_list}}\n{{/if}}{{#if removed_list}}No longer booked: {{removed_list}}\n{{/if}}\nNew total: {{total_amount}}.{{#if has_pdf}} The updated quote is attached.{{/if}}',
+    },
+    de: {
+      subject: 'Ihr Angebot {{quote_number}} wurde angepasst',
+      body_html: `<h2>Angebot {{quote_number}} angepasst</h2>
+<p>Sehr geehrte/r {{customer_name}},</p>
+<p>wir haben die Zusatzleistungen Ihres angenommenen Angebots {{quote_number}}{{#if event_name}} für "{{event_name}}"{{/if}} angepasst.</p>
+{{#if booked_list}}<p>Neu gebucht: {{booked_list}}</p>{{/if}}
+{{#if removed_list}}<p>Nicht mehr gebucht: {{removed_list}}</p>{{/if}}
+<p>Neuer Gesamtbetrag: <strong>{{total_amount}}</strong>.{{#if has_pdf}} Das angepasste Angebot finden Sie im Anhang.{{/if}}</p>`,
+      body_text: 'Angebot {{quote_number}} angepasst\n\nSehr geehrte/r {{customer_name}},\n\nwir haben die Zusatzleistungen Ihres angenommenen Angebots {{quote_number}} angepasst.\n{{#if booked_list}}Neu gebucht: {{booked_list}}\n{{/if}}{{#if removed_list}}Nicht mehr gebucht: {{removed_list}}\n{{/if}}\nNeuer Gesamtbetrag: {{total_amount}}.{{#if has_pdf}} Das angepasste Angebot finden Sie im Anhang.{{/if}}',
     },
   },
   invoice_sent: {
@@ -474,6 +507,152 @@ Rechnung {{invoice_number}}{{#if event_name}} ({{event_name}}){{/if}} ist nach {
 Zur Weiterleitung an das Inkasso / für die Betreibung.`,
     },
   },
+  // Customer documents (#1444, plan slice 3). The links lead to the portal
+  // login and from there to the document; no token is ever put in them.
+  customer_document_shared: {
+    category: 'customers', feature_flag: 'documents',
+    variables: ['customer_name', 'business_name', 'document_title', 'event_name', 'document_link', 'dashboard_link'],
+    en: {
+      subject: 'A new document is waiting for you: {{document_title}}',
+      body_html: `<h2>New document</h2>
+<p>Dear {{customer_name}},</p>
+<p>A document has been shared with you in your customer portal: <strong>{{document_title}}</strong>{{#if event_name}} for "{{event_name}}"{{/if}}.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{document_link}}" class="button">Open document</a></p>
+<p style="font-size: 13px; color: #666;">You will be asked to sign in first. All your documents are in your portal: {{dashboard_link}}</p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Dear {{customer_name}},\n\nA document has been shared with you in your customer portal: {{document_title}}{{#if event_name}} for "{{event_name}}"{{/if}}.\n\nOpen it: {{document_link}}\n(You will be asked to sign in first.)\n\nAll your documents: {{dashboard_link}}{{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+    de: {
+      subject: 'Ein neues Dokument wartet auf Sie: {{document_title}}',
+      body_html: `<h2>Neues Dokument</h2>
+<p>Guten Tag {{customer_name}},</p>
+<p>in Ihrem Kundenportal wurde ein Dokument für Sie freigegeben: <strong>{{document_title}}</strong>{{#if event_name}} für "{{event_name}}"{{/if}}.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{document_link}}" class="button">Dokument öffnen</a></p>
+<p style="font-size: 13px; color: #666;">Sie werden zuerst gebeten, sich anzumelden. Alle Ihre Dokumente finden Sie im Portal: {{dashboard_link}}</p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Guten Tag {{customer_name}},\n\nin Ihrem Kundenportal wurde ein Dokument für Sie freigegeben: {{document_title}}{{#if event_name}} für "{{event_name}}"{{/if}}.\n\nÖffnen: {{document_link}}\n(Sie werden zuerst gebeten, sich anzumelden.)\n\nAlle Ihre Dokumente: {{dashboard_link}}{{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+  },
+  customer_document_uploaded_admin: {
+    category: 'customers', feature_flag: 'documents',
+    variables: ['customer_name', 'document_title', 'admin_link'],
+    en: {
+      subject: '{{customer_name}} uploaded a document: {{document_title}}',
+      body_html: `<h2>New customer upload</h2>
+<p>{{customer_name}} uploaded <strong>{{document_title}}</strong> in the customer portal. It stays unavailable to them until it has been reviewed.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_link}}" class="button">Review in admin</a></p>`,
+      body_text: '{{customer_name}} uploaded {{document_title}} in the customer portal. It stays unavailable to them until it has been reviewed.\n\nReview: {{admin_link}}',
+    },
+    de: {
+      subject: '{{customer_name}} hat ein Dokument hochgeladen: {{document_title}}',
+      body_html: `<h2>Neuer Kunden-Upload</h2>
+<p>{{customer_name}} hat im Kundenportal <strong>{{document_title}}</strong> hochgeladen. Das Dokument bleibt für den Kunden gesperrt, bis es geprüft wurde.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_link}}" class="button">Im Admin-Bereich prüfen</a></p>`,
+      body_text: '{{customer_name}} hat im Kundenportal {{document_title}} hochgeladen. Das Dokument bleibt für den Kunden gesperrt, bis es geprüft wurde.\n\nPrüfen: {{admin_link}}',
+    },
+  },
+  customer_document_reviewed: {
+    category: 'customers', feature_flag: 'documents',
+    variables: ['customer_name', 'business_name', 'document_title', 'review_note', 'document_link'],
+    en: {
+      subject: 'Your document was not accepted: {{document_title}}',
+      body_html: `<h2>Document not accepted</h2>
+<p>Dear {{customer_name}},</p>
+<p>The document you uploaded, <strong>{{document_title}}</strong>, was not accepted.</p>
+{{#if review_note}}<p><strong>Reason:</strong> {{review_note}}</p>{{/if}}
+<p>You can upload a corrected version in your customer portal.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{document_link}}" class="button">Open document</a></p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Dear {{customer_name}},\n\nThe document you uploaded, {{document_title}}, was not accepted.{{#if review_note}}\nReason: {{review_note}}{{/if}}\n\nYou can upload a corrected version in your customer portal: {{document_link}}{{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+    de: {
+      subject: 'Ihr Dokument wurde nicht angenommen: {{document_title}}',
+      body_html: `<h2>Dokument nicht angenommen</h2>
+<p>Guten Tag {{customer_name}},</p>
+<p>das von Ihnen hochgeladene Dokument <strong>{{document_title}}</strong> wurde nicht angenommen.</p>
+{{#if review_note}}<p><strong>Begründung:</strong> {{review_note}}</p>{{/if}}
+<p>Sie können in Ihrem Kundenportal eine korrigierte Fassung hochladen.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{document_link}}" class="button">Dokument öffnen</a></p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Guten Tag {{customer_name}},\n\ndas von Ihnen hochgeladene Dokument {{document_title}} wurde nicht angenommen.{{#if review_note}}\nBegründung: {{review_note}}{{/if}}\n\nSie können in Ihrem Kundenportal eine korrigierte Fassung hochladen: {{document_link}}{{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+  },
+  customer_document_access_alert_admin: {
+    category: 'customers', feature_flag: 'documents',
+    variables: ['customer_name', 'attempt_count', 'admin_link'],
+    en: {
+      subject: 'Repeated access to other customers\' documents: {{customer_name}}',
+      body_html: `<h2>Unusual document access</h2>
+<p>Within the last hour, {{customer_name}} asked the portal for {{attempt_count}} documents that belong to other customers. Every one of them was refused.</p>
+<p>This can be a stale link, but it is also what trying out document numbers looks like. You can deactivate the account from the customer record if it continues.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_link}}" class="button">Open the customer record</a></p>`,
+      body_text: 'Within the last hour, {{customer_name}} asked the portal for {{attempt_count}} documents that belong to other customers. Every one of them was refused.\n\nThis can be a stale link, but it is also what trying out document numbers looks like. You can deactivate the account from the customer record if it continues.\n\n{{admin_link}}',
+    },
+    de: {
+      subject: 'Wiederholte Zugriffe auf fremde Dokumente: {{customer_name}}',
+      body_html: `<h2>Ungewöhnliche Dokumentzugriffe</h2>
+<p>{{customer_name}} hat in der letzten Stunde im Portal {{attempt_count}} Dokumente angefordert, die anderen Kunden gehören. Alle Zugriffe wurden abgewiesen.</p>
+<p>Das kann ein veralteter Link sein, sieht aber auch so aus, als würden Dokumentnummern ausprobiert. Falls es weitergeht, können Sie das Konto im Kundendatensatz deaktivieren.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_link}}" class="button">Kundendatensatz öffnen</a></p>`,
+      body_text: '{{customer_name}} hat in der letzten Stunde im Portal {{attempt_count}} Dokumente angefordert, die anderen Kunden gehören. Alle Zugriffe wurden abgewiesen.\n\nDas kann ein veralteter Link sein, sieht aber auch so aus, als würden Dokumentnummern ausprobiert. Falls es weitergeht, können Sie das Konto im Kundendatensatz deaktivieren.\n\n{{admin_link}}',
+    },
+  },
+  customer_document_requested: {
+    category: 'customers', feature_flag: 'documents',
+    variables: ['customer_name', 'business_name', 'request_title', 'request_note', 'due_date', 'upload_link'],
+    en: {
+      subject: 'Please send us a document: {{request_title}}',
+      body_html: `<h2>A document is needed</h2>
+<p>Dear {{customer_name}},</p>
+<p>Please upload the following document in your customer portal: <strong>{{request_title}}</strong>.</p>
+{{#if request_note}}<p>{{request_note}}</p>{{/if}}
+{{#if due_date}}<p>Please send it by {{due_date}}.</p>{{/if}}
+<p style="text-align: center; margin: 30px 0;"><a href="{{upload_link}}" class="button">Upload the document</a></p>
+<p style="font-size: 13px; color: #666;">You will be asked to sign in first.</p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Dear {{customer_name}},\n\nPlease upload the following document in your customer portal: {{request_title}}.{{#if request_note}}\n\n{{request_note}}{{/if}}{{#if due_date}}\n\nPlease send it by {{due_date}}.{{/if}}\n\nUpload: {{upload_link}}\n(You will be asked to sign in first.){{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+    de: {
+      subject: 'Bitte senden Sie uns ein Dokument: {{request_title}}',
+      body_html: `<h2>Ein Dokument wird benötigt</h2>
+<p>Guten Tag {{customer_name}},</p>
+<p>bitte laden Sie das folgende Dokument in Ihrem Kundenportal hoch: <strong>{{request_title}}</strong>.</p>
+{{#if request_note}}<p>{{request_note}}</p>{{/if}}
+{{#if due_date}}<p>Bitte senden Sie es bis {{due_date}}.</p>{{/if}}
+<p style="text-align: center; margin: 30px 0;"><a href="{{upload_link}}" class="button">Dokument hochladen</a></p>
+<p style="font-size: 13px; color: #666;">Sie werden zuerst gebeten, sich anzumelden.</p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Guten Tag {{customer_name}},\n\nbitte laden Sie das folgende Dokument in Ihrem Kundenportal hoch: {{request_title}}.{{#if request_note}}\n\n{{request_note}}{{/if}}{{#if due_date}}\n\nBitte senden Sie es bis {{due_date}}.{{/if}}\n\nHochladen: {{upload_link}}\n(Sie werden zuerst gebeten, sich anzumelden.){{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+  },
+  customer_document_request_reminder: {
+    category: 'customers', feature_flag: 'documents',
+    variables: ['customer_name', 'business_name', 'request_title', 'request_note', 'due_date', 'upload_link'],
+    en: {
+      subject: 'Reminder: {{request_title}}',
+      body_html: `<h2>Still needed</h2>
+<p>Dear {{customer_name}},</p>
+<p>We are still waiting for <strong>{{request_title}}</strong>. Please upload it in your customer portal.</p>
+{{#if request_note}}<p>{{request_note}}</p>{{/if}}
+{{#if due_date}}<p>Please send it by {{due_date}}.</p>{{/if}}
+<p style="text-align: center; margin: 30px 0;"><a href="{{upload_link}}" class="button">Upload the document</a></p>
+<p style="font-size: 13px; color: #666;">If you have already sent it, you can ignore this reminder.</p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Dear {{customer_name}},\n\nWe are still waiting for {{request_title}}. Please upload it in your customer portal.{{#if request_note}}\n\n{{request_note}}{{/if}}{{#if due_date}}\n\nPlease send it by {{due_date}}.{{/if}}\n\nUpload: {{upload_link}}\n\nIf you have already sent it, you can ignore this reminder.{{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+    de: {
+      subject: 'Erinnerung: {{request_title}}',
+      body_html: `<h2>Noch ausstehend</h2>
+<p>Guten Tag {{customer_name}},</p>
+<p>wir warten noch auf <strong>{{request_title}}</strong>. Bitte laden Sie das Dokument in Ihrem Kundenportal hoch.</p>
+{{#if request_note}}<p>{{request_note}}</p>{{/if}}
+{{#if due_date}}<p>Bitte senden Sie es bis {{due_date}}.</p>{{/if}}
+<p style="text-align: center; margin: 30px 0;"><a href="{{upload_link}}" class="button">Dokument hochladen</a></p>
+<p style="font-size: 13px; color: #666;">Falls Sie es bereits gesendet haben, können Sie diese Erinnerung ignorieren.</p>
+{{#if business_name}}<p>{{business_name}}</p>{{/if}}`,
+      body_text: 'Guten Tag {{customer_name}},\n\nwir warten noch auf {{request_title}}. Bitte laden Sie das Dokument in Ihrem Kundenportal hoch.{{#if request_note}}\n\n{{request_note}}{{/if}}{{#if due_date}}\n\nBitte senden Sie es bis {{due_date}}.{{/if}}\n\nHochladen: {{upload_link}}\n\nFalls Sie es bereits gesendet haben, können Sie diese Erinnerung ignorieren.{{#if business_name}}\n\n{{business_name}}{{/if}}',
+    },
+  },
 };
 
 let _seeded = false;
@@ -485,6 +664,95 @@ let _seeded = false;
  *
  * Returns the list of templateKeys newly inserted (for logging).
  */
+// Defaults whose text changed (#1451). A stored template still identical to
+// its previous default is brought up to date; one an admin has edited is left
+// as it is (the new variables are available to add).
+const PREVIOUS_DEFAULTS = {
+  // The attachment sentence was unconditional; an install that stored the
+  // first version gets the conditional one as long as nobody edited it.
+  'quote_addons_updated': {
+    'en': {
+      'subject': 'Your quote {{quote_number}} has been updated',
+      'body_html': `<h2>Quote {{quote_number}} updated</h2>
+<p>Dear {{customer_name}},</p>
+<p>we have updated the add-ons of your accepted quote {{quote_number}}{{#if event_name}} for "{{event_name}}"{{/if}}.</p>
+{{#if booked_list}}<p>Now booked: {{booked_list}}</p>{{/if}}
+{{#if removed_list}}<p>No longer booked: {{removed_list}}</p>{{/if}}
+<p>New total: <strong>{{total_amount}}</strong>. The updated quote is attached.</p>`,
+      'body_text': 'Quote {{quote_number}} updated\n\nDear {{customer_name}},\n\nwe have updated the add-ons of your accepted quote {{quote_number}}.\n{{#if booked_list}}Now booked: {{booked_list}}\n{{/if}}{{#if removed_list}}No longer booked: {{removed_list}}\n{{/if}}\nNew total: {{total_amount}}. The updated quote is attached.'
+    },
+    'de': {
+      'subject': 'Ihr Angebot {{quote_number}} wurde angepasst',
+      'body_html': `<h2>Angebot {{quote_number}} angepasst</h2>
+<p>Sehr geehrte/r {{customer_name}},</p>
+<p>wir haben die Zusatzleistungen Ihres angenommenen Angebots {{quote_number}}{{#if event_name}} für "{{event_name}}"{{/if}} angepasst.</p>
+{{#if booked_list}}<p>Neu gebucht: {{booked_list}}</p>{{/if}}
+{{#if removed_list}}<p>Nicht mehr gebucht: {{removed_list}}</p>{{/if}}
+<p>Neuer Gesamtbetrag: <strong>{{total_amount}}</strong>. Das angepasste Angebot finden Sie im Anhang.</p>`,
+      'body_text': 'Angebot {{quote_number}} angepasst\n\nSehr geehrte/r {{customer_name}},\n\nwir haben die Zusatzleistungen Ihres angenommenen Angebots {{quote_number}} angepasst.\n{{#if booked_list}}Neu gebucht: {{booked_list}}\n{{/if}}{{#if removed_list}}Nicht mehr gebucht: {{removed_list}}\n{{/if}}\nNeuer Gesamtbetrag: {{total_amount}}. Das angepasste Angebot finden Sie im Anhang.'
+    }
+  },
+  'quote_sent': {
+    'en': {
+      'subject': 'Your quote {{quote_number}} is ready',
+      'body_html': '<h2>Quote {{quote_number}}</h2>\n<p>Dear {{customer_name}},</p>\n<p>Please find the attached quote {{quote_number}}{{#if event_name}} for "{{event_name}}"{{/if}}. Total amount: <strong>{{total_amount}}</strong>.</p>\n<p>You can accept or decline this quote directly via the buttons below:</p>\n<p style="text-align: center; margin: 30px 0;">\n  <a href="{{accept_url}}" class="button">Accept quote</a>\n  &nbsp;\n  <a href="{{decline_url}}" style="display:inline-block;padding:10px 20px;color:#666;text-decoration:underline;">Decline</a>\n</p>\n<p>Or open the full quote in your browser:<br>\n<span style="word-break: break-all; font-size: 13px;">{{response_url}}</span></p>\n{{#if valid_until}}<p style="font-size: 13px; color: #666;">This quote is valid until {{valid_until}}.</p>{{/if}}',
+      'body_text': 'Quote {{quote_number}}\n\nDear {{customer_name}},\n\nPlease find the attached quote {{quote_number}}. Total: {{total_amount}}.\n\nRespond: {{response_url}}\nAccept: {{accept_url}}\nDecline: {{decline_url}}\n\n{{#if valid_until}}Valid until {{valid_until}}.{{/if}}'
+    },
+    'de': {
+      'subject': 'Ihr Angebot {{quote_number}} ist bereit',
+      'body_html': '<h2>Angebot {{quote_number}}</h2>\n<p>Sehr geehrte/r {{customer_name}},</p>\n<p>im Anhang finden Sie das Angebot {{quote_number}}{{#if event_name}} für "{{event_name}}"{{/if}}. Gesamtbetrag: <strong>{{total_amount}}</strong>.</p>\n<p>Sie können das Angebot direkt über die Schaltflächen unten annehmen oder ablehnen:</p>\n<p style="text-align: center; margin: 30px 0;">\n  <a href="{{accept_url}}" class="button">Angebot annehmen</a>\n  &nbsp;\n  <a href="{{decline_url}}" style="display:inline-block;padding:10px 20px;color:#666;text-decoration:underline;">Ablehnen</a>\n</p>\n<p>Oder öffnen Sie das vollständige Angebot im Browser:<br>\n<span style="word-break: break-all; font-size: 13px;">{{response_url}}</span></p>\n{{#if valid_until}}<p style="font-size: 13px; color: #666;">Dieses Angebot ist gültig bis {{valid_until}}.</p>{{/if}}',
+      'body_text': 'Angebot {{quote_number}}\n\nSehr geehrte/r {{customer_name}},\n\nim Anhang finden Sie das Angebot {{quote_number}}. Gesamtbetrag: {{total_amount}}.\n\nAnsehen: {{response_url}}\nAnnehmen: {{accept_url}}\nAblehnen: {{decline_url}}\n\n{{#if valid_until}}Gültig bis {{valid_until}}.{{/if}}'
+    }
+  },
+  'quote_accepted_admin': {
+    'en': {
+      'subject': 'Quote {{quote_number}} accepted by {{customer_email}}',
+      'body_html': '<h2>Quote accepted</h2><p>{{customer_email}} just accepted quote <strong>{{quote_number}}</strong>{{#if event_name}} for "{{event_name}}"{{/if}}. Total: {{total_amount}}.</p>\n<p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Open in admin</a></p>',
+      'body_text': 'Quote {{quote_number}} accepted by {{customer_email}}. Open: {{admin_dashboard_url}}'
+    },
+    'de': {
+      'subject': 'Angebot {{quote_number}} von {{customer_email}} angenommen',
+      'body_html': '<h2>Angebot angenommen</h2><p>{{customer_email}} hat soeben das Angebot <strong>{{quote_number}}</strong>{{#if event_name}} für "{{event_name}}"{{/if}} angenommen. Gesamtbetrag: {{total_amount}}.</p>\n<p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Im Admin-Bereich öffnen</a></p>',
+      'body_text': 'Angebot {{quote_number}} von {{customer_email}} angenommen. Öffnen: {{admin_dashboard_url}}'
+    }
+  }
+};
+
+async function upgradeUneditedTemplates(db, cols, hasTranslationsTable, logger) {
+  for (const [templateKey, previous] of Object.entries(PREVIOUS_DEFAULTS)) {
+    const def = CRM_EMAIL_TEMPLATES[templateKey];
+    const row = await db('email_templates').where({ template_key: templateKey }).first();
+    if (!row) continue;
+    let upgraded = false;
+    if (hasTranslationsTable) {
+      for (const lang of ['en', 'de']) {
+        const old = previous[lang];
+        const next = def[lang];
+        if (!old || !next) continue;
+        const updated = await db('email_template_translations')
+          .where({ template_id: row.id, language: lang, subject: old.subject, body_html: old.body_html, body_text: old.body_text })
+          .update({ subject: next.subject, body_html: next.body_html, body_text: next.body_text, updated_at: new Date() });
+        if (updated) upgraded = true;
+      }
+    }
+    const legacy = {};
+    for (const field of ['subject', 'body_html', 'body_text']) {
+      for (const colName of Object.keys(cols)) {
+        if ((colName === field || colName === `${field}_en`) && row[colName] === previous.en[field]) legacy[colName] = def.en[field];
+        if (colName === `${field}_de` && previous.de && row[colName] === previous.de[field]) legacy[colName] = def.de[field];
+      }
+    }
+    if (Object.keys(legacy).length) {
+      await db('email_templates').where({ id: row.id }).update(legacy);
+      upgraded = true;
+    }
+    if (upgraded) {
+      await db('email_templates').where({ id: row.id }).update({ variables: JSON.stringify(def.variables) });
+      if (logger) logger.info(`Updated the unedited default email template: ${templateKey}`);
+    }
+  }
+}
+
 async function ensureCrmEmailTemplatesSeeded(db, logger) {
   if (_seeded) return [];
   if (!(await db.schema.hasTable('email_templates'))) return [];
@@ -556,11 +824,18 @@ async function ensureCrmEmailTemplatesSeeded(db, logger) {
     }
   }
 
+  try {
+    await upgradeUneditedTemplates(db, cols, hasTranslationsTable, logger);
+  } catch (err) {
+    if (logger) logger.warn('Could not update the default email templates', { message: err.message });
+  }
+
   _seeded = true;
   return newlyInserted;
 }
 
 module.exports = {
   CRM_EMAIL_TEMPLATES,
+  PREVIOUS_DEFAULTS,
   ensureCrmEmailTemplatesSeeded,
 };

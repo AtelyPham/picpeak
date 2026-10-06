@@ -35,7 +35,9 @@ import {
   type CustomerInvitePrefill,
 } from '../../services/customerAdmin.service';
 import { businessProfileService } from '../../services/businessProfile.service';
-import { useQuery } from '@tanstack/react-query';
+import { usePermissions } from '../../contexts/PermissionsContext';
+import { GroupDot } from './CustomerGroupChips';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 interface Props {
   /**
@@ -111,6 +113,23 @@ export const InlineCustomerCreate: React.FC<Props> = ({ onCreated, onCancel, mod
   const { t } = useTranslation();
   const [form, setForm] = useState<FormState>(empty);
   const [busy, setBusy] = useState<'passive' | 'invite' | null>(null);
+  const queryClient = useQueryClient();
+
+  // Groups for the new customer (#1443). Only offered to an admin who may
+  // assign them — the server refuses the field otherwise — and only live
+  // groups: nothing new lands in an archived one.
+  const { hasPermission } = usePermissions();
+  const canAssignGroups = hasPermission('customers.groups.manage');
+  const [groupIds, setGroupIds] = useState<number[]>([]);
+  const { data: catalogue } = useQuery({
+    queryKey: ['admin-customer-groups'],
+    queryFn: () => customerAdminService.listGroups(true),
+    enabled: canAssignGroups,
+  });
+  const liveGroups = (catalogue || []).filter((group) => !group.isArchived);
+  // A ticked group archived or deleted while the form is open drops out of
+  // the list; sending its id anyway would refuse every save.
+  const assignableGroupIds = groupIds.filter((id) => liveGroups.some((group) => group.id === id));
 
   // Resolve a title + subtitle that matches the selected mode. The
   // 'both' branch keeps the legacy copy so inline (in-editor) callers
@@ -179,7 +198,9 @@ export const InlineCustomerCreate: React.FC<Props> = ({ onCreated, onCancel, mod
     }
     setBusy(mode);
     try {
-      const customer = await customerAdminService.createDirect(form.email, buildPrefill(form));
+      const customer = await customerAdminService.createDirect(form.email, buildPrefill(form), assignableGroupIds);
+      // Always: member counts move with groups, the Ungrouped count without.
+      queryClient.invalidateQueries({ queryKey: ['admin-customer-groups'] });
       if (mode === 'invite') {
         // Customer is now saved as passive. Fire the second call to
         // promote them. If THIS fails, keep the customer selected
@@ -242,17 +263,17 @@ export const InlineCustomerCreate: React.FC<Props> = ({ onCreated, onCancel, mod
     <div className="space-y-3">
       <div className="flex items-start gap-3 mb-2">
         <div>
-          <h4 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+          <h4 className="text-sm font-semibold text-heading">
             {heading.title}
           </h4>
-          <p className="text-xs text-neutral-600 dark:text-neutral-400 mt-0.5">
+          <p className="text-xs text-soft mt-0.5">
             {heading.subtitle}
           </p>
         </div>
         <button
           type="button"
           onClick={onCancel}
-          className="ml-auto p-1 rounded text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100"
+          className="ml-auto p-1 rounded text-neutral-500 hover:text-heading"
           aria-label={t('common.cancel', 'Cancel') as string}
         >
           <X className="w-4 h-4" />
@@ -274,7 +295,7 @@ export const InlineCustomerCreate: React.FC<Props> = ({ onCreated, onCancel, mod
           onChange={setField('companyName')}
         />
         <div>
-          <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+          <label className="block text-sm font-medium text-body mb-1">
             {t('customers.detail.salutation', 'Salutation')}
           </label>
           {/* Salutation values are stored verbatim ("Herr", "Frau",
@@ -285,7 +306,7 @@ export const InlineCustomerCreate: React.FC<Props> = ({ onCreated, onCancel, mod
           <select
             value={form.salutation}
             onChange={setField('salutation')}
-            className="w-full rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-3 py-2 text-sm text-neutral-900 dark:text-neutral-100"
+            className="w-full rounded-md border border-line-strong bg-panel px-3 py-2 text-sm text-heading"
           >
             <option value="">{t('customer.profile.salutation.none', '— Not specified —')}</option>
             <option value="Herr">{t('customer.profile.salutation.herr', 'Mr.')}</option>
@@ -354,13 +375,13 @@ export const InlineCustomerCreate: React.FC<Props> = ({ onCreated, onCancel, mod
           onChange={(code) => setForm((prev) => ({ ...prev, countryCode: code }))}
         />
         <div className="md:col-span-2">
-          <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+          <label className="block text-sm font-medium text-body mb-1">
             {t('customers.detail.preferredLanguage', 'Preferred language')}
           </label>
           <select
             value={form.preferredLanguage || ''}
             onChange={setField('preferredLanguage')}
-            className="w-full rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-3 py-2 text-sm text-neutral-900 dark:text-neutral-100"
+            className="w-full rounded-md border border-line-strong bg-panel px-3 py-2 text-sm text-heading"
           >
             <option value="en">English</option>
             <option value="de">Deutsch</option>
@@ -372,7 +393,34 @@ export const InlineCustomerCreate: React.FC<Props> = ({ onCreated, onCancel, mod
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-neutral-200 dark:border-neutral-700">
+      {canAssignGroups && liveGroups.length > 0 && (
+        <fieldset>
+          <legend className="block text-sm font-medium text-body mb-1">
+            {t('customers.detail.groupsSection', 'Groups')}
+          </legend>
+          <ul className="flex flex-wrap gap-x-4 gap-y-2">
+            {liveGroups.map((group) => (
+              <li key={group.id}>
+                <label className="flex items-center gap-2 text-sm text-body">
+                  <input
+                    type="checkbox"
+                    checked={groupIds.includes(group.id)}
+                    onChange={(e) => setGroupIds((current) => (
+                      e.target.checked
+                        ? [...current, group.id]
+                        : current.filter((id) => id !== group.id)
+                    ))}
+                  />
+                  <GroupDot color={group.color} className="h-2.5 w-2.5" />
+                  <span>{group.name}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </fieldset>
+      )}
+
+      <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-line">
         <Button variant="outline" onClick={onCancel} disabled={busy !== null}>
           {t('common.cancel', 'Cancel')}
         </Button>

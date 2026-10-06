@@ -13,9 +13,10 @@
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { db, logActivity } = require('../database/db');
-const { formatBoolean } = require('../utils/dbCompat');
+const { formatBoolean, whereTimestamp } = require('../utils/dbCompat');
 const { getBcryptRounds } = require('../utils/passwordValidation');
 const { queueEmail } = require('./emailProcessor');
+const { auditedInsert, auditedUpdate, redactCustomerHistory } = require('./accountingHistory');
 const { getFrontendBaseUrl } = require('../utils/frontendUrl');
 const logger = require('../utils/logger');
 const { ConflictError, NotFoundError, ValidationError } = require('../utils/errors');
@@ -219,10 +220,15 @@ async function createInvitation({ email, invitedById, prefill }) {
  * Race-guarded against duplicate emails the same way createInvitation
  * is — a real duplicate throws ConflictError.
  *
- * @param {{ email, prefill, createdByAdminId }} args
+ * `withinTransaction(trx, id)` runs in the transaction that inserts the
+ * customer, so a caller can attach more to the new row atomically — if it
+ * throws, the customer is not created either. It must use `trx` only: on
+ * SQLite the global connection is held by the transaction.
+ *
+ * @param {{ email, prefill, createdByAdminId, withinTransaction? }} args
  * @returns {Promise<{ id }>} The new customer's id.
  */
-async function createDirect({ email, prefill, createdByAdminId }) {
+async function createDirect({ email, prefill, createdByAdminId, withinTransaction = null }) {
   const normalisedEmail = String(email || '').trim().toLowerCase();
   if (!normalisedEmail) throw new ValidationError('Email is required');
 
@@ -246,32 +252,36 @@ async function createDirect({ email, prefill, createdByAdminId }) {
   const sanitised = sanitisePrefill(prefill) || {};
   const preferredLanguage = sanitised.preferred_language || defaultPreferredLanguage;
 
-  const [inserted] = await db('customer_accounts').insert({
-    email: normalisedEmail,
-    salutation: sanitised.salutation || null,
-    first_name: sanitised.first_name || null,
-    last_name: sanitised.last_name || null,
-    display_name: sanitised.display_name || null,
-    phone: sanitised.phone || null,
-    company_name: sanitised.company_name || null,
-    vat_id: sanitised.vat_id || null,
-    address_line1: sanitised.address_line1 || null,
-    address_line2: sanitised.address_line2 || null,
-    postal_code: sanitised.postal_code || null,
-    city: sanitised.city || null,
-    state: sanitised.state || null,
-    country_code: sanitised.country_code || null,
-    country_name: sanitised.country_name || null,
-    preferred_language: preferredLanguage,
-    password_hash: null,
-    is_active: formatBoolean(true),
-    must_change_password: formatBoolean(false),
-    password_changed_at: null,
-    created_by_admin_id: createdByAdminId || null,
-    created_at: new Date(),
-    updated_at: new Date(),
-  }).returning('id');
-  const id = inserted?.id || inserted;
+  let id;
+  await db.transaction(async (trx) => {
+    const [inserted] = await auditedInsert(trx, 'customer_accounts', {
+      email: normalisedEmail,
+      salutation: sanitised.salutation || null,
+      first_name: sanitised.first_name || null,
+      last_name: sanitised.last_name || null,
+      display_name: sanitised.display_name || null,
+      phone: sanitised.phone || null,
+      company_name: sanitised.company_name || null,
+      vat_id: sanitised.vat_id || null,
+      address_line1: sanitised.address_line1 || null,
+      address_line2: sanitised.address_line2 || null,
+      postal_code: sanitised.postal_code || null,
+      city: sanitised.city || null,
+      state: sanitised.state || null,
+      country_code: sanitised.country_code || null,
+      country_name: sanitised.country_name || null,
+      preferred_language: preferredLanguage,
+      password_hash: null,
+      is_active: formatBoolean(true),
+      must_change_password: formatBoolean(false),
+      password_changed_at: null,
+      created_by_admin_id: createdByAdminId || null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }, { actor: createdByAdminId || null, source: 'customer.create' });
+    id = inserted?.id || inserted;
+    if (withinTransaction) await withinTransaction(trx, id);
+  });
 
   await logActivity('customer_created_passive',
     { customerId: id, email: normalisedEmail },
@@ -353,6 +363,20 @@ async function acceptInvitation({ token, name, password, profile }) {
   const preferredLanguage = merged.preferred_language || defaultPreferredLanguage;
 
   const customerId = await db.transaction(async (trx) => {
+    // Claim the invitation first. Two submissions of the same link both
+    // pass the read above before either commits; only the one whose
+    // conditional update affects the row may go on to set credentials.
+    // A concurrent cancellation (which deletes the row) also lands here
+    // as zero rows.
+    const claimed = await trx('customer_invitations')
+      .where('id', invitation.id)
+      .whereNull('accepted_at')
+      .where('expires_at', '>', new Date())
+      .update({ accepted_at: new Date().toISOString() });
+    if (claimed !== 1) {
+      throw new ValidationError('Invalid or expired invitation');
+    }
+
     let id;
     if (promoting) {
       // Promotion path: passive customer being claimed by the
@@ -390,9 +414,16 @@ async function acceptInvitation({ token, name, password, profile }) {
       overwriteIfSet('state');
       overwriteIfSet('country_code');
       if (merged.preferred_language) updates.preferred_language = merged.preferred_language;
-      await trx('customer_accounts').where('id', id).update(updates);
+      // Still passive: a concurrent acceptance or an admin-set password
+      // since the read above must not be overwritten.
+      const promoted = await auditedUpdate(trx, 'customer_accounts', { id, password_hash: null }, updates, {
+        actor: { type: 'customer', id }, source: 'customer.invitation.accept',
+      });
+      if (promoted !== 1) {
+        throw new ConflictError('Email already registered', 'email');
+      }
     } else {
-      const [inserted] = await trx('customer_accounts').insert({
+      const [inserted] = await auditedInsert(trx, 'customer_accounts', {
         email: invitation.email,
         // Profile fields land directly on the customer row. Anything the user
         // didn't set stays null.
@@ -431,13 +462,13 @@ async function acceptInvitation({ token, name, password, profile }) {
         created_by_admin_id: invitation.invited_by,
         created_at: new Date(),
         updated_at: new Date(),
-      }).returning('id');
+      }, { actor: 'customer-invitation', source: 'customer.invitation.accept' });
       id = inserted?.id || inserted;
     }
 
     await trx('customer_invitations')
       .where('id', invitation.id)
-      .update({ accepted_at: new Date(), accepted_customer_id: id });
+      .update({ accepted_customer_id: id });
 
     return id;
   });
@@ -482,7 +513,9 @@ async function validateInvitationToken(token) {
  * many events each customer has access to, so the admin can spot orphaned
  * accounts at a glance.
  */
-async function listCustomers({ search } = {}) {
+async function listCustomers({
+  search, groupIds, groupMatch = 'any', ungrouped = false, status = 'all',
+} = {}) {
   let q = db('customer_accounts')
     .leftJoin('event_customer_assignments', 'event_customer_assignments.customer_account_id', 'customer_accounts.id')
     .groupBy('customer_accounts.id')
@@ -511,7 +544,9 @@ async function listCustomers({ search } = {}) {
       'customer_accounts.feature_bills',
       'customer_accounts.feature_hours_logging',
       'customer_accounts.feature_contracts',
+      'customer_accounts.feature_documents',
       'customer_accounts.hourly_rate_minor',
+      'customer_accounts.day_rate_minor',
       'customer_accounts.last_login',
       'customer_accounts.created_at',
       db.raw('COUNT(event_customer_assignments.id) as event_count')
@@ -526,6 +561,42 @@ async function listCustomers({ search } = {}) {
         .orWhereRaw('LOWER(COALESCE(customer_accounts.last_name, \'\')) LIKE ?', [term])
         .orWhereRaw('LOWER(COALESCE(customer_accounts.company_name, \'\')) LIKE ?', [term]);
     });
+  }
+
+  if (status === 'active' || status === 'inactive') {
+    q = q.where('customer_accounts.is_active', formatBoolean(status === 'active'));
+  }
+
+  // Group filter (#1443). Subqueries rather than joins, so the event COUNT
+  // above stays the number of events and not the number of (event × group)
+  // pairs.
+  //  - `ungrouped`: customers with no membership at all. It wins over
+  //    `groupIds` when both are sent, so a stale bookmark shows a list rather
+  //    than an error.
+  //  - `groupMatch: 'any'` (default): in at least one of the selected groups.
+  //  - `groupMatch: 'all'`: in every one of them.
+  // Archived groups are deliberately NOT excluded here: this is a view, and
+  // an archived group still describes who was in it. Actions exclude them
+  // instead (newsletter recipients, workflow group conditions); the
+  // Customers page simply doesn't offer archived groups as a filter.
+  const groups = (Array.isArray(groupIds) ? groupIds : [])
+    .map((id) => Number(id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (ungrouped) {
+    q = q.whereNotExists(db('customer_group_members')
+      .whereRaw('customer_group_members.customer_account_id = customer_accounts.id')
+      .select(db.raw('1')));
+  } else if (groups.length > 0 && groupMatch === 'all') {
+    const distinct = [...new Set(groups)];
+    q = q.whereIn('customer_accounts.id', db('customer_group_members')
+      .whereIn('group_id', distinct)
+      .groupBy('customer_account_id')
+      .havingRaw('COUNT(DISTINCT group_id) = ?', [distinct.length])
+      .select('customer_account_id'));
+  } else if (groups.length > 0) {
+    q = q.whereIn('customer_accounts.id', db('customer_group_members')
+      .whereIn('group_id', groups)
+      .select('customer_account_id'));
   }
 
   return q;
@@ -585,6 +656,8 @@ async function updateCustomer(id, updates, updatedByAdminId) {
     // Per-customer contracts override (migration 131). Defaults TRUE so
     // existing customers keep their Contracts tab.
     'feature_contracts',
+    // Per-customer documents override (migration 225). Defaults TRUE.
+    'feature_documents',
     // CRM billing cadence (migration 102). 'per_event' (default) keeps
     // each invoice firing on its own schedule; monthly/quarterly snap
     // every scheduled invoice to billing_cycle_day of the next period.
@@ -592,6 +665,9 @@ async function updateCustomer(id, updates, updatedByAdminId) {
     // Hour-logging default rate (migration 129). Minor units; null
     // means admin must enter a per-entry override on every entry.
     'hourly_rate_minor',
+    // Default day rate for per-day quote lines (migration 220). Minor
+    // units; null falls back to the business default.
+    'day_rate_minor',
     // Per-customer Skonto opt-out (migration 112). Boolean, coerced
     // via formatBoolean below for SQLite compatibility.
     'skonto_disabled',
@@ -617,6 +693,7 @@ async function updateCustomer(id, updates, updatedByAdminId) {
         f === 'feature_calendar' || f === 'feature_quotes'
         || f === 'feature_bills' || f === 'feature_hours_logging'
         || f === 'feature_contracts'
+        || f === 'feature_documents'
         || f === 'skonto_disabled'
       ) {
         allowed[f] = formatBoolean(updates[f]);
@@ -647,6 +724,14 @@ async function updateCustomer(id, updates, updatedByAdminId) {
         // Default hourly rate. Null clears it (forces per-entry
         // overrides); otherwise coerce to a non-negative bigint-safe
         // integer. Anything funky → null.
+        if (updates[f] === null || updates[f] === '') {
+          allowed[f] = null;
+        } else {
+          const v = parseInt(updates[f], 10);
+          allowed[f] = Number.isFinite(v) && v >= 0 ? v : null;
+        }
+      } else if (f === 'day_rate_minor') {
+        // Default day rate — same rules as the hourly one above.
         if (updates[f] === null || updates[f] === '') {
           allowed[f] = null;
         } else {
@@ -698,7 +783,9 @@ async function updateCustomer(id, updates, updatedByAdminId) {
   }
 
   allowed.updated_at = new Date();
-  await db('customer_accounts').where('id', id).update(allowed);
+  await auditedUpdate(db, 'customer_accounts', { id }, allowed, {
+    actor: updatedByAdminId || null, source: 'customer.update',
+  });
 
   await logActivity('customer_updated',
     { customerId: id, fields: Object.keys(allowed) },
@@ -731,13 +818,13 @@ async function deactivateCustomer(id, deactivatedByAdminId) {
     throw new NotFoundError('Customer', id);
   }
 
-  await db('customer_accounts').where('id', id).update({
+  await auditedUpdate(db, 'customer_accounts', { id }, {
     is_active: formatBoolean(false),
     // Bumping password_changed_at invalidates any outstanding tokens
     // immediately — same trick adminAuth uses.
     password_changed_at: new Date(),
     updated_at: new Date(),
-  });
+  }, { actor: deactivatedByAdminId || null, source: 'customer.deactivate' });
 
   await logActivity('customer_deactivated',
     { customerId: id, email: customer.email },
@@ -763,12 +850,12 @@ async function reactivateCustomer(id, reactivatedByAdminId) {
     return; // already active, no-op
   }
 
-  await db('customer_accounts').where('id', id).update({
+  await auditedUpdate(db, 'customer_accounts', { id }, {
     is_active: formatBoolean(true),
     // Don't touch password_changed_at — the customer's password (if set)
     // remains valid. They log in with their existing credential.
     updated_at: new Date(),
-  });
+  }, { actor: reactivatedByAdminId || null, source: 'customer.reactivate' });
 
   await logActivity('customer_reactivated',
     { customerId: id, email: customer.email },
@@ -801,15 +888,67 @@ async function reactivateCustomer(id, reactivatedByAdminId) {
  *   - Set `is_active=false` and bump `password_changed_at` so any
  *     outstanding tokens die immediately.
  *   - Delete pending invitations + reset tokens for this customer.
+ *   - Redact every contract nobody signed (cancelling a draft or sent one),
+ *     and revoke every live signing link and session on the signed ones
+ *     (contract/erasure.js).
+ *   - Cancel every `email_queue` row still pending for this customer's
+ *     address (so nothing queued before the erasure goes out after it), and
+ *     redact the variables + recipient on every row for this address that
+ *     isn't already gone — sent, failed or just-cancelled — so the archive
+ *     and any backup stop carrying their data (#1593). Matched on the
+ *     address as stored *before* this function rewrites it to the sentinel
+ *     below, case-insensitively (an address stored with different casing
+ *     than the account is still the same mailbox). Contract mail queued to
+ *     a signer's own address (not the account email) is covered only for
+ *     the unsigned contracts this erasure redacts, and only rows whose
+ *     email_data names one of those contracts — see
+ *     contractSignerQueueTargets below.
  *
  * What we keep:
  *   - The customer_accounts row itself (anonymized).
  *   - Their event_customer_assignments rows (with a now-anonymized FK).
  *   - All activity_logs / access_logs (audit trail).
+ *   - Contracts that carry a signature, whole — they are the record of a
+ *     concluded agreement (contract/erasure.js states the rule).
  *
  * Wrapped in a transaction so a partial failure doesn't leave half-erased
  * state.
  */
+/**
+ * Who a redacted contract's invitations went to (issue 1593): for every
+ * unsigned contract the erasure plan redacts, its contract_number and the
+ * plaintext addresses of its signers. Read on the global connection BEFORE
+ * the erasure transaction, because contract/erasure.js clears the signers'
+ * email_enc inside it.
+ *
+ * Matching queued mail on a signer address alone would be wrong — the same
+ * person can sign for another customer too. So the queue match pairs the
+ * address with a contract: a row only counts when its email_data carries
+ * the contract_number (unique, migration 107) of a contract this erasure
+ * redacts AND it is addressed to one of that contract's own signers. Every
+ * contract mail queued to a signer carries contract_number (contract_sent,
+ * contract_fully_signed); the signing code is sent directly, never queued.
+ * Signed contracts are kept whole by the erasure, and so is the mail
+ * around them.
+ */
+async function contractSignerQueueTargets(contractPlan) {
+  if (!contractPlan || !contractPlan.hasSigners || !contractPlan.redact.length) return null;
+  const fieldEncryption = require('../utils/fieldEncryption');
+  const ids = contractPlan.redact.map((entry) => entry.id);
+  const contracts = await db('contracts').whereIn('id', ids).select('id', 'contract_number');
+  const signerRows = await db('contract_signers').whereIn('contract_id', ids).whereNotNull('email_enc')
+    .select('contract_id', 'email_enc');
+  const byContract = new Map();
+  for (const contract of contracts) {
+    const emails = new Set(signerRows
+      .filter((row) => Number(row.contract_id) === Number(contract.id))
+      .map((row) => String(fieldEncryption.tryDecrypt(row.email_enc) || '').trim().toLowerCase())
+      .filter(Boolean));
+    if (emails.size) byContract.set(Number(contract.id), { contractNumber: String(contract.contract_number), emails });
+  }
+  return byContract.size ? byContract : null;
+}
+
 async function eraseCustomer(id, erasedByAdminId) {
   const customer = await db('customer_accounts').where('id', id).first();
   if (!customer) {
@@ -822,8 +961,109 @@ async function eraseCustomer(id, erasedByAdminId) {
   // collide on the unique index.
   const sentinelEmail = `deleted-${id}-${crypto.randomBytes(4).toString('hex')}@deleted.invalid`;
 
+  // Portal documents (#1444): anything not linked to a contract is deleted
+  // with the account; its bytes are removed once the transaction commits.
+  // Contract-linked documents stay as part of the contractual record.
+  const customerDocumentsService = require('./customerDocumentsService');
+  let erasedDocuments = [];
+
+  // Contracts (#1446): unsigned ones are redacted (and cancelled when still
+  // draft or sent), signed ones are kept whole and lose only their live
+  // access. The rule and the reasons are in services/contract/erasure.js. Planned on the global connection
+  // first — it reads the schema, which must not happen inside the
+  // transaction below.
+  const contractErasure = require('./contract/erasure');
+  const contractPlan = await contractErasure.plan(db, id);
+  const eraseActor = erasedByAdminId
+    ? { type: 'admin', id: erasedByAdminId, name: `Admin #${erasedByAdminId}` }
+    : { type: 'system' };
+  let erasedContracts = { cancelled: [], redacted: [], retained: [] };
+  const signerQueueTargets = await contractSignerQueueTargets(contractPlan);
+  // Campaigns touched by the email_queue cancellation below (#1593 bug 3) —
+  // their email_campaign_recipients rows and counters are recomputed once
+  // this transaction commits (recomputeCounts reads through the shared
+  // `db` connection, not `trx`, so calling it in here would read stale —
+  // or on SQLite, deadlock on — the not-yet-committed rows).
+  const touchedCampaignIds = new Set();
+
   await db.transaction(async (trx) => {
-    await trx('customer_accounts').where('id', id).update({
+    erasedDocuments = await customerDocumentsService.markErasedForCustomer(id, trx);
+    erasedContracts = await contractErasure.apply(trx, contractPlan, eraseActor);
+
+    // email_queue (#1593): cancel what hasn't gone out yet, then redact the
+    // variables + recipient on every row for this address that isn't
+    // already gone (sent, failed, or the row just cancelled above) — done
+    // ahead of the customer_accounts update below so the match is still
+    // against the real address, not the sentinel.
+    const forCustomer = (q) => q.whereRaw('LOWER(recipient_email) = LOWER(?)', [customer.email]);
+
+    // Contract mail queued to a signer's own address, attributed to one of
+    // the contracts this erasure just redacted (contractSignerQueueTargets).
+    let signerQueueIds = [];
+    if (signerQueueTargets) {
+      const erasedIds = new Set([...erasedContracts.cancelled, ...erasedContracts.redacted].map(Number));
+      const targets = [...signerQueueTargets.entries()]
+        .filter(([contractId]) => erasedIds.has(contractId))
+        .map(([, target]) => target);
+      const emails = [...new Set(targets.flatMap((target) => [...target.emails]))];
+      if (emails.length > 0) {
+        const candidates = await trx('email_queue')
+          .whereRaw(`LOWER(recipient_email) IN (${emails.map(() => 'LOWER(?)').join(', ')})`, emails)
+          .whereIn('status', ['pending', 'sent', 'failed', 'cancelled'])
+          .select('id', 'recipient_email', 'email_data');
+        signerQueueIds = candidates.filter((row) => {
+          let data;
+          try {
+            data = typeof row.email_data === 'string' ? JSON.parse(row.email_data) : row.email_data;
+          } catch (_) {
+            return false;
+          }
+          if (!data || data.contract_number === undefined || data.contract_number === null) return false;
+          const to = String(row.recipient_email || '').toLowerCase();
+          return targets.some((target) => target.contractNumber === String(data.contract_number)
+            && target.emails.has(to));
+        }).map((row) => row.id);
+      }
+    }
+    const matchQueue = (q) => (signerQueueIds.length > 0
+      ? q.where((w) => forCustomer(w).orWhereIn('id', signerQueueIds))
+      : forCustomer(q));
+
+    const cancelledQueueRows = await matchQueue(trx('email_queue')).where('status', 'pending')
+      .select('id', 'campaign_id');
+    if (cancelledQueueRows.length > 0) {
+      await trx('email_queue')
+        .whereIn('id', cancelledQueueRows.map((row) => row.id))
+        .update({ status: 'cancelled' });
+    }
+    await matchQueue(trx('email_queue'))
+      .whereIn('status', ['sent', 'failed', 'cancelled'])
+      .update({
+        recipient_email: sentinelEmail,
+        email_data: JSON.stringify({ redacted: true, reason: 'customer_erased' }),
+        // Migration 119: the exact HTML sent (customer name, document
+        // titles, review notes baked in) for the Project Overview preview.
+        // Left untouched, sent rows kept full customer PII here forever —
+        // in the DB and in every backup — defeating the erasure.
+        rendered_html: null,
+      });
+
+    // Newsletter campaign bookkeeping (#1593 bug 3): a cancelled row that
+    // belongs to a campaign must flip its email_campaign_recipients row
+    // too, or that recipient stays 'queued' forever and
+    // newsletterService.recomputeCounts's stillQueued check keeps the
+    // whole campaign stuck at 'queued'/'sending' even once every other
+    // recipient resolved.
+    for (const row of cancelledQueueRows) {
+      if (!row.campaign_id) continue;
+      await trx('email_campaign_recipients')
+        .where({ campaign_id: row.campaign_id, email_queue_id: row.id })
+        .where('status', 'queued')
+        .update({ status: 'cancelled' });
+      touchedCampaignIds.add(row.campaign_id);
+    }
+
+    await auditedUpdate(trx, 'customer_accounts', { id }, {
       email: sentinelEmail,
       salutation: null,
       first_name: null,
@@ -845,7 +1085,9 @@ async function eraseCustomer(id, erasedByAdminId) {
       must_change_password: formatBoolean(false),
       password_changed_at: new Date(),
       updated_at: new Date(),
-    });
+    }, { actor: erasedByAdminId || null, source: 'customer.erase' });
+    // After the erasure's own entry, which still holds the erased values.
+    await redactCustomerHistory(trx, id);
 
     // Drop pending invitations the customer hasn't accepted yet AND any
     // that ARE pointed at this customer (accepted_customer_id) — keep the
@@ -862,26 +1104,55 @@ async function eraseCustomer(id, erasedByAdminId) {
     // Active reset tokens for this customer should be invalidated.
     await trx('customer_password_resets').where('customer_account_id', id).del();
 
+    // Group memberships (#1443) say something about the person, a group name
+    // can be one, and an anonymised row that still counted as a member would
+    // keep its groups undeletable.
+    await trx('customer_group_members').where('customer_account_id', id).del();
+
     // Pending re-bills (incoming invoices, migration 132) attached to this
     // customer would otherwise stay billable to the now-anonymized account —
     // return the not-yet-billed ones to the inbox for re-triage so they're not
     // silently lost or billed to a ghost (PR #636 review #2). Guarded for
     // schema drift on installs that predate migration 132.
     if (await trx.schema.hasColumn('inbound_documents', 'customer_account_id')) {
-      await trx('inbound_documents')
-        .where({ customer_account_id: id })
-        .whereNull('billed_invoice_id')
-        .update({ customer_account_id: null, disposition: null, status: 'unsorted', updated_at: new Date() });
+      await auditedUpdate(trx, 'inbound_documents',
+        (q) => q.where({ customer_account_id: id }).whereNull('billed_invoice_id'),
+        { customer_account_id: null, disposition: null, status: 'unsorted', updated_at: new Date() },
+        { actor: erasedByAdminId || null, source: 'customer.erase' });
     }
   });
 
+  // Campaign counters (#1593 bug 3), recomputed now that the cancellations
+  // above have committed — recomputeCounts reads the recipient rows fresh
+  // through the shared `db` connection.
+  if (touchedCampaignIds.size > 0) {
+    const newsletterService = require('./newsletterService');
+    for (const campaignId of touchedCampaignIds) {
+      await newsletterService.recomputeCounts(campaignId);
+    }
+  }
+
+  await customerDocumentsService.purgeFiles(erasedDocuments);
+
   await logActivity('customer_erased',
-    { customerId: id, originalEmail: customer.email },
+    {
+      customerId: id,
+      originalEmail: customer.email,
+      cancelledContracts: erasedContracts.cancelled,
+      redactedContracts: erasedContracts.redacted,
+      retainedContracts: erasedContracts.retained,
+    },
     null,
     { type: 'admin', id: erasedByAdminId, name: 'system' }
   );
 
-  logger.info('Customer erased (anonymized in place)', { customerId: id, erasedByAdminId });
+  logger.info('Customer erased (anonymized in place)', {
+    customerId: id,
+    erasedByAdminId,
+    cancelledContracts: erasedContracts.cancelled.length,
+    redactedContracts: erasedContracts.redacted.length,
+    retainedContracts: erasedContracts.retained.length,
+  });
 }
 
 /**
@@ -1091,13 +1362,14 @@ async function notifyCustomerOfNewAssignments(customerId, addedEventIds) {
   // Archived events are hard-skipped; expired ones (expires_at in the
   // past) would render as "Expired DD MMM" in the dashboard and lead
   // to a confusing "I clicked the link in the email and got a 410"
-  // experience — drop those too.
+  // experience — drop those too. whereTimestamp: a plain `> Date` let every
+  // text-dated row through on SQLite (issue 1733).
   const now = new Date();
   const events = await db('events')
     .whereIn('id', addedEventIds)
     .where('is_archived', formatBoolean(false))
     .andWhere(function() {
-      this.whereNull('expires_at').orWhere('expires_at', '>', now);
+      this.whereNull('expires_at').orWhere((q) => q.modify(whereTimestamp, 'expires_at', '>', now));
     })
     .orderBy('event_date', 'desc')
     .select('id', 'slug', 'event_name', 'event_date');
@@ -1206,6 +1478,8 @@ async function listEventsForCustomer(customerId) {
       'events.event_date',
       'events.expires_at',
       'events.is_active',
+      // Needed to tell an unpublished draft from an open gallery (#1444).
+      'events.is_draft',
       'event_customer_assignments.assigned_at'
     )
     .orderBy('events.event_date', 'desc');
@@ -1246,7 +1520,13 @@ async function cancelInvitation(id, cancelledByAdminId) {
   if (!invitation) {
     throw new NotFoundError('Invitation', id);
   }
-  await db('customer_invitations').where('id', id).del();
+  // Complement of the claim in acceptInvitation: only a still-pending
+  // invitation can be cancelled. An acceptance that committed in between
+  // keeps its record instead of being deleted underneath the new account.
+  const cancelled = await db('customer_invitations').where('id', id).whereNull('accepted_at').del();
+  if (cancelled !== 1) {
+    throw new ConflictError('Invitation has already been accepted');
+  }
 
   await logActivity('customer_invitation_cancelled',
     { invitationId: id, email: invitation.email },
@@ -1350,7 +1630,7 @@ async function getEffectiveFeaturesForCustomer(customerOrId) {
     ? await db('customer_accounts').where('id', customerOrId).first()
     : customerOrId;
   if (!customer) {
-    return { calendar: false, quotes: false, bills: false, hoursLogging: false, contracts: false };
+    return { calendar: false, quotes: false, bills: false, hoursLogging: false, contracts: false, documents: false };
   }
   const globals = await getCustomerSurfaceGlobals();
   // SQLite returns booleans as 0/1; Postgres returns true/false. The
@@ -1370,12 +1650,18 @@ async function getEffectiveFeaturesForCustomer(customerOrId) {
   // keep their Contracts tab; an admin can hide it per customer.
   const contractsMaster = await db('feature_flags').where({ key: 'contracts' }).first();
   const contractsEnabled = contractsMaster ? Boolean(contractsMaster.value) : false;
+  // Documents (migration 225): global `documents` flag AND the per-customer
+  // override, which defaults TRUE like feature_contracts. A missing flag row
+  // reads as off.
+  const documentsMaster = await db('feature_flags').where({ key: 'documents' }).first();
+  const documentsEnabled = documentsMaster ? truthy(documentsMaster.value) : false;
   return {
     calendar: globals.calendarEnabled && truthy(customer.feature_calendar),
     quotes:   globals.quotesEnabled   && truthy(customer.feature_quotes),
     bills:    globals.billsEnabled    && truthy(customer.feature_bills),
     hoursLogging: hoursLoggingMaster && truthy(customer.feature_hours_logging),
     contracts: contractsEnabled && truthy(customer.feature_contracts),
+    documents: documentsEnabled && truthy(customer.feature_documents),
   };
 }
 
@@ -1484,13 +1770,27 @@ async function applyPasswordReset({ token, password }) {
 
   const passwordHash = await bcrypt.hash(password, getBcryptRounds());
   await db.transaction(async (trx) => {
-    await trx('customer_accounts').where('id', customer.id).update({
+    // Claim the token first. Two submissions of the same link both pass the
+    // read above before either commits; only the one whose conditional
+    // update affects the row may change the password, so the later
+    // submission cannot overwrite the password the first one set.
+    const claimed = await trx('customer_password_resets')
+      .where('id', row.id)
+      .whereNull('used_at')
+      .where('expires_at', '>', new Date())
+      .update({ used_at: new Date().toISOString() });
+    if (claimed !== 1) {
+      throw new ValidationError('Invalid or expired reset link');
+    }
+    const updated = await auditedUpdate(trx, 'customer_accounts', { id: customer.id, is_active: formatBoolean(true) }, {
       password_hash: passwordHash,
       password_changed_at: new Date(),
       must_change_password: formatBoolean(false),
       updated_at: new Date(),
-    });
-    await trx('customer_password_resets').where('id', row.id).update({ used_at: new Date() });
+    }, { actor: { type: 'customer', id: customer.id }, source: 'customer.password_reset' });
+    if (updated !== 1) {
+      throw new ValidationError('Invalid or expired reset link');
+    }
   });
 
   await logActivity('customer_password_reset_applied',

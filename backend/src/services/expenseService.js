@@ -16,11 +16,13 @@
  */
 const crypto = require('crypto');
 const fsp = require('fs').promises;
-const { PDFDocument } = require('pdf-lib');
 const { db, logActivity } = require('../database/db');
 const { AppError } = require('../utils/errors');
 const logger = require('../utils/logger');
+const { toStoredPath } = require('../utils/storedPath');
+const { validatePdf } = require('../utils/pdfValidation');
 const invoiceService = require('./invoiceService');
+const { auditedInsert, auditedUpdate, auditedDelete } = require('./accountingHistory');
 // Tri-state proof-attach resolver — single source of truth lives with the
 // send-time attachment logic (no require cycle: rebillProofs never imports us).
 const { resolveDefaultAttach } = require('./invoice/rebillProofs');
@@ -33,6 +35,9 @@ const { resolveDefaultAttach } = require('./invoice/rebillProofs');
  * null restores logActivity's 'system' attribution for those.
  */
 const adminActor = (adminId) => (adminId ? { type: 'admin', id: adminId } : null);
+
+// Actor for the accounting change history: the admin, or null (system).
+const historyActor = (adminId) => adminId || null;
 
 const DISPOSITIONS = ['rebill', 'durchlaufend', 'eigener_aufwand', 'duplikat', 'abgelehnt'];
 const TAX_TREATMENTS = ['domestic', 'reverse_charge_service', 'foreign_vat_non_reclaimable', 'import_goods'];
@@ -155,29 +160,65 @@ function clampPage(page, pageSize) {
   return { p, ps };
 }
 
+// The intake caps a mail's attachments at 25 MB in total (emailIntakeService);
+// a PDF up to that size is checked, anything larger is refused as too large.
+const MAX_INBOUND_PDF_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Hash the file and, for a PDF, parse it in the PDF worker
+ * (utils/pdfValidation): heap, time and inflate budgets, active content and
+ * encryption refused. Anyone who can mail the accounting mailbox reaches this
+ * unauthenticated, and pdf-lib in this process inflated every object stream
+ * of whatever arrived — a small crafted file could take the backend down,
+ * and the retained message was ingested again after the restart.
+ *
+ * A refused PDF is reported as `pdfError`, not thrown: the caller records
+ * the document as failed so the message is finished with, not retried.
+ */
 async function inspectFile(filePath, mimeType) {
   const buf = await fsp.readFile(filePath);
+  // The ORIGINAL bytes are what is kept and hashed: a supplier invoice may
+  // carry a digital signature (PAdES /ByteRange) that re-serialising would
+  // break, and the received file is the accounting evidence.
   const sha = crypto.createHash('sha256').update(buf).digest('hex');
   let pageCount = null;
+  let pdfError = null;
   if ((mimeType || '').includes('pdf')) {
     try {
-      const pdf = await PDFDocument.load(buf, { updateMetadata: false });
-      pageCount = pdf.getPageCount();
+      const info = await validatePdf(buf, { maxBytes: MAX_INBOUND_PDF_BYTES });
+      // Because the upload is kept rather than `normalised`, the scan has to
+      // agree with what a viewer resolves (pdfInspect.findAmbiguousObjects):
+      // a file whose xref points at a definition the scan did not keep could
+      // carry active content the check never saw. Refused, like the signed
+      // contract upload refuses it.
+      if (info.ambiguousObjects) {
+        throw new AppError('The PDF defines objects ambiguously and cannot be verified.', 400, 'PDF_AMBIGUOUS_OBJECTS');
+      }
+      pageCount = info.pages == null ? null : Number(info.pages);
     } catch (e) {
-      logger.warn?.(`expenseService: PDF page count failed for ${filePath}: ${e.message}`);
+      logger.warn?.(`expenseService: PDF refused for ${filePath}: ${e.code || ''} ${e.message}`);
+      pdfError = e;
     }
   }
-  return { sha, pageCount };
+  return { sha, pageCount, pdfError };
 }
 
 async function recordInboundDocument({ source, filePath, originalFilename, mimeType }, adminId) {
   let fileSha256 = null;
   let pageCount = null;
+  let pdfError = null;
   try {
     const info = await inspectFile(filePath, mimeType);
-    fileSha256 = info.sha; pageCount = info.pageCount;
+    fileSha256 = info.sha; pageCount = info.pageCount; pdfError = info.pdfError;
   } catch (e) {
     logger.warn?.(`expenseService: could not inspect ${filePath}: ${e.message}`);
+  }
+  // An admin's upload is answered like every other PDF upload: refused, and
+  // the file does not stay. The mailbox has nobody to answer, so its refused
+  // attachment is recorded below as a failed, declined document instead.
+  if (pdfError && source !== 'email') {
+    await fsp.unlink(filePath).catch(() => {});
+    throw new AppError(pdfError.message, pdfError.statusCode || 400, pdfError.code || 'PDF_MALFORMED');
   }
 
   let duplicateOfId = null;
@@ -190,11 +231,14 @@ async function recordInboundDocument({ source, filePath, originalFilename, mimeT
   const row = {
     source: source || 'upload',
     original_filename: originalFilename || null,
-    file_path: filePath,
+    file_path: toStoredPath(filePath),
     mime_type: mimeType || null,
     file_sha256: fileSha256,
-    status: duplicateOfId ? 'duplicate' : 'unsorted',
-    parse_status: 'pending',
+    // A refused PDF is terminal: declined and failed, with the reason, so
+    // neither the parsers nor the next poll pick it up again.
+    status: pdfError ? 'declined' : (duplicateOfId ? 'duplicate' : 'unsorted'),
+    parse_status: pdfError ? 'failed' : 'pending',
+    parse_error: pdfError ? `${pdfError.code || 'PDF_MALFORMED'}: ${pdfError.message}`.slice(0, 2000) : null,
     parse_method: 'none',
     // Cap stored page_count to the renderable max (rasterizeService
     // MAX_RENDERABLE_PAGES) so a hostile high-page PDF can't drive an
@@ -205,7 +249,11 @@ async function recordInboundDocument({ source, filePath, originalFilename, mimeT
     created_at: now,
     updated_at: now,
   };
-  const inserted = await db('inbound_documents').insert(row).returning('id');
+  // The mailbox poller records with no admin: attribute it to the intake.
+  const inserted = await auditedInsert(db, 'inbound_documents', row, {
+    actor: adminId || (row.source === 'email' ? 'email-intake' : null),
+    source: 'inbound.record',
+  });
   const id = typeof inserted[0] === 'object' ? inserted[0].id : inserted[0];
   await logActivity('incoming_invoice_captured', { inboundDocumentId: id, source: row.source, duplicate: !!duplicateOfId }, null, adminActor(adminId));
   return getInbound(id);
@@ -255,7 +303,9 @@ async function updateInbound(id, payload, adminId) {
   for (const [camel, snake] of Object.entries(INBOUND_EDITABLE)) {
     if (payload[camel] !== undefined) patch[snake] = payload[camel] === '' ? null : payload[camel];
   }
-  await db('inbound_documents').where({ id }).update(patch);
+  await auditedUpdate(db, 'inbound_documents', { id }, patch, {
+    actor: historyActor(adminId), source: 'inbound.update',
+  });
   await logActivity('incoming_invoice_updated', { inboundDocumentId: id }, null, adminActor(adminId));
   return getInbound(id);
 }
@@ -319,7 +369,8 @@ function isInvoiceMutable(invoice) {
  * invoice and recompute the invoice totals, so the disposition can change.
  * Refuses when the invoice is already issued (Storno required instead).
  */
-async function unwindBilledLine(trx, doc) {
+async function unwindBilledLine(trx, doc, adminId) {
+  const audit = { actor: historyActor(adminId), source: 'inbound.unwindRebill' };
   const invoice = doc.billedInvoiceId
     ? await trx('invoices').where({ id: doc.billedInvoiceId }).first()
     : null;
@@ -330,7 +381,7 @@ async function unwindBilledLine(trx, doc) {
     );
   }
   if (doc.billedInvoiceLineItemId) {
-    await trx('invoice_line_items').where({ id: doc.billedInvoiceLineItemId }).del();
+    await auditedDelete(trx, 'invoice_line_items', { id: doc.billedInvoiceLineItemId }, audit);
   }
   if (invoice) {
     const allItems = await trx('invoice_line_items').where({ invoice_id: invoice.id });
@@ -340,7 +391,7 @@ async function unwindBilledLine(trx, doc) {
       // It's mutable (checked above) and never issued, so delete it outright
       // (PR #636 review #5). For a monthly draft this just means the next append
       // re-creates one.
-      await trx('invoices').where({ id: invoice.id }).del();
+      await auditedDelete(trx, 'invoices', { id: invoice.id }, audit);
       return;
     }
     let netMinor = 0;
@@ -350,12 +401,12 @@ async function unwindBilledLine(trx, doc) {
     const vatRate = Number(invoice.vat_rate || 0);
     const vatMinor = Math.round(netMinor * vatRate / 100);
     const shippingMinor = Number(invoice.shipping_amount_minor || 0);
-    await trx('invoices').where({ id: invoice.id }).update({
+    await auditedUpdate(trx, 'invoices', { id: invoice.id }, {
       net_amount_minor: netMinor,
       vat_amount_minor: vatMinor,
       total_amount_minor: netMinor + vatMinor + shippingMinor,
       updated_at: new Date(),
-    });
+    }, audit);
   }
 }
 
@@ -387,11 +438,11 @@ async function billInboundNow(trx, id, customerAccountId, eventId, disposition, 
   const invoiceId = Array.isArray(invoiceIds) ? invoiceIds[0] : null;
   if (!invoiceId) throw new AppError('Failed to create the re-bill invoice', 500, 'REBILL_FAILED');
   const line = await trx('invoice_line_items').where({ invoice_id: invoiceId }).orderBy('id', 'desc').first('id');
-  await trx('inbound_documents').where({ id }).update({
+  await auditedUpdate(trx, 'inbound_documents', { id }, {
     billed_invoice_id: invoiceId,
     billed_invoice_line_item_id: line ? line.id : null,
     updated_at: new Date(),
-  });
+  }, { actor: historyActor(adminId), source: 'inbound.billNow' });
   // NOTE: no logActivity here — it writes via the GLOBAL db, which deadlocks
   // when called inside this transaction on a SQLite-backed install (a second
   // write connection blocks on the held write lock). Callers log AFTER commit.
@@ -437,7 +488,7 @@ async function categorizeInbound(id, payload, adminId) {
     }
 
     // #1: unwind any prior re-bill so the disposition can change.
-    if (doc.billedInvoiceId) await unwindBilledLine(trx, doc);
+    if (doc.billedInvoiceId) await unwindBilledLine(trx, doc, adminId);
 
     // Markup is a re-bill concept only. A pass-through (durchlaufender Posten)
     // is invoiced at cost / VAT-neutral, so it never carries a markup.
@@ -466,7 +517,9 @@ async function categorizeInbound(id, payload, adminId) {
       updated_at: new Date(),
     };
     if (disposition === 'duplikat' && payload.duplicateOfId) patch.duplicate_of_id = payload.duplicateOfId;
-    await trx('inbound_documents').where({ id }).update(patch);
+    await auditedUpdate(trx, 'inbound_documents', { id }, patch, {
+      actor: historyActor(adminId), source: 'inbound.categorize',
+    });
 
     if (customerAccountId) {
       const customer = await trx('customer_accounts').where({ id: customerAccountId }).first();
@@ -501,12 +554,12 @@ async function rebillInbound(id, payload, adminId, trx0) {
     if (doc.totalAmountMinor == null && doc.netAmountMinor == null) {
       throw new AppError('Set the invoice amount before re-billing (0 is allowed).', 400, 'AMOUNT_REQUIRED');
     }
-    if (doc.billedInvoiceId) await unwindBilledLine(trx, doc);
+    if (doc.billedInvoiceId) await unwindBilledLine(trx, doc, adminId);
     const markup = await resolveMarkup(
       { markupType: doc.markupType, markupPercent: doc.markupPercent, markupFlatMinor: doc.markupFlatMinor },
       payload, payload.contractId, trx,
     );
-    await trx('inbound_documents').where({ id }).update({
+    await auditedUpdate(trx, 'inbound_documents', { id }, {
       disposition: 'rebill',
       status: 'categorized',
       customer_account_id: payload.customerAccountId,
@@ -515,7 +568,7 @@ async function rebillInbound(id, payload, adminId, trx0) {
       markup_percent: markup.type === 'percent' ? markup.percent : null,
       markup_flat_minor: markup.type === 'flat' ? markup.flatMinor : null,
       updated_at: new Date(),
-    });
+    }, { actor: historyActor(adminId), source: 'inbound.rebill' });
     return billInboundNow(trx, id, payload.customerAccountId, payload.eventId || doc.eventId || null, 'rebill', markup, adminId);
   };
   const invoiceId = trx0 ? await run(trx0) : await db.transaction(run);
@@ -603,15 +656,15 @@ async function buildPendingRebillLineItems(trx, customer) {
 
 // Stamp each inbound document with the invoice + its specific line-item id.
 // `lineIds` is aligned to `docs` order.
-async function stampBilledRebills(trx, docs, invoiceId, lineIds) {
+async function stampBilledRebills(trx, docs, invoiceId, lineIds, adminId) {
   const now = new Date();
   for (let i = 0; i < docs.length; i += 1) {
     // eslint-disable-next-line no-await-in-loop
-    await trx('inbound_documents').where({ id: docs[i].id }).update({
+    await auditedUpdate(trx, 'inbound_documents', { id: docs[i].id }, {
       billed_invoice_id: invoiceId,
       billed_invoice_line_item_id: lineIds[i] || null,
       updated_at: now,
-    });
+    }, { actor: historyActor(adminId), source: 'inbound.billPending' });
   }
 }
 
@@ -645,7 +698,7 @@ async function billPendingRebills(customerId, adminId) {
     const insertedLines = await trx('invoice_line_items').where({ invoice_id: invoiceId }).orderBy('position', 'asc');
     const lineByPos = new Map(insertedLines.map((li) => [li.position, li.id]));
     const lineIds = pending.map((_, i) => lineByPos.get(i + 1) || null);
-    await stampBilledRebills(trx, pending, invoiceId, lineIds);
+    await stampBilledRebills(trx, pending, invoiceId, lineIds, adminId);
 
     return { invoiceId, count: pending.length };
   });
@@ -760,13 +813,13 @@ async function markInboundSupplierPayment(id, { paid, paidAt, paymentMethod, pay
   if (paymentMethod && !PAYMENT_METHODS.includes(paymentMethod)) {
     throw new AppError(`paymentMethod must be one of ${PAYMENT_METHODS.join(', ')}`, 400, 'BAD_PAYMENT_METHOD');
   }
-  await db('inbound_documents').where({ id }).update({
+  await auditedUpdate(db, 'inbound_documents', { id }, {
     supplier_paid: !!paid,
     supplier_paid_at: paid ? (paidAt ? new Date(paidAt) : new Date()) : null,
     supplier_payment_method: paid ? (paymentMethod || null) : null,
     supplier_payment_ref: paid ? (paymentReference || null) : null,
     updated_at: new Date(),
-  });
+  }, { actor: historyActor(adminId), source: 'inbound.supplierPayment' });
   await logActivity('incoming_invoice_supplier_payment', { inboundDocumentId: id, paid: !!paid }, null, adminActor(adminId));
   return getInbound(id);
 }
@@ -855,7 +908,9 @@ async function createExpense(payload, adminId, { receiptPath } = {}) {
     kmRateMinor: settings.kmRateMinor,
     perDiemRateMinor: settings.perDiemRateMinor,
   });
-  const inserted = await db('expenses').insert(row).returning('id');
+  const inserted = await auditedInsert(db, 'expenses', row, {
+    actor: historyActor(adminId), source: 'expense.create',
+  });
   const id = typeof inserted[0] === 'object' ? inserted[0].id : inserted[0];
   await logActivity('expense_created', { expenseId: id, kind: row.kind }, null, adminActor(adminId));
   return getExpense(id);
@@ -889,7 +944,9 @@ async function updateExpense(id, payload, adminId, { receiptPath } = {}) {
     if (payload[camel] !== undefined) patch[snake] = payload[camel] === '' ? null : payload[camel];
   }
   if (receiptPath) patch.receipt_path = receiptPath;
-  await db('expenses').where({ id }).update(patch);
+  await auditedUpdate(db, 'expenses', { id }, patch, {
+    actor: historyActor(adminId), source: 'expense.update',
+  });
   await logActivity('expense_updated', { expenseId: id }, null, adminActor(adminId));
   return getExpense(id);
 }
@@ -919,7 +976,7 @@ async function rebillExpense(id, payload, adminId, trx0) {
     const invoiceId = Array.isArray(invoiceIds) ? invoiceIds[0] : null;
     if (!invoiceId) throw new AppError('Failed to create invoice', 500, 'INVOICE_FAILED');
     const line = await trx('invoice_line_items').where({ invoice_id: invoiceId }).orderBy('id', 'desc').first('id');
-    await trx('expenses').where({ id }).update({
+    await auditedUpdate(trx, 'expenses', { id }, {
       billed_invoice_id: invoiceId,
       billed_invoice_line_item_id: line ? line.id : null,
       billed_at: new Date(),
@@ -929,8 +986,8 @@ async function rebillExpense(id, payload, adminId, trx0) {
       markup_flat_minor: markup.type === 'flat' ? markup.flatMinor : null,
       status: 'invoiced',
       updated_at: new Date(),
-    });
-    await logActivity('expense_invoiced', { expenseId: id, invoiceId }, null, adminActor(adminId));
+    }, { actor: historyActor(adminId), source: 'expense.rebill' });
+    await logActivity('expense_invoiced', { expenseId: id, invoiceId }, null, adminActor(adminId), trx);
     return invoiceId;
   };
   const invoiceId = trx0 ? await run(trx0) : await db.transaction(run);
@@ -943,13 +1000,13 @@ async function markExpensePaid(id, { paid, paidAt, paymentMethod, paymentReferen
   if (paymentMethod && !PAYMENT_METHODS.includes(paymentMethod)) {
     throw new AppError(`paymentMethod must be one of ${PAYMENT_METHODS.join(', ')}`, 400, 'BAD_PAYMENT_METHOD');
   }
-  await db('expenses').where({ id }).update({
+  await auditedUpdate(db, 'expenses', { id }, {
     supplier_paid: !!paid,
     supplier_paid_at: paid ? (paidAt ? new Date(paidAt) : new Date()) : null,
     payment_method: paid ? (paymentMethod || null) : null,
     payment_reference: paid ? (paymentReference || null) : null,
     updated_at: new Date(),
-  });
+  }, { actor: historyActor(adminId), source: 'expense.markPaid' });
   await logActivity('expense_paid', { expenseId: id, paid: !!paid }, null, adminActor(adminId));
   return getExpense(id);
 }

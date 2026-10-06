@@ -13,10 +13,65 @@ const { pipeStreamToResponse } = require('../../utils/streamResponse');
 
 const { errorResponse } = require('../../utils/routeHelpers');
 const { blockHiddenGallery } = require('../../utils/revealMode');
+const { isPhotoHiddenFromViewer } = require('../../utils/photoVisibility');
 const { ensureThumbnail, ensureHeroImage, ensurePreviewImage, withLocalCopy } = require('../../services/imageProcessor');
+const { heroQueryRedirect } = require('../../utils/heroAnchor');
 const { getStorage } = require('../../services/storage');
 const fs = require('fs');
 const { getStoragePath } = require('../../config/storage');
+const { safePathJoin } = require('../../utils/fileSecurityUtils');
+const {
+  isOriginalWithheld, currentDownloadLimit, grantedPhotoIds, grantDownloads, checkDownloads,
+  drawsOnQuota, clientOnlyError, refuseDownload, downloadLimitError, settleWhenDone, responseDelivered,
+} = require('../../services/downloadQuota');
+
+/**
+ * Download limit (issue 1560): a video has no preview tier, so playing it
+ * streams the original, and on a limited gallery that takes a slot like a
+ * download. One slot per video: once it is granted, replays and every further
+ * Range request are free. Only the client may draw on the quota; a guest
+ * plays a video someone already granted and is refused any other. Returns
+ * false once it has answered the request itself.
+ */
+async function admitVideoStream(req, res, photo) {
+  if (req.isAdminPreview || !(await currentDownloadLimit(req.event))) return true;
+  const photoId = Number(photo.id);
+  const delivered = await grantedPhotoIds(req.event.id, [photoId], db, { deliveredOnly: true });
+  if (delivered.has(photoId)) return true;
+  if (!drawsOnQuota(req)) {
+    res.status(403).json(clientOnlyError());
+    return false;
+  }
+  // A HEAD probe answers without taking any of the quota.
+  if (req.method === 'HEAD') {
+    const check = await checkDownloads(req.event, [photoId]);
+    if (check.ok) return true;
+    res.status(403).json(downloadLimitError(check));
+    return false;
+  }
+  const quota = await grantDownloads(req.event, [photoId], { reserve: true });
+  if (!quota.ok) {
+    refuseDownload(res, quota);
+    return false;
+  }
+  settleWhenDone(res, req.event.id, quota, responseDelivered(res, [photoId]));
+  return true;
+}
+
+/**
+ * Is this photo outside what the viewer's grant may reach?
+ *
+ * Client-hidden photos are blocked for everyone but the client. A slideshow
+ * session of an event that pins show_category_id sees that category only:
+ * the list is filtered that way server-side (galleryQueryService), and the
+ * media routes must agree, or a link holder could request every other
+ * category's photos by id. Applied by every route below that resolves a photo.
+ */
+function isPhotoOutsideGrant(req, photo) {
+  if (isPhotoHiddenFromViewer(photo, req.accessLevel)) return true;
+  return req.accessLevel === 'slideshow' && req.event?.show_category_id != null
+    && Number(photo.category_id) !== Number(req.event.show_category_id);
+}
 
 router.post('/:slug/photo/:photoId/view',
   verifyGalleryAccess,
@@ -26,11 +81,11 @@ router.post('/:slug/photo/:photoId/view',
     try {
       const photo = await db('photos')
         .where({ id: req.params.photoId, event_id: req.event.id })
-        .first('id', 'visibility');
+        .first('id', 'visibility', 'category_id');
       if (!photo) {
         return res.status(404).json({ error: 'Photo not found' });
       }
-      if (photo.visibility === 'hidden' && req.accessLevel !== 'client') {
+      if (isPhotoOutsideGrant(req, photo)) {
         return res.status(403).json({ error: 'Photo not available' });
       }
       // Admin preview (#981 review) is excluded from per-photo view analytics.
@@ -46,6 +101,10 @@ router.post('/:slug/photo/:photoId/view',
 // View single photo (with watermark if enabled)
 router.get('/:slug/photo/:photoId',
   verifyGalleryAccess,
+  // This route answers with the stored original (or the source video). A
+  // slideshow session is display-only and the kiosk renders the preview tier
+  // (slideshow_url), so it has no business here.
+  denySlideshowToken,
   blockHiddenGallery,
   async (req, res) => {
     try {
@@ -60,30 +119,31 @@ router.get('/:slug/photo/:photoId',
       }
 
       // Block guest access to hidden photos
-      if (photo.visibility === 'hidden' && req.accessLevel !== 'client') {
+      if (isPhotoOutsideGrant(req, photo)) {
         return res.status(403).json({ error: 'Photo not available' });
       }
 
       // Check if this is a video
       const isVideo = photo.media_type === 'video' || (photo.mime_type && photo.mime_type.startsWith('video/'));
 
-      // Check protection level - basic and standard protection allow direct JWT access
-      const protectionLevel = req.event.protection_level || 'standard';
+      // Every protection level is served here. Enhanced/maximum used to answer
+      // a 302 JSON pointing at /api/secure-images/.../generate-token, which no
+      // shipped frontend code calls, so still images at those levels were a
+      // broken tile (#1370 exempted videos from the same bounce). The levels
+      // are client-side rendering modes; the guest still needs a valid gallery
+      // token to get here at all.
 
-      // Videos are exempt (#1370). The secure-images endpoint this bounces to
-      // pipes every byte through sharp (secureImageService.processProtectedImage),
-      // which throws on an mp4 — so under enhanced/maximum a video was
-      // unservable by either route, and the lightbox showed a poster stuck at
-      // 0:00. Serving it here instead is not a new exposure: thumbnails of the
-      // same videos already come from this route at every protection level, and
-      // the guest still needs a valid gallery token to get here at all.
-      if (!isVideo && (protectionLevel === 'enhanced' || protectionLevel === 'maximum')) {
-        // For enhanced/maximum protection, redirect to secure endpoint
-        return res.status(302).json({
-          error: 'Secure access required',
-          secureEndpoint: `/api/secure-images/${req.params.slug}/generate-token`,
-          photoId: photoId
-        });
+      // Download limit (issue 1560). While one applies, guests get the preview
+      // tier rather than the original, which would otherwise be a full-size
+      // copy one long-press away from every counted download. Videos have no
+      // preview tier: playing one is counted instead (admitVideoStream, below
+      // once the file is known to exist).
+      if (!isVideo && await isOriginalWithheld(req.event, photo, { isAdminPreview: req.isAdminPreview })) {
+        // Keep the query (the ?v= cache-buster) so the preview is not served
+        // from a stale cache entry.
+        const queryAt = req.originalUrl.indexOf('?');
+        const query = queryAt === -1 ? '' : req.originalUrl.slice(queryAt);
+        return res.redirect(`/api/gallery/${req.params.slug}/preview/${photoId}${query}`);
       }
 
       // Resolve where to read the photo bytes from. For external/reference
@@ -156,47 +216,96 @@ router.get('/:slug/photo/:photoId',
 
       // Handle video streaming with range requests
       if (isVideo) {
+        if (!(await admitVideoStream(req, res, photo))) return;
+
+        // Browser-playable copy (issue 1430, item 8): when the queue wrote
+        // one, the player gets it instead of the original. It always lives
+        // in the managed backend, external originals included. A copy the
+        // row points at but storage no longer has falls back to the original
+        // rather than a 404 player.
+        let videoKey = storageKey;
+        let videoPath = filePath;
+        let videoSize = fileSize;
+        let videoViaStorage = useStorageBackend;
+        let videoContentType = resolvePhotoContentType(photo);
+        if (photo.web_path && photo.web_status === 'complete') {
+          // stat() answers null for a key the backend does not have and
+          // throws for anything else (network, credentials): only the first
+          // is "the copy is gone". A failing backend serves the original for
+          // this request and keeps the pointer.
+          let webStat = null;
+          let webMissing = false;
+          try {
+            webStat = await storage.stat(photo.web_path);
+            webMissing = !webStat;
+          } catch (statErr) {
+            logger.warn(`Could not stat the web copy of video ${photo.id}: ${statErr.message}`);
+          }
+          if (webStat) {
+            videoKey = photo.web_path;
+            videoPath = null;
+            videoSize = webStat.size;
+            videoViaStorage = true;
+            videoContentType = 'video/mp4';
+          } else if (webMissing) {
+            // The row names a copy storage does not have — a backup restored
+            // without videos/, or a bucket cleaned by hand. Left at
+            // `complete` it would never be rebuilt (the switch-on backfill
+            // takes NULL and failed rows only), so it goes back to the queue
+            // now while the setting is on, or to `failed` for the next
+            // switch-on. Guarded on the stale pointer, so a concurrent
+            // worker's fresh publish is not undone.
+            const { isEnabled } = require('../../services/videoRenditionService');
+            const enabled = await isEnabled().catch(() => false);
+            await db('photos').where({ id: photo.id, web_path: photo.web_path, web_status: 'complete' }).update({
+              web_path: null,
+              web_status: enabled ? 'pending' : 'failed',
+              web_started_at: null,
+              web_error: 'copy missing from storage',
+            }).catch((e) => logger.warn(`Could not re-queue the missing web copy of video ${photo.id}: ${e.message}`));
+          }
+        }
         const range = req.headers.range;
 
         if (range) {
           const parts = range.replace(/bytes=/, '').split('-');
           const start = parseInt(parts[0], 10);
-          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+          const end = parts[1] ? parseInt(parts[1], 10) : videoSize - 1;
           // Validate before writing the 206: a NaN, inverted or out-of-file
           // range used to be committed to the headers and then throw while
           // streaming (or read past the end).
           if (!Number.isInteger(start) || !Number.isInteger(end)
-              || start < 0 || end < start || start >= fileSize) {
-            res.set('Content-Range', `bytes */${fileSize}`);
+              || start < 0 || end < start || start >= videoSize) {
+            res.set('Content-Range', `bytes */${videoSize}`);
             return res.status(416).end();
           }
-          const boundedEnd = Math.min(end, fileSize - 1);
+          const boundedEnd = Math.min(end, videoSize - 1);
           const chunksize = (boundedEnd - start) + 1;
 
           res.writeHead(206, {
-            'Content-Range': `bytes ${start}-${boundedEnd}/${fileSize}`,
+            'Content-Range': `bytes ${start}-${boundedEnd}/${videoSize}`,
             'Accept-Ranges': 'bytes',
             'Content-Length': chunksize,
-            'Content-Type': resolvePhotoContentType(photo),
+            'Content-Type': videoContentType,
             'Cache-Control': 'private, max-age=1800',
             'X-Protection-Level': 'basic'
           });
 
-          const file = useStorageBackend
-            ? await storage.getRange(storageKey, start, boundedEnd)
-            : fs.createReadStream(filePath, { start, end: boundedEnd });
+          const file = videoViaStorage
+            ? await storage.getRange(videoKey, start, boundedEnd)
+            : fs.createReadStream(videoPath, { start, end: boundedEnd });
           pipeStreamToResponse(file, res, { context: `video range for photo ${photo.id}` });
         } else {
           res.writeHead(200, {
-            'Content-Length': fileSize,
-            'Content-Type': resolvePhotoContentType(photo),
+            'Content-Length': videoSize,
+            'Content-Type': videoContentType,
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'private, max-age=1800',
             'X-Protection-Level': 'basic'
           });
-          const file = useStorageBackend
-            ? await storage.get(storageKey)
-            : fs.createReadStream(filePath);
+          const file = videoViaStorage
+            ? await storage.get(videoKey)
+            : fs.createReadStream(videoPath);
           pipeStreamToResponse(file, res, { context: `video for photo ${photo.id}` });
         }
         return;
@@ -243,7 +352,13 @@ router.get('/:slug/photo/:photoId',
                 return pipeStreamToResponse(wmStream, res, { context: `watermarked photo ${photo.id}` });
               }
             } else {
-              const watermarkFilePath = path.join(getStoragePath(), photo.watermark_path);
+              // The column is a storage-relative key written by
+              // watermarkService, but it is read straight from a row that a
+              // crafted .picpeak import (or a compromised DB) can poison, so
+              // a raw join would let a `../` value hand any file the process
+              // can read to a gallery guest. safePathJoin throws on escape and
+              // the catch below falls back to on-the-fly watermarking.
+              const watermarkFilePath = safePathJoin(getStoragePath(), photo.watermark_path);
               if (fs.existsSync(watermarkFilePath)) {
                 res.set({
                   'Content-Type': resolvePhotoContentType(photo),
@@ -255,7 +370,7 @@ router.get('/:slug/photo/:photoId',
               }
             }
           } catch (err) {
-            logger.warn(`Pre-generated watermark not found for photo ${photoId}, falling back to on-the-fly`);
+            logger.warn(`Pre-generated watermark unusable for photo ${photoId} (${err.message}), falling back to on-the-fly`);
           }
         }
 
@@ -318,7 +433,7 @@ router.get('/:slug/thumbnail/:photoId',
       }
 
       // Block guest access to hidden photos
-      if (photo.visibility === 'hidden' && req.accessLevel !== 'client') {
+      if (isPhotoOutsideGrant(req, photo)) {
         return res.status(403).json({ error: 'Photo not available' });
       }
 
@@ -434,19 +549,34 @@ router.get('/:slug/hero/:photoId',
       }
 
       // Block guest access to hidden photos
-      if (photo.visibility === 'hidden' && req.accessLevel !== 'client') {
+      if (isPhotoOutsideGrant(req, photo)) {
         return res.status(403).json({ error: 'Photo not available' });
       }
 
-      // Check if this is a video - videos don't get hero images
+      // Videos don't get hero images. Their hero is the poster frame the
+      // thumbnail route serves — never the original: a hero is an image
+      // background, and on a limited gallery /photo streams a video by
+      // taking a download slot (issue 1560), so merely loading the page
+      // would have spent one.
       const isVideo = photo.media_type === 'video' || (photo.mime_type && photo.mime_type.startsWith('video/'));
       if (isVideo) {
-        // For videos, redirect to the regular photo endpoint
-        return res.redirect(withPreview(req, `/api/gallery/${req.params.slug}/photo/${photoId}`));
+        return res.redirect(withPreview(req, `/api/gallery/${req.params.slug}/thumbnail/${photoId}`));
       }
 
-      // Ensure hero image exists and is valid, regenerate if needed
-      const heroPath = await ensureHeroImage(photo);
+      // The rendition follows the event's focal point and the response below
+      // is cached for an hour under the URL it was requested at (issue 1737).
+      // A URL whose `fp` is not the current anchor — an open tab whose payload
+      // predates the admin moving it — is sent to the current crop's URL
+      // instead of being served bytes that would then sit in the cache under
+      // the wrong URL. A redirect is not cached.
+      const redirectQuery = heroQueryRedirect(req.query, req.event.hero_image_anchor);
+      if (redirectQuery !== null) {
+        return res.redirect(`/api/gallery/${req.params.slug}/hero/${photoId}${redirectQuery}`);
+      }
+
+      // Ensure hero image exists, is valid and was cut at the event's focal
+      // point (issue 1737); regenerate if needed.
+      const heroPath = await ensureHeroImage(photo, { anchor: req.event.hero_image_anchor });
 
       if (!heroPath) {
         // If hero generation fails, fall back to original photo
@@ -517,6 +647,18 @@ router.get('/:slug/hero/:photoId',
 // broken image. The watermark application path is preserved so a
 // preview surfaced in the lightbox carries the same protection a
 // guest would see on the full original.
+// A preview that cannot be served falls back to the original, so the lightbox
+// always renders. Not while a download limit withholds that original (issue
+// 1560): /photo would send the request straight back here.
+// Nor for a slideshow session, which /photo refuses (denySlideshowToken).
+async function fallBackToOriginal(req, res, photo) {
+  if (req.accessLevel === 'slideshow'
+    || (req.event && await isOriginalWithheld(req.event, photo, { isAdminPreview: req.isAdminPreview }))) {
+    return res.status(404).json({ error: 'Preview not available' });
+  }
+  return res.redirect(withPreview(req, `/api/gallery/${req.params.slug}/photo/${req.params.photoId}`));
+}
+
 router.get('/:slug/preview/:photoId',
   verifyGalleryAccess,
   blockHiddenGallery,
@@ -532,7 +674,7 @@ router.get('/:slug/preview/:photoId',
         return res.status(404).json({ error: 'Photo not found' });
       }
 
-      if (photo.visibility === 'hidden' && req.accessLevel !== 'client') {
+      if (isPhotoOutsideGrant(req, photo)) {
         return res.status(403).json({ error: 'Photo not available' });
       }
 
@@ -561,7 +703,7 @@ router.get('/:slug/preview/:photoId',
         : await ensurePreviewImage(photo);
       if (!previewPath) {
         logger.warn(`Failed to generate preview for photo ${photoId}, falling back to original`);
-        return res.redirect(withPreview(req, `/api/gallery/${req.params.slug}/photo/${photoId}`));
+        return fallBackToOriginal(req, res, photo);
       }
 
       const storage = getStorage();
@@ -570,7 +712,7 @@ router.get('/:slug/preview/:photoId',
         logger.error('Preview file does not exist in storage backend', {
           slug: req.params.slug, photoId, eventId: req.event.id, previewPath,
         });
-        return res.redirect(withPreview(req, `/api/gallery/${req.params.slug}/photo/${photoId}`));
+        return fallBackToOriginal(req, res, photo);
       }
 
       const mtimeMs = stat.mtime ? stat.mtime.getTime() : 0;
@@ -629,7 +771,12 @@ router.get('/:slug/preview/:photoId',
         photoId: req.params.photoId,
         eventId: req.event?.id,
       });
-      res.redirect(withPreview(req, `/api/gallery/${req.params.slug}/photo/${req.params.photoId}`));
+      if (res.headersSent) return;
+      try {
+        await fallBackToOriginal(req, res, { id: req.params.photoId });
+      } catch (fallbackError) {
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to serve preview' });
+      }
     }
   }
 );

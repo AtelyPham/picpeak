@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { 
-  ArrowLeft, 
   MessageSquare, 
   Star, 
   Heart, 
@@ -10,7 +9,6 @@ import {
   TrendingUp,
   Filter,
   Download,
-  Shield,
   CheckCircle,
   Eye,
   EyeOff,
@@ -21,22 +19,31 @@ import { format, parseISO } from 'date-fns';
 
 import { Button, Card, Loading } from '../../components/common';
 import { AdminAuthenticatedImage } from '../../components/admin/AdminAuthenticatedImage';
-import { FeedbackSettings } from '../../components/admin';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { eventsService } from '../../services/events.service';
 import { feedbackService } from '../../services/feedback.service';
 import type { PhotoFeedback, FeedbackAnalytics, FeedbackResponse } from '../../services/feedback.service';
-import { useMutationWithToast } from '../../hooks';
 import { useLocalizedDate } from '../../hooks/useLocalizedDate';
+import { useAnyPermission, usePermission } from '../../hooks/usePermission';
 
-export const EventFeedbackPage: React.FC = () => {
-  const { id } = useParams<{ id: string }>();
+/**
+ * Feedback for one gallery: the list with moderation, analytics, the
+ * moderation queue and the exports. Rendered inside the gallery page's
+ * Guests & Feedback tab; the feedback SETTINGS live in the gallery's Settings
+ * tab (Guest interaction), where they save with the rest.
+ */
+export const EventFeedbackPanel: React.FC<{ eventId: string }> = ({ eventId }) => {
+  const id = eventId;
   const navigate = useNavigate();
+  // Reading feedback needs events.view; moderating is client help, deleting
+  // needs events.delete (adminFeedback.js).
+  const canModerate = useAnyPermission(['events.edit', 'events.support']);
+  const canDelete = usePermission('events.delete');
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const { formatDateTime: fmtDateTime } = useLocalizedDate();
 
-  const [activeTab, setActiveTab] = useState<'settings' | 'feedback' | 'analytics' | 'moderation'>('settings');
+  const [activeTab, setActiveTab] = useState<'feedback' | 'analytics' | 'moderation'>('feedback');
   const [feedbackFilter, setFeedbackFilter] = useState({
     type: '',
     status: '',
@@ -56,13 +63,6 @@ export const EventFeedbackPage: React.FC = () => {
     enabled: !!id
   });
 
-  // Fetch feedback settings
-  const { data: settings, isLoading: settingsLoading } = useQuery({
-    queryKey: ['feedback-settings', id],
-    queryFn: () => feedbackService.getEventFeedbackSettings(id!),
-    enabled: !!id
-  });
-
   // Fetch feedback list
   const { data: feedbackData, isLoading: feedbackLoading } = useQuery<FeedbackResponse>({
     queryKey: ['event-feedback', id, feedbackFilter],
@@ -75,14 +75,6 @@ export const EventFeedbackPage: React.FC = () => {
     queryKey: ['feedback-analytics', id],
     queryFn: () => feedbackService.getEventFeedbackAnalytics(id!),
     enabled: !!id && activeTab === 'analytics'
-  });
-
-  // Update settings mutation
-  const updateSettingsMutation = useMutationWithToast({
-    mutationFn: (newSettings: any) => feedbackService.updateEventFeedbackSettings(id!, newSettings),
-    invalidateKeys: [['feedback-settings', id]],
-    successMessage: t('feedback.settingsUpdated', 'Feedback settings updated'),
-    errorMessage: () => t('feedback.settingsUpdateError', 'Failed to update settings'),
   });
 
   // Moderate feedback mutation
@@ -132,7 +124,7 @@ export const EventFeedbackPage: React.FC = () => {
     }
   };
 
-  if (eventLoading || settingsLoading) {
+  if (eventLoading) {
     return <Loading />;
   }
 
@@ -145,39 +137,21 @@ export const EventFeedbackPage: React.FC = () => {
   const totalPages = perPage ? Math.max(1, Math.ceil((pagination?.total ?? 0) / perPage)) : 1;
 
   return (
-    <div className="max-w-7xl mx-auto">
-      {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={<ArrowLeft className="w-4 h-4" />}
-            onClick={() => navigate(`/admin/events/${id}`)}
-          >
-            {t('common.back')}
-          </Button>
-          <div>
-            <h1 className="text-2xl font-bold text-neutral-900">
-              {t('feedback.title', 'Feedback Management')}
-            </h1>
-            <p className="text-sm text-neutral-600 mt-1">
-              {event.event_name} • {event.slug}
-            </p>
-          </div>
-        </div>
+    <div>
+      {/* Exports */}
+      <div className="mb-6 flex items-center justify-end">
         <div className="flex gap-2 items-end">
           {/* Shape selector (#640 #6). Long is the existing per-action shape;
               pivot is per-(photo, guest) for spreadsheet pivot tables. */}
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-neutral-500 dark:text-neutral-400" htmlFor="feedback-export-shape">
+            <label className="text-xs text-muted" htmlFor="feedback-export-shape">
               {t('feedback.exportShapeLabel', 'Shape')}
             </label>
             <select
               id="feedback-export-shape"
               value={exportShape}
               onChange={(e) => setExportShape(e.target.value as 'long' | 'pivot')}
-              className="text-sm px-2 py-1.5 rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800"
+              className="text-sm px-2 py-1.5 rounded border border-line-strong bg-panel"
             >
               <option value="long">{t('feedback.exportShapeLong', 'Per-action (long)')}</option>
               <option value="pivot">{t('feedback.exportShapePivot', 'Per-guest (pivot)')}</option>
@@ -206,7 +180,6 @@ export const EventFeedbackPage: React.FC = () => {
       <div className="mb-6 border-b border-neutral-200">
         <nav className="-mb-px flex gap-6">
           {[
-            { id: 'settings', label: t('feedback.tabs.settings', 'Settings'), icon: Shield },
             { id: 'feedback', label: t('feedback.tabs.feedback', 'Feedback'), icon: MessageSquare },
             { id: 'analytics', label: t('feedback.tabs.analytics', 'Analytics'), icon: TrendingUp },
             { id: 'moderation', label: t('feedback.tabs.moderation', 'Moderation'), icon: Filter },
@@ -228,13 +201,6 @@ export const EventFeedbackPage: React.FC = () => {
       </div>
 
       {/* Content */}
-      {activeTab === 'settings' && settings && (
-        <FeedbackSettings
-          settings={settings}
-          onChange={(newSettings) => updateSettingsMutation.mutate(newSettings)}
-        />
-      )}
-
       {activeTab === 'feedback' && (
         <div className="space-y-4">
           {/* Filters */}
@@ -330,7 +296,7 @@ export const EventFeedbackPage: React.FC = () => {
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
-                          {item.feedback_type === 'comment' && !item.is_approved && (
+                          {canModerate && item.feedback_type === 'comment' && !item.is_approved && (
                             <>
                               <Button
                                 size="sm"
@@ -356,7 +322,7 @@ export const EventFeedbackPage: React.FC = () => {
                               </Button>
                             </>
                           )}
-                          {item.is_hidden && (
+                          {canModerate && item.is_hidden && (
                             <Button
                               size="sm"
                               variant="ghost"
@@ -369,6 +335,7 @@ export const EventFeedbackPage: React.FC = () => {
                               {t('feedback.unhide', 'Unhide')}
                             </Button>
                           )}
+                          {canDelete && (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -381,6 +348,7 @@ export const EventFeedbackPage: React.FC = () => {
                           >
                             {t('common.delete', 'Delete')}
                           </Button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -579,4 +547,10 @@ export const EventFeedbackPage: React.FC = () => {
       )}
     </div>
   );
+};
+
+/** The old standalone route: feedback now lives in the gallery page. */
+export const EventFeedbackPage: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  return <Navigate to={`/admin/events/${id}?tab=guests`} replace />;
 };

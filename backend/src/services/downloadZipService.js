@@ -57,6 +57,7 @@ class DownloadZipService {
     this.debounceTimers = new Map();  // eventId -> setTimeout handle
     this.versions = new Map();        // eventId -> generation counter
     this.buildCancellers = new Map(); // eventId -> abort the in-flight build
+    this.pendingCleanups = new Map(); // eventId -> invalidate()'s cleanup, until it settles
     this.regenActive = 0;             // background rebuilds running right now
     this.regenWaiters = [];           // resolvers parked waiting for a slot
     this.stopped = false;
@@ -94,8 +95,10 @@ class DownloadZipService {
     const waiters = this.regenWaiters.splice(0);
     for (const resume of waiters) resume();
     await Promise.allSettled([...this.activeBuilds.values()].map(build => build.promise));
+    await Promise.allSettled([...this.pendingCleanups.values()]);
     this.versions.clear();
     this.buildCancellers.clear();
+    this.pendingCleanups.clear();
   }
 
   /**
@@ -146,9 +149,32 @@ class DownloadZipService {
    * Concurrent calls for the same eventId share one in-flight build.
    */
   async generateZip(eventId) {
-    // If already building, return the existing promise
-    const existing = this.activeBuilds.get(eventId);
-    if (existing) return existing.promise;
+    // If already building, return the existing promise — unless an
+    // invalidate() has moved the version on since that build started: its
+    // result is going to be discarded, so the debounced regeneration that
+    // lands while it is still uploading needs a fresh build. Wait for the
+    // stale one to settle first rather than overlapping it: both would write
+    // the same key and share one canceller slot, and the stale build's
+    // discard would remove the replacement's zip.
+    for (;;) {
+      const existing = this.activeBuilds.get(eventId);
+      if (existing) {
+        if (existing.version === (this.versions.get(eventId) || 0)) return existing.promise;
+        await existing.promise.catch(() => {});
+        if (this.activeBuilds.get(eventId) === existing) this.activeBuilds.delete(eventId);
+        // stop() may have drained everything while we waited: a build
+        // started now would never be awaited by anyone.
+        if (this.stopped) return { success: false, error: 'Service stopped' };
+        continue;
+      }
+      // invalidate() runs its cleanup fire-and-forget. Still pending, it
+      // would delete the shared key and clear the row AFTER this build
+      // published its fresh zip; let it finish first, then look again.
+      const cleaning = this.pendingCleanups.get(eventId);
+      if (!cleaning) break;
+      await cleaning;
+      if (this.stopped) return { success: false, error: 'Service stopped' };
+    }
 
     const version = (this.versions.get(eventId) || 0) + 1;
     this.versions.set(eventId, version);
@@ -355,12 +381,33 @@ class DownloadZipService {
       // exists after the multipart upload completes).
       await storage.putFromFile(finalKey, tmpPath, { contentType: 'application/zip' });
 
+      // An invalidate() that arrived during the upload has already run its
+      // cleanup; publishing now would put a zip built under the old settings
+      // back into the row. Drop the object instead.
+      if (this.versions.get(eventId) !== version) {
+        await storage.delete(finalKey).catch(() => {});
+        return { success: false, error: 'Build invalidated' };
+      }
+
       const stat = await storage.stat(finalKey);
 
       await db('events').where({ id: eventId }).update({
         download_zip_path: finalKey,
         download_zip_generated_at: new Date(),
       });
+
+      // The stat and the row write are awaits too: an invalidate() landing
+      // in either window has run its cleanup already, and the write above
+      // just put the stale zip back. Undo exactly that — only while the row
+      // still points at this key, so a newer build's publication is left
+      // alone.
+      if (this.versions.get(eventId) !== version) {
+        await db('events')
+          .where({ id: eventId, download_zip_path: finalKey })
+          .update({ download_zip_path: null, download_zip_generated_at: null });
+        await storage.delete(finalKey).catch(() => {});
+        return { success: false, error: 'Build invalidated' };
+      }
 
       logger.info('Pre-zip generated', { eventId, slug: event.slug, size: stat.size, photos: photos.length });
       return { success: true, key: finalKey, size: stat.size };
@@ -399,10 +446,17 @@ class DownloadZipService {
     const timer = this.debounceTimers.get(eventId);
     if (timer) clearTimeout(timer);
 
-    // Fire-and-forget cleanup
-    this._cleanup(eventId).catch(err =>
+    // Fire-and-forget cleanup — tracked until it settles, so generateZip can
+    // wait for it instead of publishing underneath it. A second invalidate()
+    // keeps the first one's cleanup in the tracked promise.
+    const previous = this.pendingCleanups.get(eventId);
+    const run = this._cleanup(eventId).catch(err =>
       logger.warn('downloadZipService.invalidate cleanup error', { eventId, error: err.message })
     );
+    const tracked = Promise.all([previous, run]).then(() => {
+      if (this.pendingCleanups.get(eventId) === tracked) this.pendingCleanups.delete(eventId);
+    });
+    this.pendingCleanups.set(eventId, tracked);
 
     // Debounce regeneration
     const newTimer = setTimeout(() => {
@@ -421,11 +475,19 @@ class DownloadZipService {
    */
   async invalidateAll() {
     try {
+      // A first build still in flight has no download_zip_path yet, so the
+      // query misses it — and it read its settings when it started. Left
+      // alone, its version checks pass and it publishes a zip built under
+      // the old settings. Taken BEFORE the query: a build that finishes
+      // while the SELECT runs leaves activeBuilds and writes the row after
+      // the query read it, so it would be in neither set afterwards.
+      const building = [...this.activeBuilds.keys()];
       const events = await db('events')
         .whereNotNull('download_zip_path')
         .select('id');
-      for (const event of events) {
-        this.invalidate(event.id);
+      const ids = new Set([...events.map((event) => event.id), ...building]);
+      for (const id of ids) {
+        this.invalidate(id);
       }
     } catch (err) {
       logger.error('downloadZipService.invalidateAll error', { error: err.message });

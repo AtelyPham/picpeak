@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database/db');
 const { adminAuth } = require('../middleware/auth');
-const { requirePermission } = require('../middleware/permissions');
+const { requirePermission, userHasAnyPermission } = require('../middleware/permissions');
+const { canAccessEvent } = require('../middleware/ownership');
 const { ensureThumbnail, ensurePreviewImage } = require('../services/imageProcessor');
 const { getStorage } = require('../services/storage');
 const logger = require('../utils/logger');
@@ -25,6 +26,38 @@ function sameStorageKey(a, b) {
     .replace(/^\.?\/+/, '')
     .replace(/\/+/g, '/');
   return canonical(a) === canonical(b);
+}
+
+// One regeneration of each kind at a time. Two overlapping library-wide runs
+// double the load and delete each other's freshly written renditions. Held per
+// process; another replica can still start its own.
+const runningJobs = { thumbnails: false, previews: false };
+
+/**
+ * Who may start a regeneration. Scoped to an event it is that event's photo
+ * work, for whoever can act on the event. Unscoped it rebuilds every gallery
+ * after an instance-wide settings change, so it needs settings.edit like the
+ * settings write itself. Answers the refusal itself and returns false when
+ * the caller may not start the job.
+ */
+async function mayStartRegeneration(req, res, eventId) {
+  if (eventId) {
+    const event = await db('events').where('id', eventId).first();
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return false;
+    }
+    if (!canAccessEvent(req.admin, event)) {
+      res.status(403).json({ error: 'Access denied', code: 'FORBIDDEN' });
+      return false;
+    }
+    return true;
+  }
+  if (!(await userHasAnyPermission(req.admin.id, ['settings.edit']))) {
+    res.status(403).json({ error: 'Insufficient permissions', code: 'FORBIDDEN' });
+    return false;
+  }
+  return true;
 }
 
 // Parse JSON-encoded setting values
@@ -67,8 +100,9 @@ router.get('/settings', adminAuth, requirePermission('photos.view'), async (req,
   }
 });
 
-// Update thumbnail settings
-router.put('/settings', adminAuth, requirePermission('photos.edit'), async (req, res) => {
+// Update thumbnail settings. Instance-wide: they shape every gallery's
+// renditions, so this is a settings edit like the other settings writes.
+router.put('/settings', adminAuth, requirePermission('settings.edit'), async (req, res) => {
   try {
     const { width, height, fit, quality, format, lightbox_preview_enabled } = req.body;
     
@@ -139,8 +173,15 @@ router.put('/settings', adminAuth, requirePermission('photos.edit'), async (req,
 
 // Regenerate all thumbnails with new settings
 router.post('/regenerate', adminAuth, requirePermission('photos.edit'), async (req, res) => {
+  let acquired = false;
   try {
     const { eventId } = req.body; // Optional: regenerate for specific event only
+    if (!(await mayStartRegeneration(req, res, eventId))) return;
+    if (runningJobs.thumbnails) {
+      return res.status(409).json({ error: 'A thumbnail regeneration is already running.', code: 'REGENERATION_RUNNING' });
+    }
+    runningJobs.thumbnails = true;
+    acquired = true;
     
     // source_origin/external_relpath/filename feed BOTH deleteThumbnailTiers
     // (which derives the tier keys from the same fields ensureThumbnailAtWidth
@@ -150,21 +191,22 @@ router.post('/regenerate', adminAuth, requirePermission('photos.edit'), async (r
     let query = db('photos')
       .select(
         'id', 'event_id', 'path', 'media_type', 'mime_type', 'thumbnail_path',
+        // ensureThumbnail keeps a complete video's poster note in step with
+        // the frame it rebuilt (issue 1430); it needs the status to know.
+        'processing_status',
         'source_origin', 'external_relpath', 'filename'
       );
     if (eventId) {
       query = query.where('event_id', eventId);
     }
-    // Skip videos, matching /regenerate-previews. Their thumbnail is a poster
-    // frame from videoProcessor, so handing the container file to Sharp here
-    // only ever produced an error per video row.
-    query = query.where(function() {
-      this.whereNull('media_type').orWhere('media_type', '!=', 'video');
-    });
+    // Videos are included since ensureThumbnail learned to rebuild a poster
+    // frame (issue 1414) — they used to be filtered out here because Sharp
+    // threw on every one. They are handled differently in the loop below.
 
     const photos = await query;
     
     if (photos.length === 0) {
+      runningJobs.thumbnails = false;
       return res.json({ message: 'No photos to regenerate' });
     }
     
@@ -181,6 +223,27 @@ router.post('/regenerate', adminAuth, requirePermission('photos.edit'), async (r
       
       for (const photo of photos) {
         try {
+          // A video is REPAIRED, not rebuilt. Its poster frame is rendered at
+          // a fixed size by videoProcessor and does not depend on the settings
+          // this endpoint is pressed to apply, so forcing it would re-read
+          // every video on every press — a full object download each on S3 —
+          // to write back the same bytes. thumbnail_path stays on the row and
+          // `force` stays off, so ensureThumbnail's own validity check skips a
+          // healthy poster and only a missing or unreadable one is rebuilt.
+          // boundVideoSource:false because the size bound guards the guest
+          // request path; here an admin asked, in a background job, and
+          // bounded a large S3 video could only ever get the placeholder.
+          // No tier deletion either: videos never take the tier path.
+          const isVideo = photo.media_type === 'video' || (photo.mime_type && photo.mime_type.startsWith('video/'));
+          if (isVideo) {
+            if (await ensureThumbnail(photo, { boundVideoSource: false })) {
+              successCount++;
+            } else {
+              errorCount++;
+            }
+            continue;
+          }
+
           // Drop the responsive tiers first (#1095), same as the preview
           // endpoint below. They are cached by width outside thumbnail_path
           // and their key carries no settings version, so regenerating only
@@ -241,10 +304,12 @@ router.post('/regenerate', adminAuth, requirePermission('photos.edit'), async (r
         }
       }
       
+      runningJobs.thumbnails = false;
       logger.info(`Thumbnail regeneration complete: ${successCount} success, ${errorCount} errors`);
     });
     
   } catch (error) {
+    if (acquired) runningJobs.thumbnails = false;
     logger.error('Error starting thumbnail regeneration:', error);
     res.status(500).json({ error: 'Failed to start thumbnail regeneration' });
   }
@@ -255,8 +320,15 @@ router.post('/regenerate', adminAuth, requirePermission('photos.edit'), async (r
 // (thumbnails) endpoint above — same auth, same fire-and-forget shape,
 // same per-photo error handling.
 router.post('/regenerate-previews', adminAuth, requirePermission('photos.edit'), async (req, res) => {
+  let acquired = false;
   try {
     const { eventId } = req.body;
+    if (!(await mayStartRegeneration(req, res, eventId))) return;
+    if (runningJobs.previews) {
+      return res.status(409).json({ error: 'A preview regeneration is already running.', code: 'REGENERATION_RUNNING' });
+    }
+    runningJobs.previews = true;
+    acquired = true;
 
     // source_origin/external_relpath/filename are what ensurePreviewImage
     // branches on for external/reference rows (#1078) — without them every
@@ -273,6 +345,7 @@ router.post('/regenerate-previews', adminAuth, requirePermission('photos.edit'),
 
     const photos = await query;
     if (photos.length === 0) {
+      runningJobs.previews = false;
       return res.json({ message: 'No image photos to regenerate previews for', count: 0 });
     }
 
@@ -307,9 +380,11 @@ router.post('/regenerate-previews', adminAuth, requirePermission('photos.edit'),
           errorCount++;
         }
       }
+      runningJobs.previews = false;
       logger.info(`Preview regeneration complete: ${successCount} success, ${errorCount} errors`);
     });
   } catch (error) {
+    if (acquired) runningJobs.previews = false;
     logger.error('Error starting preview regeneration:', error);
     res.status(500).json({ error: 'Failed to start preview regeneration' });
   }

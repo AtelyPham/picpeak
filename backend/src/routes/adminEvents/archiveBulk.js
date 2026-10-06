@@ -83,7 +83,7 @@ module.exports = (router) => {
       // Foreign/non-existent ids are dropped and reported as failures so this
       // route can't archive another admin's events (the single-event
       // /:id/archive route enforces the same via requireEventOwnership).
-      const { allowed: allowedIds, denied: deniedIds } = await filterOwnedEventIds(req.admin, eventIds);
+      const { allowed: allowedIds, denied: deniedIds } = await filterOwnedEventIds(req.admin, eventIds, { honourManageAll: true });
 
       const results = {
         successful: [],
@@ -171,7 +171,7 @@ module.exports = (router) => {
       // admin/editor scoped to their own events could cascade-delete any
       // event by id. Foreign/non-existent ids are dropped and reported as
       // failures (indistinguishable, to avoid an existence oracle).
-      const { allowed: allowedIds, denied: deniedIds } = await filterOwnedEventIds(req.admin, eventIds);
+      const { allowed: allowedIds, denied: deniedIds } = await filterOwnedEventIds(req.admin, eventIds, { honourManageAll: true });
 
       const results = {
         successful: [],

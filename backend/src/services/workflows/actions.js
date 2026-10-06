@@ -15,6 +15,7 @@
  * is observable rather than silent. Wiring is a follow-up commit.
  */
 const registry = require('./registry');
+const { formatBoolean } = require('../../utils/dbCompat');
 
 // --- Conditions ---
 
@@ -30,6 +31,34 @@ registry.registerCondition('invoice_paid', async (ctx) => {
   const paid = Number(inv.paid_amount_minor) || 0;
   const total = Number(inv.total_amount_minor);
   return Number.isFinite(total) && total > 0 && paid >= total;
+});
+
+// True when the run's customer is in the configured customer groups (#1443):
+// `match: 'any'` (default) in at least one, `'all'` in every one. Membership
+// is read here, when the node is evaluated — a delayed node sees the groups as
+// they are then, not as they were when the run started. The customer comes
+// from `customerAccountId` in the run's vars, which the customer.created,
+// quote.*, contract.* and invoice.* triggers set; on any other trigger (the
+// gallery and event ones) there is no customer and the condition is false.
+// As with a newsletter group rule, a group archived (or deleted) since the
+// node was configured contributes nobody — so with `all` it can no longer be
+// matched and the condition is false. Read-only, so a dry run evaluates it
+// like a real one.
+registry.registerCondition('customer_in_group', async (ctx) => {
+  const customerId = Number(ctx.vars?.customerAccountId);
+  if (!Number.isInteger(customerId) || customerId <= 0) return false;
+  const cfg = ctx.node?.config || {};
+  const groupIds = [...new Set((Array.isArray(cfg.groupIds) ? cfg.groupIds : [])
+    .map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  if (groupIds.length === 0) return false;
+  const found = await ctx.db('customer_group_members')
+    .join('customer_groups', 'customer_groups.id', 'customer_group_members.group_id')
+    .where('customer_groups.is_archived', formatBoolean(false))
+    .where('customer_group_members.customer_account_id', customerId)
+    .whereIn('customer_group_members.group_id', groupIds)
+    .pluck('customer_group_members.group_id');
+  const distinct = new Set(found.map(Number)).size;
+  return cfg.match === 'all' ? distinct === groupIds.length : distinct > 0;
 });
 
 // --- Actions ---
@@ -50,6 +79,11 @@ registry.registerAction('send_email', async (ctx) => {
   const eventId = ctx.vars.eventId || null;
   const emailType = cfg.emailType || cfg.template || 'workflow_notification';
   const emailData = { ...(cfg.emailData || {}), ...(ctx.vars.emailData || {}) };
+  // Attachments are file paths the mailer reads from disk. Node config and run
+  // vars are author- (or test-run-payload-) controlled, so they must never
+  // choose a path; actions that attach documents build the list themselves
+  // from stored document paths (see escalate_to_collections).
+  delete emailData.attachments;
 
   // INTERNAL/admin = immediate; EXTERNAL/customer = business-hours floor.
   const respectBusinessHours = !isInternal;
@@ -102,9 +136,9 @@ registry.registerAction('escalate_to_collections', async (ctx) => {
 
   const attachments = [];
   try {
-    const fs = require('fs');
-    if (invoice.pdf_path && fs.existsSync(invoice.pdf_path)) {
-      attachments.push({ filename: `${invoice.invoice_number}.pdf`, contentPath: invoice.pdf_path, contentType: 'application/pdf' });
+    const invoicePdf = require('../../utils/storedDocumentPdf').invoicePdfFile(invoice.pdf_path);
+    if (invoicePdf) {
+      attachments.push({ filename: `${invoice.invoice_number}.pdf`, contentPath: invoicePdf, contentType: 'application/pdf' });
     }
   } catch (_) { /* attachment is best-effort */ }
 
@@ -311,6 +345,63 @@ registry.registerAction('prepare_invoice', async (ctx) => {
   return { invoice_prepared: invoiceIds };
 });
 
+// Prepare DRAFT invoice(s) from a COMPLETED contract (#1446) — the post-sign
+// step of the built-in "Contract completed" flow, which puts an admin
+// approval gate in front of it. Refuses anything but a fully signed contract
+// (convertToInvoiceOnly does), creates the invoices on hold, and adopts the
+// ones an earlier run made instead of making them twice. A failure is on the
+// run AND on the contract (recordFollowUpFailure), where the admin looks.
+/** Link a quote-backed contract's unlinked invoices to it; returns how many. */
+async function linkQuoteInvoices(db, contractId) {
+  const contract = await db('contracts').where({ id: contractId }).first('source_quote_id');
+  if (!contract || !contract.source_quote_id) return 0;
+  const quote = await db('quotes').where({ id: contract.source_quote_id }).first('converted_contract_id');
+  // Only a quote this contract was made from: its invoices came through it.
+  if (!quote || Number(quote.converted_contract_id) !== Number(contractId)) return 0;
+  const { auditedUpdate } = require('../accountingHistory');
+  return auditedUpdate(db, 'invoices',
+    (q) => q.where({ source_quote_id: contract.source_quote_id }).whereNull('source_contract_id'),
+    { source_contract_id: contractId },
+    { actor: null, source: 'contract.convert.invoices' });
+}
+
+registry.registerAction('prepare_contract_invoice', async (ctx) => {
+  const contractId = ctx.run.entity_id;
+  if (ctx.run.entity_type !== 'contract' || !contractId) {
+    return { skipped: true, reason: 'prepare_contract_invoice needs a contract entity' };
+  }
+  if (ctx.vars?.__dryRun) return { dryRun: true, would: 'prepare_contract_invoice', contractId };
+  if (Array.isArray(ctx.vars.preparedInvoiceIds) && ctx.vars.preparedInvoiceIds.length) {
+    return { already: true, invoiceIds: ctx.vars.preparedInvoiceIds };
+  }
+  // Done now: a failure an earlier run recorded is no longer outstanding.
+  const cleared = () => require('../contract/signingV2')
+    .clearFollowUpFailure(contractId, { steps: ['prepare_contract_invoice'] });
+  const existing = await ctx.db('invoices').where({ source_contract_id: contractId }).select('id');
+  if (existing.length) {
+    ctx.vars.preparedInvoiceIds = existing.map((r) => r.id);
+    await cleared();
+    return { already: true, invoiceIds: ctx.vars.preparedInvoiceIds };
+  }
+  try {
+    const adminId = await resolveActor(ctx);
+    await require('../contract/conversions').convertToInvoiceOnly(contractId, adminId, { draft: true });
+  } catch (err) {
+    // Crash-recovery re-run: a quote-backed conversion commits the invoices
+    // (and marks the quote converted) before it links them to the contract.
+    // Link the ones this contract's quote produced, rather than failing on
+    // the converted quote for ever.
+    if (!(await linkQuoteInvoices(ctx.db, contractId))) {
+      await require('../contract/signingV2').recordFollowUpFailure(contractId, 'prepare_contract_invoice', err);
+      throw err;
+    }
+  }
+  const created = await ctx.db('invoices').where({ source_contract_id: contractId }).select('id');
+  ctx.vars.preparedInvoiceIds = created.map((r) => r.id);
+  await cleared();
+  return { invoice_prepared: ctx.vars.preparedInvoiceIds };
+});
+
 // Send a prepared draft document (config.document = 'invoice' | 'contract').
 registry.registerAction('send_document', async (ctx) => {
   const doc = ctx.node.config?.document || 'invoice';
@@ -328,8 +419,10 @@ registry.registerAction('send_document', async (ctx) => {
   if (doc === 'contract') {
     const cid = ctx.vars.preparedContractId;
     if (!cid) return { skipped: true, reason: 'no prepared contract to send' };
-    await require('../contractService').sendContract(cid, adminId);
-    return { contract_sent: cid };
+    const sent = await require('../contractService').sendContract(cid, adminId);
+    // Sent, but the invitation failed: recorded on the contract, retried by
+    // the hourly sweep. The run log says so rather than failing the step.
+    return sent && sent.invitationFailed ? { contract_sent: cid, invitation_failed: true } : { contract_sent: cid };
   }
   return { skipped: true, reason: `send_document for '${doc}' not implemented yet` };
 });

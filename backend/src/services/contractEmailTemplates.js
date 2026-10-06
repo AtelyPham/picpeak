@@ -85,6 +85,175 @@ const CONTRACT_EMAIL_TEMPLATES = {
       body_text: 'Vertrag {{contract_number}} von {{signed_customer_name}} ({{customer_email}}) unterzeichnet. Öffnen: {{admin_dashboard_url}}',
     },
   },
+  // Signatures v2 (#1446): the code a signer confirms their email with, and
+  // the admin's notice when a signer declines.
+  contract_signing_code: {
+    category: 'contracts', feature_flag: 'contracts',
+    variables: ['contract_number', 'customer_name', 'code', 'ttl_minutes'],
+    en: {
+      subject: 'Your code for contract {{contract_number}}: {{code}}',
+      body_html: `<h2>Your code</h2>
+<p>Dear {{customer_name}},</p>
+<p>Enter this code to open contract {{contract_number}}:</p>
+<p style="font-size: 30px; font-weight: bold; letter-spacing: 8px; text-align: center; margin: 24px 0;">{{code}}</p>
+<p style="font-size: 13px; color: #666;">The code is valid for {{ttl_minutes}} minutes. If you didn't ask for it, you can ignore this email.</p>`,
+      body_text: 'Your code for contract {{contract_number}}: {{code}}\n\nThe code is valid for {{ttl_minutes}} minutes. If you did not ask for it, you can ignore this email.',
+    },
+    de: {
+      subject: 'Ihr Code für Vertrag {{contract_number}}: {{code}}',
+      body_html: `<h2>Ihr Code</h2>
+<p>Sehr geehrte/r {{customer_name}},</p>
+<p>mit diesem Code öffnen Sie den Vertrag {{contract_number}}:</p>
+<p style="font-size: 30px; font-weight: bold; letter-spacing: 8px; text-align: center; margin: 24px 0;">{{code}}</p>
+<p style="font-size: 13px; color: #666;">Der Code ist {{ttl_minutes}} Minuten gültig. Falls Sie ihn nicht angefordert haben, können Sie diese E-Mail ignorieren.</p>`,
+      body_text: 'Ihr Code für Vertrag {{contract_number}}: {{code}}\n\nDer Code ist {{ttl_minutes}} Minuten gültig. Falls Sie ihn nicht angefordert haben, können Sie diese E-Mail ignorieren.',
+    },
+  },
+  contract_declined_admin_notification: {
+    category: 'contracts', feature_flag: 'contracts',
+    variables: ['contract_number', 'signer_name', 'reason', 'admin_dashboard_url'],
+    en: {
+      subject: 'Contract {{contract_number}} declined by {{signer_name}}',
+      body_html: `<h2>Contract declined</h2><p>{{signer_name}} has declined contract <strong>{{contract_number}}</strong>.</p>
+{{#if reason}}<p>Reason given: {{reason}}</p>{{/if}}
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Open in admin</a></p>
+<p style="font-size: 13px; color: #666;">The signing links for this contract no longer work. Make a new contract if the terms need to change.</p>`,
+      body_text: 'Contract {{contract_number}} was declined by {{signer_name}}.{{#if reason}} Reason: {{reason}}{{/if}} Open: {{admin_dashboard_url}}',
+    },
+    de: {
+      subject: 'Vertrag {{contract_number}} von {{signer_name}} abgelehnt',
+      body_html: `<h2>Vertrag abgelehnt</h2><p>{{signer_name}} hat den Vertrag <strong>{{contract_number}}</strong> abgelehnt.</p>
+{{#if reason}}<p>Angegebener Grund: {{reason}}</p>{{/if}}
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Im Admin-Bereich öffnen</a></p>
+<p style="font-size: 13px; color: #666;">Die Links zur Unterzeichnung dieses Vertrags funktionieren nicht mehr. Erstellen Sie einen neuen Vertrag, wenn sich die Bedingungen ändern sollen.</p>`,
+      body_text: 'Vertrag {{contract_number}} wurde von {{signer_name}} abgelehnt.{{#if reason}} Grund: {{reason}}{{/if}} Öffnen: {{admin_dashboard_url}}',
+    },
+  },
+  // #1446: the signer's receipt, right after their own signature. No
+  // attachment: the final copy follows once everyone has signed.
+  contract_signature_received: {
+    category: 'contracts', feature_flag: 'contracts',
+    variables: ['contract_number', 'customer_name', 'title', 'signed_at', 'issuer_name'],
+    en: {
+      subject: 'We received your signature on contract {{contract_number}}',
+      body_html: `<h2>Signature received</h2>
+<p>Dear {{customer_name}},</p>
+<p>your signature on contract {{contract_number}}{{#if title}} — "{{title}}"{{/if}} was recorded on {{signed_at}}.</p>
+<p>Once every signer has signed{{#if issuer_name}} and {{issuer_name}} has counter-signed{{/if}}, you will receive the final contract and its signing certificate by email.</p>
+<p style="font-size: 13px; color: #666;">If you did not sign this contract, reply to this email straight away.</p>`,
+      body_text: 'Your signature on contract {{contract_number}} was recorded on {{signed_at}}. Once everyone has signed, you will receive the final contract and its signing certificate by email. If you did not sign it, reply to this email straight away.',
+    },
+    de: {
+      subject: 'Ihre Unterschrift zum Vertrag {{contract_number}} ist eingegangen',
+      body_html: `<h2>Unterschrift eingegangen</h2>
+<p>Sehr geehrte/r {{customer_name}},</p>
+<p>Ihre Unterschrift zum Vertrag {{contract_number}}{{#if title}} – „{{title}}"{{/if}} wurde am {{signed_at}} erfasst.</p>
+<p>Sobald alle unterzeichnet haben{{#if issuer_name}} und {{issuer_name}} gegengezeichnet hat{{/if}}, erhalten Sie den endgültigen Vertrag und das Prüfprotokoll per E-Mail.</p>
+<p style="font-size: 13px; color: #666;">Falls Sie diesen Vertrag nicht unterzeichnet haben, antworten Sie bitte umgehend auf diese E-Mail.</p>`,
+      body_text: 'Ihre Unterschrift zum Vertrag {{contract_number}} wurde am {{signed_at}} erfasst. Sobald alle unterzeichnet haben, erhalten Sie den endgültigen Vertrag und das Prüfprotokoll per E-Mail. Falls Sie ihn nicht unterzeichnet haben, antworten Sie bitte umgehend auf diese E-Mail.',
+    },
+  },
+  // #1446: a reminder with a new link. Links are stored as hashes, so a
+  // reminder can't re-send the old one — it says so.
+  contract_signature_reminder: {
+    category: 'contracts', feature_flag: 'contracts',
+    variables: ['contract_number', 'customer_name', 'response_url', 'title', 'event_name', 'valid_until'],
+    en: {
+      subject: 'Reminder: contract {{contract_number}} is waiting for your signature',
+      body_html: `<h2>Contract {{contract_number}}</h2>
+<p>Dear {{customer_name}},</p>
+<p>contract {{contract_number}}{{#if title}} — "{{title}}"{{/if}} is still waiting for your signature.</p>
+<p style="text-align: center; margin: 30px 0;">
+  <a href="{{response_url}}" class="button">Review &amp; sign contract</a>
+</p>
+<p style="font-size: 13px; color: #666;">This is a new link. Links from earlier emails about this contract no longer work.</p>
+{{#if valid_until}}<p style="font-size: 13px; color: #666;">Please sign by {{valid_until}}.</p>{{/if}}`,
+      body_text: 'Contract {{contract_number}} is still waiting for your signature.\n\nOpen: {{response_url}}\n\nThis is a new link; links from earlier emails no longer work.{{#if valid_until}} Please sign by {{valid_until}}.{{/if}}',
+    },
+    de: {
+      subject: 'Erinnerung: Vertrag {{contract_number}} wartet auf Ihre Unterschrift',
+      body_html: `<h2>Vertrag {{contract_number}}</h2>
+<p>Sehr geehrte/r {{customer_name}},</p>
+<p>der Vertrag {{contract_number}}{{#if title}} – „{{title}}"{{/if}} wartet noch auf Ihre Unterschrift.</p>
+<p style="text-align: center; margin: 30px 0;">
+  <a href="{{response_url}}" class="button">Vertrag prüfen &amp; unterzeichnen</a>
+</p>
+<p style="font-size: 13px; color: #666;">Dies ist ein neuer Link. Links aus früheren E-Mails zu diesem Vertrag funktionieren nicht mehr.</p>
+{{#if valid_until}}<p style="font-size: 13px; color: #666;">Bitte unterzeichnen Sie bis {{valid_until}}.</p>{{/if}}`,
+      body_text: 'Der Vertrag {{contract_number}} wartet noch auf Ihre Unterschrift.\n\nÖffnen: {{response_url}}\n\nDies ist ein neuer Link; Links aus früheren E-Mails funktionieren nicht mehr.{{#if valid_until}} Bitte unterzeichnen bis {{valid_until}}.{{/if}}',
+    },
+  },
+  // #1446: enumeration or replay on the public signing routes
+  // (services/contract/signingSignals.js). Once per kind per hour. No IP, no
+  // token, no code in it.
+  contract_signing_suspicious_admin_notification: {
+    category: 'contracts', feature_flag: 'contracts',
+    variables: ['kind', 'hour', 'count', 'limit', 'contract_number'],
+    en: {
+      subject: 'Unusual activity on contract signing links',
+      body_html: `<h2>Unusual activity on signing links</h2>
+<p>In the hour from {{hour}}, the signing pages saw <strong>{{count}}</strong> events of the kind <code>{{kind}}</code> from one source{{#if contract_number}} on contract {{contract_number}}{{/if}} — the alert threshold is {{limit}}.</p>
+<p>This can be someone trying signing links or codes they were not sent. The links themselves stay protected by their codes and rate limits; nothing was disclosed. If it continues, check the System Health page and your reverse proxy's logs.</p>
+<p style="font-size: 13px; color: #666;">You get at most one of these per kind per hour. The thresholds are in Settings → CRM → Contracts.</p>`,
+      body_text: 'In the hour from {{hour}}, the signing pages saw {{count}} events of the kind {{kind}} from one source{{#if contract_number}} on contract {{contract_number}}{{/if}} (threshold {{limit}}). Nothing was disclosed; check System Health if it continues.',
+    },
+    de: {
+      subject: 'Auffällige Aktivität bei Links zur Vertragsunterzeichnung',
+      body_html: `<h2>Auffällige Aktivität bei Unterzeichnungslinks</h2>
+<p>In der Stunde ab {{hour}} gab es auf den Unterzeichnungsseiten <strong>{{count}}</strong> Ereignisse der Art <code>{{kind}}</code> von einer Quelle{{#if contract_number}} beim Vertrag {{contract_number}}{{/if}} – die Alarmschwelle liegt bei {{limit}}.</p>
+<p>Das kann jemand sein, der Links oder Codes ausprobiert, die ihm nicht geschickt wurden. Die Links bleiben durch ihre Codes und Ratenbegrenzungen geschützt; es wurde nichts offengelegt. Hält es an, prüfen Sie die Systemstatus-Seite und die Protokolle Ihres Reverse Proxys.</p>
+<p style="font-size: 13px; color: #666;">Sie erhalten höchstens eine solche Nachricht pro Art und Stunde. Die Schwellen finden Sie unter Einstellungen → CRM → Verträge.</p>`,
+      body_text: 'In der Stunde ab {{hour}} gab es {{count}} Ereignisse der Art {{kind}} von einer Quelle{{#if contract_number}} beim Vertrag {{contract_number}}{{/if}} (Schwelle {{limit}}). Es wurde nichts offengelegt; prüfen Sie den Systemstatus, wenn es anhält.',
+    },
+  },
+  // #1446: collect-then-freeze (services/contract/dataCollection.js). Sent
+  // before the contract exists in its final form, so it names the number and
+  // nothing else: no title, no PDF, no attachment.
+  contract_data_request: {
+    category: 'contracts', feature_flag: 'contracts',
+    variables: ['contract_number', 'customer_name', 'response_url', 'valid_until'],
+    en: {
+      subject: 'Please complete your details for contract {{contract_number}}',
+      body_html: `<h2>Contract {{contract_number}}</h2>
+<p>Dear {{customer_name}},</p>
+<p>before we can send you contract {{contract_number}} to sign, we need a few of your details, such as your address.</p>
+<p style="text-align: center; margin: 30px 0;">
+  <a href="{{response_url}}" class="button">Complete my details</a>
+</p>
+<p style="font-size: 13px; color: #666;">You confirm your email address with a code first. Once your details are in, the contract is prepared with them and you can read and sign it straight away.</p>`,
+      body_text: 'Before we can send you contract {{contract_number}} to sign, we need a few of your details.\n\nOpen: {{response_url}}\n\nYou confirm your email address with a code first; then the contract is prepared with your details and you can sign it.',
+    },
+    de: {
+      subject: 'Bitte ergänzen Sie Ihre Angaben für Vertrag {{contract_number}}',
+      body_html: `<h2>Vertrag {{contract_number}}</h2>
+<p>Sehr geehrte/r {{customer_name}},</p>
+<p>bevor wir Ihnen den Vertrag {{contract_number}} zur Unterzeichnung senden können, benötigen wir einige Angaben von Ihnen, etwa Ihre Adresse.</p>
+<p style="text-align: center; margin: 30px 0;">
+  <a href="{{response_url}}" class="button">Angaben ergänzen</a>
+</p>
+<p style="font-size: 13px; color: #666;">Sie bestätigen zuerst Ihre E-Mail-Adresse mit einem Code. Sobald Ihre Angaben vorliegen, wird der Vertrag damit erstellt und Sie können ihn sofort lesen und unterzeichnen.</p>`,
+      body_text: 'Bevor wir Ihnen den Vertrag {{contract_number}} zur Unterzeichnung senden können, benötigen wir einige Angaben von Ihnen.\n\nÖffnen: {{response_url}}\n\nSie bestätigen zuerst Ihre E-Mail-Adresse mit einem Code; danach wird der Vertrag mit Ihren Angaben erstellt und Sie können ihn unterzeichnen.',
+    },
+  },
+  // #1446: the time to sign ran out (services/contract/expiry.js).
+  contract_expired_admin_notification: {
+    category: 'contracts', feature_flag: 'contracts',
+    variables: ['contract_number', 'signed_count', 'admin_dashboard_url'],
+    en: {
+      subject: 'Contract {{contract_number}} expired unsigned',
+      body_html: `<h2>Contract expired</h2><p>The time to sign contract <strong>{{contract_number}}</strong> has run out before every signer signed. Signatures already given: {{signed_count}}.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Open in admin</a></p>
+<p style="font-size: 13px; color: #666;">Its signing links no longer work. To go ahead, make a new contract and send it.</p>`,
+      body_text: 'The time to sign contract {{contract_number}} has run out. Signatures already given: {{signed_count}}. Its links no longer work; make a new contract to go ahead. Open: {{admin_dashboard_url}}',
+    },
+    de: {
+      subject: 'Vertrag {{contract_number}} ohne alle Unterschriften abgelaufen',
+      body_html: `<h2>Vertrag abgelaufen</h2><p>Die Frist zur Unterzeichnung des Vertrags <strong>{{contract_number}}</strong> ist abgelaufen, bevor alle unterzeichnet haben. Bereits geleistete Unterschriften: {{signed_count}}.</p>
+<p style="text-align: center; margin: 30px 0;"><a href="{{admin_dashboard_url}}" class="button">Im Admin-Bereich öffnen</a></p>
+<p style="font-size: 13px; color: #666;">Die Links zur Unterzeichnung funktionieren nicht mehr. Um fortzufahren, erstellen und versenden Sie einen neuen Vertrag.</p>`,
+      body_text: 'Die Frist zur Unterzeichnung des Vertrags {{contract_number}} ist abgelaufen. Bereits geleistete Unterschriften: {{signed_count}}. Die Links funktionieren nicht mehr; erstellen Sie einen neuen Vertrag. Öffnen: {{admin_dashboard_url}}',
+    },
+  },
 };
 
 // Cache the "all-seeded" state so the check is free after the first

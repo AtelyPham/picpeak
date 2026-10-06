@@ -9,6 +9,8 @@ const businessProfileService = require('../businessProfileService');
 const { buildIssuerBlock, buildRecipientBlock } = require('../_renderContext');
 const pdfService = require('../pdfService');
 const { ensureInt, ensureNumber } = require('../../utils/numericHelpers');
+const { parsePromotionSnapshot } = require('../../utils/lineItemTotals');
+const { readStoredDocumentPdf } = require('../../utils/storedDocumentPdf');
 const { getHierarchyHelpers } = require('./helpers');
 const { getInvoiceById } = require('./queries');
 
@@ -181,12 +183,23 @@ async function buildInvoiceRenderContext(invoice, lineItems) {
   // is hardcoded. Empty/whitespace → null (row omitted).
   const vatNoteRaw = await getAppSetting('crm_invoices_vat_note_text');
   const vatNote = typeof vatNoteRaw === 'string' && vatNoteRaw.trim() ? vatNoteRaw.trim() : null;
+  // Not VAT-registered (Settings → Accounting): an invoice without VAT shows
+  // no MwSt. row, and the VAT note stands in its place. Null = never set.
+  const vatRegistered = await require('../../utils/vatRegistration').getVatRegisteredSetting();
+  // What the Leistungsdatum row does when the service date is the issue date
+  // (Settings → CRM → Invoices, #1546). Unset → state it in words, which keeps
+  // the time of supply on the document without printing the same date twice.
+  const serviceDateModeRaw = await getAppSetting('crm_invoices_service_date_mode');
+  const serviceDateMode = ['note', 'repeat', 'omit'].includes(serviceDateModeRaw)
+    ? serviceDateModeRaw : 'note';
 
   return {
     locale: invoice.language || profile?.default_locale || 'de',
     currency: invoice.currency,
     qrFormat: resolvedQrFormat,
     dateFormat,
+    // PDF theme (#1445): font family, colours, footer, page numbers.
+    theme: await require('../pdfThemeService').resolveTheme('invoice'),
     // Shared issuer + recipient builders. Invoices skip the quote-only
     // payment-block toggles; the invoice PDF always shows the payment
     // block. See backend/src/services/_renderContext.js.
@@ -199,6 +212,8 @@ async function buildInvoiceRenderContext(invoice, lineItems) {
     paymentTerm,
     // Free-text VAT/legal note (#794) — rendered under the MwSt. line by drawTotals.
     vatNote,
+    vatRegistered,
+    serviceDateMode,
     lineItems: lineItems.map((li) => ({
       quantity: li.quantity,
       description: li.description,
@@ -209,6 +224,11 @@ async function buildInvoiceRenderContext(invoice, lineItems) {
       parentLineItemId: li.parent_line_item_id || null,
       parentPosition: li.parent_position == null ? null : Number(li.parent_position),
       detailsText: li.details_text || null,
+      // Migration 220 — discount lines render as a labelled minus row;
+      // `unit` fills the unit column.
+      lineKind: li.line_kind || 'item',
+      unit: li.unit || null,
+      promotion: parsePromotionSnapshot(li.promotion_snapshot),
     })),
     totals: {
       netAmountMinor: displayedNetMinor,
@@ -235,6 +255,11 @@ async function buildInvoiceRenderContext(invoice, lineItems) {
       invoiceNumber: invoice.invoice_number,
       issueDate: invoice.issue_date,
       dueDate: invoice.due_date,
+      // The date or period of the service (MWSTG Art. 26): a monthly
+      // invoice's period, else the event date. Null → no row.
+      servicePeriod: invoice.monthly_period_start && invoice.monthly_period_end
+        ? { from: invoice.monthly_period_start, to: invoice.monthly_period_end }
+        : (invoice.event_date ? { from: invoice.event_date, to: null } : null),
       totalAmountMinor: invoice.total_amount_minor,
       lateFeeMinor: 0,
       // Reminder level — drives Skonto suppression on second
@@ -280,19 +305,19 @@ async function renderInvoicePdfBuffer(invoiceId) {
   // Imported (historical) invoices store the original PDF on disk
   // — short-circuit the renderer and stream the file untouched so
   // legal documents stay byte-identical to the source. Path is
-  // stored relative to STORAGE_PATH but we accept absolute too.
+  // stored relative to STORAGE_PATH. The file goes to the customer, so
+  // it must be one the import route wrote: inside invoice-imports, with
+  // symlinks followed. Anything else (a crafted restore naming the
+  // evidence key, say) is refused with 403.
   if (data.invoice.imported_pdf_path) {
     const fs = require('fs');
     const path = require('path');
     const { getStoragePath } = require('../../config/storage');
-    const raw = String(data.invoice.imported_pdf_path).trim();
-    const candidates = [
-      path.isAbsolute(raw) ? raw : null,
-      path.join(getStoragePath(), raw.replace(/^\/+/, '')),
-    ].filter(Boolean);
-    const found = candidates.find((p) => {
-      try { return fs.existsSync(p) && fs.statSync(p).isFile(); } catch { return false; }
-    });
+    const { resolveStoredPathStrict } = require('../../utils/safePath');
+    const candidate = resolveStoredPathStrict(String(data.invoice.imported_pdf_path).trim(),
+      [path.join(getStoragePath(), 'business-docs', 'invoice-imports')]);
+    let found = null;
+    try { found = candidate && fs.statSync(candidate).isFile() ? candidate : null; } catch { found = null; }
     if (!found) {
       throw new AppError('Imported invoice PDF is missing on disk', 410);
     }
@@ -357,8 +382,25 @@ async function renderInvoicePdfFromPayload(payload) {
   const ctx = await buildInvoiceRenderContext(fakeInvoice, items);
   return await pdfService.renderInvoiceToBuffer(ctx);
 }
+/**
+ * The invoice PDF to show an admin or the customer. Once an invoice has
+ * left `scheduled`, that is the file that went out — later template,
+ * branding or setting changes never alter it. Scheduled invoices render
+ * live; imported ones keep streaming their original (renderInvoicePdfBuffer).
+ */
+async function getInvoicePdfBuffer(invoiceId) {
+  const invoice = await db('invoices').where({ id: invoiceId }).first('status', 'pdf_path', 'imported_pdf_path');
+  if (!invoice) throw new AppError('Invoice not found', 404);
+  if (invoice.status !== 'scheduled' && !invoice.imported_pdf_path) {
+    const stored = readStoredDocumentPdf(invoice.pdf_path, 'invoice');
+    if (stored) return stored;
+  }
+  return renderInvoicePdfBuffer(invoiceId);
+}
+
 module.exports = {
   buildInvoiceRenderContext,
   renderInvoicePdfBuffer,
   renderInvoicePdfFromPayload,
+  getInvoicePdfBuffer,
 };

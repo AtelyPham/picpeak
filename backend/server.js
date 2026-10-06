@@ -78,6 +78,7 @@ const { startFileWatcher } = require('./src/services/fileWatcher');
 const { startExpirationChecker } = require('./src/services/expirationChecker');
 const { startTransferCleanup } = require('./src/services/transferCleanupService');
 const { startDownloadJobCleanup } = require('./src/services/downloadJobCleanupService');
+const { startFeedbackRateLimitCleanup } = require('./src/services/feedbackRateLimitCleanupService');
 const { startRevealScheduler } = require('./src/services/revealScheduler');
 const { startInvoiceScheduler } = require('./src/services/invoiceSchedulerService');
 const { initializeTransporter, startEmailQueueProcessor } = require('./src/services/emailProcessor');
@@ -87,6 +88,7 @@ const { startScheduledBackups } = require('./src/services/databaseBackup');
 const backgroundProcessor = require('./src/services/backgroundProcessor');
 const { maintenanceMiddleware } = require('./src/middleware/maintenance');
 const { sessionTimeoutMiddleware } = require('./src/middleware/sessionTimeout');
+const { createLargeJsonBody } = require('./src/middleware/largeJsonBody');
 const { errorHandler, notFoundHandler } = require('./src/middleware/errorHandler');
 const rateLimitService = require('./src/services/rateLimitService');
 const { createApiRateLimitGate } = require('./src/middleware/apiRateLimitGate');
@@ -103,7 +105,6 @@ const authRoutes = require('./src/routes/auth');
 const galleryRoutes = require('./src/routes/gallery');
 const adminRoutes = require('./src/routes/admin');
 const adminAuthRoutes = require('./src/routes/adminAuth');
-const secureImagesRoutes = require('./src/routes/secureImages');
 const setupRoutes = require('./src/routes/setup');
 
 const app = express();
@@ -158,13 +159,17 @@ if (enableHsts) {
 
 app.use(cookieParser());
 
+// First, so every later middleware, route and the error handler can put the
+// same id in their logs and responses.
+app.use(require('./src/middleware/requestId'));
+
 app.use((req, res, next) => {
   if (req.headers.authorization) {
     return next();
   }
 
   const path = req.path || '';
-  const slugMatch = path.match(/\/api\/(?:gallery|secure-images)\/([^\/]+)/);
+  const slugMatch = path.match(/\/api\/gallery\/([^\/]+)/);
   const slug = slugMatch ? slugMatch[1] : req.requestedSlug;
   const adminToken = getAdminTokenFromRequest(req);
   const galleryToken = getGalleryTokenFromRequest(req, slug);
@@ -172,8 +177,7 @@ app.use((req, res, next) => {
   const isAdminRequest = path.startsWith('/api/admin') || path.startsWith('/admin');
   const isGalleryRequest = Boolean(slugMatch)
     || path.startsWith('/api/gallery')
-    || path.startsWith('/gallery')
-    || path.startsWith('/api/secure-images');
+    || path.startsWith('/gallery');
 
   // Prefer admin credentials on admin routes so gallery sessions cannot override them.
   if (isAdminRequest) {
@@ -244,7 +248,10 @@ const corsOptions = {
   // off a 429 to wait out the rate-limit window before retrying a thumbnail
   // fetch; without it a split-origin deployment would spend its retry budget
   // inside the window and leave the tile blank after the limit had lifted.
-  exposedHeaders: ['Content-Disposition', 'Retry-After'],
+  //
+  // X-Request-Id carries the correlation id (middleware/requestId.js) that an
+  // admin can quote from an error message.
+  exposedHeaders: ['Content-Disposition', 'Retry-After', 'X-Request-Id'],
 };
 
 // Only attach CORS to API endpoints, not static assets
@@ -294,6 +301,13 @@ app.get(['/health', '/api/health'], async (req, res) => {
 
 // Initialize rate limiters (they will be created dynamically)
 
+// The stylesheet below is interpolated into a raw-text <style> element, where
+// the HTML parser ends the element at the first `</style` regardless of CSS
+// structure. Every segment — palette, base CSS, operator CSS — is settings
+// data, so the whole thing is escaped at the sink rather than trusting each
+// producer. `<` → `\3c ` is the same character to a CSS parser.
+const { escapeCssForStyleElement } = require('./src/utils/cssSanitizer');
+
 function composeInlineStyles(payload) {
   const { branding } = payload;
   const cssSegments = [];
@@ -317,7 +331,7 @@ function composeInlineStyles(payload) {
     cssSegments.push(`/* Custom styles */\n${payload.css}`);
   }
 
-  return cssSegments.join('\n\n');
+  return escapeCssForStyleElement(cssSegments.join('\n\n'));
 }
 
 function escapeHtml(str) {
@@ -407,6 +421,18 @@ function buildSeoMetaTags(seoSettings) {
   return tags.join('\n  ');
 }
 
+// Inter for the landing page, served from the /fonts mount below — the same
+// files frontend/src/index.css declares for the SPA. The document used to
+// link fonts.googleapis.com for this, which leaked every visitor's IP to
+// Google even though the rest of the app had already moved to self-hosted
+// fonts for exactly that reason. 500 is not shipped; the browser falls back
+// to the nearest declared weight, as it already does in the SPA.
+const PUBLIC_SITE_FONT_FACES = `
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/Inter/400.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/Inter/600.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 700; font-display: swap; src: url('/fonts/Inter/700.woff2') format('woff2'); }
+  `;
+
 function buildPublicSiteDocument(payload) {
   const inlineStyles = composeInlineStyles(payload);
   const header = renderBrandHeader(payload.branding);
@@ -422,9 +448,7 @@ function buildPublicSiteDocument(payload) {
   <title>${escapeHtml(payload.title)}</title>
   <meta name="description" content="Curated photo galleries and stories from unforgettable celebrations." />
   ${seoMeta}
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>${PUBLIC_SITE_FONT_FACES}</style>
   <style>${inlineStyles}</style>
 </head>
 <body>
@@ -448,11 +472,6 @@ async function handlePublicSiteRequest(req, res, next) {
       return;
     }
 
-    if (payload.etag && req.headers['if-none-match'] === payload.etag) {
-      res.status(304).end();
-      return;
-    }
-
     // Inject SEO meta settings into payload
     try {
       const seoRows = await db('app_settings')
@@ -470,9 +489,20 @@ async function handlePublicSiteRequest(req, res, next) {
 
     const document = buildPublicSiteDocument(payload);
 
+    // The validator covers the whole document, not only the settings behind
+    // payload.etag: a template change (this PR swapped the Google Fonts
+    // link for self-hosted faces) or a SEO toggle must stop answering 304 to
+    // clients that cached the previous HTML, or they keep it until a
+    // settings change happens to move the payload hash.
+    const etag = `W/"${require('crypto').createHash('sha1').update(document).digest('hex')}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=30, must-revalidate');
-    res.setHeader('ETag', payload.etag);
+    res.setHeader('ETag', etag);
     res.setHeader('Vary', 'Accept-Encoding');
     res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' https: data:; object-src 'none'; script-src 'self'; form-action 'self'");
 
@@ -520,11 +550,16 @@ app.use(createApiRateLimitGate(rateLimitService.getGeneralLimiter));
 app.use(createAuthRateLimitGate(rateLimitService.getAuthLimiter));
 
 // Body limits. 50mb is only needed by the authenticated admin and API-token
-// surfaces (restore manifests, CMS and email templates, bulk operations);
-// applied globally it let any unauthenticated caller hand JSON.parse a 50mb
-// body and block the event loop. express.json skips a request whose body
-// is already parsed, so the scoped parser must run first.
-app.use(['/api/admin', '/api/v1'], express.json({ limit: '50mb' }));
+// surfaces (restore manifests, CMS and email templates, bulk operations).
+// Scoping the large parser to those path prefixes was not enough: it still
+// ran before any authentication, so an unauthenticated POST to an admin path
+// was parsed at 50mb and only then refused. largeJsonBody parses at the large
+// limit only for a verified admin JWT or a known API token; everything else
+// falls through to the 2mb parser below. express.json skips a request whose
+// body is already parsed, so the scoped parser must run first.
+// fallbackLimitBytes mirrors the 2mb parser right below: a body that fits it
+// never triggers the identity check.
+app.use(['/api/admin', '/api/v1'], createLargeJsonBody({ limit: '50mb', fallbackLimitBytes: 2 * 1024 * 1024 }));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
@@ -596,8 +631,11 @@ process.env.EXTERNAL_MEDIA_ROOT = process.env.EXTERNAL_MEDIA_ROOT || '/external-
 // signed contract PDFs (uploads/contracts/signed) and client transfer files
 // (uploads/transfers/<id>) -- both reachable by anyone who learned or guessed
 // a filename. Those are served by their own authorised routes.
-app.use('/uploads/logos', setCorsHeaders, secureStatic(path.join(storagePath, 'uploads/logos')));
-app.use('/uploads/favicons', setCorsHeaders, secureStatic(path.join(storagePath, 'uploads/favicons')));
+// Both trees only ever hold uploaded images; anything else (a script or
+// HTML file an older upload kept its extension for) is not served.
+const { isPublicUploadImage } = require('./src/utils/safePath');
+app.use('/uploads/logos', setCorsHeaders, secureStatic(path.join(storagePath, 'uploads/logos'), { onlyServe: isPublicUploadImage }));
+app.use('/uploads/favicons', setCorsHeaders, secureStatic(path.join(storagePath, 'uploads/favicons'), { onlyServe: isPublicUploadImage }));
 
 // Static file serving for self-hosted webfonts (public — gallery visitors
 // load these via @font-face). Replaces the previous Google Fonts CDN
@@ -615,7 +653,17 @@ app.use('/uploads/favicons', setCorsHeaders, secureStatic(path.join(storagePath,
 // (set by express.static from file mtime), browsers send If-Modified-Since
 // after expiry and pick up the new version automatically. See https://docs.picpeak.app/guides/custom-fonts
 // "Replacing an existing font" for the documented rollout strategy.
-const fontStaticOpts = { maxAge: '7d' };
+//
+// Only font formats leave these mounts (isPublicFontFile): the storage tree is
+// admin-writable and a restored backup can populate it, so anything else in
+// it must not be served from the app origin. nosniff keeps a browser from
+// promoting a font response to another type.
+const { isPublicFontFile } = require('./src/middleware/secureStatic');
+const fontStaticOpts = {
+  maxAge: '7d',
+  onlyServe: isPublicFontFile,
+  setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+};
 app.use(
   '/fonts',
   setCorsHeaders,
@@ -663,6 +711,12 @@ app.get('/og/gallery/:slug', handleGalleryOgRequest);
 // events.og_image_share_enabled (#474). Unauthenticated by design;
 // returns 404 unless the opt-in is on AND a hero_photo_id is set.
 app.get('/og/gallery/:slug/cover', handleGalleryOgCover);
+// Same for PicTransfer links: nginx rewrites crawler hits on
+// /transfer/:token and /transfer-upload/:token here so the preview shows
+// the transfer's name + the branding tagline instead of the SPA stub.
+const { handleTransferOgRequest } = require('./src/services/transferOgService');
+app.get('/og/transfer/:token', handleTransferOgRequest('send'));
+app.get('/og/transfer-upload/:token', handleTransferOgRequest('request'));
 
 // Branded URL shortener (#699). /s/<short_slug> is bot-UA aware:
 //   - Social crawler → server-render OG for the target event so the
@@ -717,9 +771,10 @@ app.get('/s/:shortSlug', async (req, res) => {
       return res.status(410).type('text/plain').send('Short URL points at a deleted event');
     }
 
-    // Browser path: redirect. Hit accounting is fire-and-forget.
+    // Browser path: redirect, carrying the query along (issue 1733: a
+    // `?photo=` link through the shortener). Hit accounting is fire-and-forget.
     galleryShortUrlService.recordHit(row.id).catch(() => {});
-    return res.redirect(302, row.target_path);
+    return res.redirect(302, galleryShortUrlService.redirectTarget(row.target_path, req.originalUrl));
   } catch (err) {
     logger.error('Short URL resolver failed', { slug: req.params.shortSlug, error: err.message });
     return res.status(500).type('text/plain').send('Internal server error');
@@ -772,7 +827,7 @@ app.get(
         const uploadsRoot = path.resolve(path.join(storagePath, 'uploads'));
         const resolved = path.resolve(path.join(uploadsRoot, rel));
         const servableRoots = ['favicons', 'logos'].map((d) => path.join(uploadsRoot, d) + path.sep);
-        if (servableRoots.some((root) => resolved.startsWith(root)) && fs.existsSync(resolved)) {
+        if (servableRoots.some((root) => resolved.startsWith(root)) && isPublicUploadImage(resolved) && fs.existsSync(resolved)) {
           // This route streams the file directly, bypassing the secureStatic
           // middleware — so re-apply its SVG hardening here. An admin-uploaded
           // SVG favicon could contain <script>; served at the top-level
@@ -810,14 +865,24 @@ app.use('/api/admin/system', require('./src/routes/adminSystem'));
 // per event. Mounted at /api/admin so the routes appear at
 // /api/admin/events/:eventId/short-urls and /api/admin/short-urls/:id.
 app.use('/api/admin', require('./src/routes/adminShortUrls'));
+// Gallery folders (issue 1786) and two-stage delivery (issue 1562): routes
+// under /api/admin/events/:eventId/folders|folder-requests|delivery.
+app.use('/api/admin', require('./src/routes/adminFolders'));
+app.use('/api/admin', require('./src/routes/adminDelivery'));
 app.use('/api/admin/feature-flags', require('./src/routes/adminFeatureFlags'));
 app.use('/api/admin/whatsapp', require('./src/routes/adminWhatsapp'));
-app.use('/api/admin/backup', require('./src/routes/adminBackup'));
 app.use('/api/admin/database-backup', require('./src/routes/adminDatabaseBackup'));
 app.use('/api/admin/feedback', require('./src/routes/adminFeedback'));
 app.use('/api/admin', require('./src/routes/adminGuests'));
 app.use('/api/admin/image-security', require('./src/routes/adminImageSecurity'));
 app.use('/api/admin/thumbnails', require('./src/routes/adminThumbnails'));
+// adminPhotos is mounted twice on purpose (audit §2.3, issue 1670): here as
+// /api/admin/photos/:eventId/... for the media and repair endpoints the admin
+// UI reads (thumbnail, photo, preview, repair-* jobs), and in routes/admin.js
+// as /api/admin/events/:eventId/photos/... for the CRUD calls photos.service.ts
+// makes. Both sit behind the same global middleware; neither tree is dead, so
+// neither is removed. adminPhotoDimensions shares the prefix for the same
+// reason.
 app.use('/api/admin/photos', require('./src/routes/adminPhotoDimensions'));
 app.use('/api/admin/photos', require('./src/routes/adminPhotos'));
 app.use('/api/admin/photo-export', require('./src/routes/adminPhotoExport'));
@@ -874,9 +939,19 @@ app.use('/api/customer', noStoreCache, require('./src/routes/customer'));
 // permission rather than a CRM-specific one. The public endpoints
 // host the customer-side accept/decline / sign / payment-check pages.
 app.use('/api/admin/business-profile', require('./src/routes/adminBusinessProfile'));
+// PDF theme for quotes, invoices and contracts (#1445) — same settings
+// permissions as the business profile's PDF settings.
+app.use('/api/admin/pdf-themes', require('./src/routes/adminPdfThemes'));
 app.use('/api/admin/quotes',     require('./src/routes/adminQuotes'));
+// Quote catalogue + templates (#1451). Own prefix so its collection paths
+// never collide with /api/admin/quotes/:id.
+app.use('/api/admin/quote-catalog', require('./src/routes/adminQuoteCatalog'));
 app.use('/api/admin/invoices',   require('./src/routes/adminInvoices'));
 app.use('/api/admin/contracts',  require('./src/routes/adminContracts'));
+// Contract templates (#1445) — own prefix, behind the contracts flag.
+app.use('/api/admin/contract-templates', require('./src/routes/adminContractTemplates'));
+// The attachment library for contract templates and contracts (#1445).
+app.use('/api/admin/document-attachments', require('./src/routes/adminDocumentAttachments'));
 app.use('/api/admin/projects',   require('./src/routes/adminProjects'));
 app.use('/api/admin/calendar',   require('./src/routes/adminCalendar'));
 app.use('/api/admin/deals',      require('./src/routes/adminDeals'));
@@ -894,6 +969,8 @@ app.use('/api/admin/transfers',  require('./src/routes/adminTransfers'));
 app.use('/api/admin/newsletters', require('./src/routes/adminNewsletters'));
 app.use('/api/public/quotes',  require('./src/routes/publicQuotes'));
 app.use('/api/public/contracts', require('./src/routes/publicContracts'));
+// Signing with a link per signer and an emailed code (#1446).
+app.use('/api/public/contract-signing', require('./src/routes/publicContractSigning'));
 // PicTransfer (#997): recipient download + client upload, token-authenticated.
 app.use('/api/public/transfer', require('./src/routes/publicTransfer'));
 app.use('/api/public/transfer-upload', require('./src/routes/publicTransferUpload'));
@@ -928,8 +1005,6 @@ app.use('/api/invite', require('./src/routes/acceptInvite'));
 app.use('/api/public/settings', require('./src/routes/publicSettings'));
 app.use('/api/public/fonts', require('./src/routes/publicFonts'));
 app.use('/api/public', require('./src/routes/publicCMS'));
-app.use('/api/images', require('./src/routes/protectedImages'));
-app.use('/api/secure-images', secureImagesRoutes);
 
 // Optional: Serve built frontend (native installs and the all-in-one image, #1042)
 // Set when the SPA is being served, and registered as a catch-all AFTER the
@@ -1011,6 +1086,13 @@ try {
     };
     app.get('/gallery/:slug/:token?', ogIntercept, (req, res) => sendSpa(res));
     app.get('/gallery/:slug/show/:token', ogIntercept, (req, res) => sendSpa(res));
+    // PicTransfer links (single-container deploys without nginx).
+    const transferOgIntercept = (kind) => {
+      const handler = handleTransferOgRequest(kind);
+      return (req, res, next) => (isSocialCrawler(req.get('user-agent')) ? handler(req, res) : next());
+    };
+    app.get('/transfer/:token', transferOgIntercept('send'), (req, res) => sendSpa(res));
+    app.get('/transfer-upload/:token', transferOgIntercept('request'), (req, res) => sendSpa(res));
 
     app.get(['/admin', '/admin/*', '/gallery/*'], (req, res) => {
       sendSpa(res);
@@ -1056,8 +1138,13 @@ if (spaCatchAll) {
   // error instead of the plain 404 nginx returns — and the 200 hides it from
   // any monitoring watching status codes.
   const BACKEND_OWNED = ['/photos/', '/thumbnails/', '/uploads/', '/fonts/', '/assets/', '/health'];
+  // Scanner probes (/wp-login.php, /cgi-bin/…) are no client route either. A
+  // 200 shell tells the scanner something is there and hides the probe from
+  // every log-based tool that counts 404s; frontend/nginx.conf does the same.
+  const { isScannerProbePath } = require('./src/utils/scannerPaths');
   app.get('*', (req, res, next) => {
     if (BACKEND_OWNED.some((prefix) => req.path.startsWith(prefix))) return next();
+    if (isScannerProbePath(req.path)) return next();
     return spaCatchAll(req, res);
   });
 }
@@ -1094,6 +1181,7 @@ async function startServer() {
   try {
     // Initialize database
     await initializeDatabase();
+    await require('./src/utils/authSecurity').assertAuthSecuritySchema();
 
     // Warm the public-origin cache so the SYNCHRONOUS resolver (CORS headers,
     // secureImageMiddleware) can see the general_site_url setting. Best-effort:
@@ -1132,6 +1220,29 @@ async function startServer() {
     // PicTransfer retention sweep (#997): expire links, notify admins, and
     // hard-delete client uploads once the grace window elapses.
     startTransferCleanup();
+    // Customer documents retention (#1444): delete long-rejected files and
+    // remove the bytes of deleted ones once the retention window elapses.
+    require('./src/services/customerDocumentRetentionService').startCustomerDocumentRetention();
+    // Malware scanner for customer documents (#1444): clamd over TCP, only
+    // when CLAMAV_HOST is set. Without it uploads stay pending until an admin
+    // reviews them. The hourly re-scan picks up rows left pending while the
+    // scanner was down; it does nothing while no scanner is registered.
+    {
+      const clamd = require('./src/services/scanners/clamd');
+      if (clamd.isConfigured()) {
+        require('./src/services/documentScanService').registerScanner(clamd.scan);
+        logger.info('Customer documents: clamd scanner registered');
+      }
+      require('./src/services/customerDocumentRescanService').startCustomerDocumentRescan();
+    }
+    // Reminder ladder for open document requests (#1444).
+    require('./src/services/customerDocumentRequestReminderService').startDocumentRequestReminders();
+    // Contract signing sweep (#1446): expire contracts whose time to sign has
+    // run out, and remove signing codes and sessions a month after they end.
+    require('./src/services/contract/expiry').startContractSigningSweep();
+    // Enumeration and replay signals on the public signing routes (#1446):
+    // flush the counts, check the thresholds, alert once per kind per hour.
+    require('./src/services/contract/signingSignals').startSigningSignals();
     // Custom-resolution download archives (#858) are disposable renditions —
     // sweep them once their TTL passes so .download-cache doesn't grow forever.
     // Best-effort, as before the scheduler refactor: a transient DB error on
@@ -1139,6 +1250,11 @@ async function startServer() {
     await require('./src/services/downloadJobService').recoverOrphanedJobs()
       .catch((err) => logger.error('Download job recovery failed', { error: err.message }));
     startDownloadJobCleanup();
+    // Stale feedback_rate_limits rows (#1585): the per-request delete in
+    // consumeFeedbackLimit() only ever clears the event/action-type pair it
+    // just handled, so a gallery that goes quiet leaves its rows behind —
+    // sweep them on a schedule as a backstop.
+    startFeedbackRateLimitCleanup();
     // Reveal-mode scheduler (#838): minutely stamp for scheduled reveals.
     startRevealScheduler();
     // CRM invoice scheduler: hourly tick to flush scheduled-send invoices
@@ -1256,6 +1372,25 @@ async function startServer() {
       logger.warn('Install-from-backup hook threw:', err.message);
     }
 
+    // The standard contract template (#1445): seeded once, and given a new
+    // published version when the built-in revision moved on. Never changes
+    // an existing version; safe with two replicas booting at once. After
+    // install-from-backup, which replaces the database it would seed.
+    try {
+      await require('./src/services/contract/defaultTemplate').ensureDefaultTemplate();
+    } catch (err) {
+      logger.warn('standard contract template check failed at boot:', err.message);
+    }
+
+    // The retired free-text PDF font path (#1445) becomes an uploaded font
+    // once; the renderer no longer reads the column. After install-from-backup,
+    // so a restored profile's path is the one moved.
+    try {
+      await require('./src/services/pdf/uploadedFonts').migrateLegacyFont(logger);
+    } catch (err) {
+      logger.warn('moving the earlier custom PDF font failed at boot:', err.message);
+    }
+
     // First-run: surface a one-time setup token while no admin account exists.
     // Runs AFTER install-from-backup so a restored instance (which repopulates
     // admin_users) never prints a throwaway token. Best-effort — never blocks boot.
@@ -1294,6 +1429,11 @@ async function startServer() {
     // large number of supertest suites that never start a worker. Keeping it
     // lazy means they don't pay for a module graph they never use.
     require('./src/services/faceQueue').start();
+
+    // Browser-playable video copies (issue 1430). Same shape as the face
+    // queue: starts idle and re-reads the general_video_web_rendition
+    // setting every tick, so nothing runs until an admin switches it on.
+    require('./src/services/videoRenditionQueue').start();
 
     httpServer = app.listen(PORT, () => {
       logger.info(`Server running on port ${PORT}`);

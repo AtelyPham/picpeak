@@ -10,12 +10,14 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Save as SaveIcon, Workflow as WorkflowIcon } from 'lucide-react';
-import { Button, Card, Loading, Input } from '../../../components/common';
+import { Workflow as WorkflowIcon } from 'lucide-react';
+import { Card, Loading, Input } from '../../../components/common';
+import { SettingsSaveBar } from '../../../components/admin/SettingsSaveBar';
 import { settingsService } from '../../../services/settings.service';
 import { quotesService } from '../../../services/quotes.service';
 import { useFeatureFlags } from '../../../contexts/FeatureFlagsContext';
 import { useMutationWithToast } from '../../../hooks';
+import { ALL_DOCUMENT_FORMATS, normaliseFormats } from '../../../utils/documentFormats';
 
 const SETTING_KEYS = [
   'crm_quotes_pdf_attachment_enabled',
@@ -31,6 +33,8 @@ const SETTING_KEYS = [
   'crm_invoice_round_total',
   // Free-text VAT/legal note printed under the MwSt. line on invoice PDFs (#794).
   'crm_invoices_vat_note_text',
+  // What the Leistungsdatum row does when the service date is the invoice date (#1546).
+  'crm_invoices_service_date_mode',
   'crm_invoices_reminders_enabled',
   'crm_invoices_reminder_first_days',
   'crm_invoices_reminder_second_days',
@@ -65,6 +69,18 @@ const SETTING_KEYS = [
   'crm_contracts_require_drawn_signature',
   'crm_contracts_allow_pdf_upload',
   'crm_contracts_store_ip',
+  // Signatures (#1446): an admin notice for every signature, not only once
+  // every customer has signed. Default on.
+  'crm_contracts_notify_each_signature',
+  // Reminder ladder for unsigned signers (#1446): days after the last link,
+  // comma-separated. Default "3,7"; empty = off.
+  'crm_contracts_reminder_days',
+  // Alert thresholds for probing of the signing links (#1446).
+  'crm_contracts_alert_unknown_tokens_per_ip',
+  'crm_contracts_alert_otp_failures_per_contract',
+  'crm_contracts_alert_unknown_tokens_per_hour',
+  // The legal notice frozen into every contract at send (#1446), { en, de }.
+  'crm_contracts_legal_notice',
   // Dashboard CRM-overview tile visibility (per-tile). Default ON;
   // explicit false hides the tile. Stored as one boolean per tile so
   // admins can mix-and-match — e.g. someone who only bills hourly
@@ -74,6 +90,14 @@ const SETTING_KEYS = [
   'crm_overview_show_outstanding',
   'crm_overview_show_quotes',
   'crm_overview_show_invoices',
+  // Customer documents in the portal (#1444, migrations 225 + 240).
+  'customer_documents_max_upload_size_mb',
+  'customer_documents_quota_mb',
+  'customer_documents_retention_days',
+  'customer_documents_notify_on_share',
+  'customer_documents_forbidden_alert_threshold',
+  'customer_documents_request_reminder_days',
+  'customer_documents_allowed_formats',
 ];
 
 export const CrmSettingsPage: React.FC = () => {
@@ -92,7 +116,26 @@ export const CrmSettingsPage: React.FC = () => {
   const workflowsLive = !!flags.workflows;
   const showContracts = !!flags.contracts;
   const showDashboardOverview = !!(flags.quotes || flags.bills);
-  const anySection = showQuotes || showInvoices || showContracts || showDashboardOverview;
+  const showDocuments = !!flags.documents;
+  const anySection = showQuotes || showInvoices || showContracts || showDashboardOverview || showDocuments;
+  // The subtitle names what this tab configures on this install: a
+  // documents-only install has no quotes or invoices to fine-tune.
+  const subtitleAreas = [
+    showQuotes && t('crmSettings.areas.quotes', 'quotes'),
+    showInvoices && t('crmSettings.areas.invoices', 'invoices'),
+    showContracts && t('crmSettings.areas.contracts', 'contracts'),
+    showDocuments && t('crmSettings.areas.documents', 'customer documents'),
+  ].filter((a): a is string => !!a);
+  // Joined with a translated "and" rather than Intl.ListFormat: a partial
+  // locale falls back to the English area names, and its own conjunction
+  // would then read "quotes et invoices".
+  const andWord = t('crmSettings.areas.and', 'and');
+  const areaList = subtitleAreas.length > 1
+    ? `${subtitleAreas.slice(0, -1).join(', ')} ${andWord} ${subtitleAreas[subtitleAreas.length - 1]}`
+    : subtitleAreas[0];
+  const subtitle = subtitleAreas.length
+    ? t('crmSettings.subtitleFor', 'Settings for {{areas}}.', { areas: areaList, interpolation: { escapeValue: false } })
+    : t('crmSettings.subtitle', 'Fine-tune quote and invoice behaviour.');
   const { data, isLoading } = useQuery({
     queryKey: ['settings', 'crm'],
     queryFn: async () => {
@@ -115,7 +158,10 @@ export const CrmSettingsPage: React.FC = () => {
   });
 
   const [values, setValues] = useState<Record<string, any>>({});
-  useEffect(() => { if (data) setValues(data); }, [data]);
+  // What the server last sent, in draft shape — dirty is a comparison against it.
+  const [loaded, setLoaded] = useState<Record<string, any>>({});
+  useEffect(() => { if (data) { setValues(data); setLoaded(data); } }, [data]);
+  const isDirty = JSON.stringify(values) !== JSON.stringify(loaded);
 
   const saveAll = useMutationWithToast({
     mutationFn: async () => {
@@ -130,13 +176,14 @@ export const CrmSettingsPage: React.FC = () => {
     successMessage: t('crmSettings.savedToast', 'CRM settings saved.'),
     invalidateKeys: [['settings', 'crm']],
     errorMessage: 'Save failed',
+    onSuccess: () => setLoaded(values),
   });
 
   if (isLoading) return <Loading />;
 
   const setVal = (k: string, v: any) => setValues((s) => ({ ...s, [k]: v }));
   const checkbox = (k: string, label: string) => (
-    <label className="flex items-center gap-2 text-sm text-neutral-800 dark:text-neutral-200 py-1">
+    <label className="flex items-center gap-2 text-sm text-body py-1">
       <input type="checkbox" checked={!!values[k]} onChange={(e) => setVal(k, e.target.checked)} />
       <span>{t(`crmSettings.${k}.label`, label)}</span>
     </label>
@@ -158,7 +205,7 @@ export const CrmSettingsPage: React.FC = () => {
     const stored = values[k];
     const effective = stored === undefined || stored === null ? true : !!stored;
     return (
-      <label className="flex items-center gap-2 text-sm text-neutral-800 dark:text-neutral-200 py-1">
+      <label className="flex items-center gap-2 text-sm text-body py-1">
         <input
           type="checkbox"
           checked={effective}
@@ -176,18 +223,13 @@ export const CrmSettingsPage: React.FC = () => {
           SettingsPage's TABS_WITH_OWN_HEADER, so a page title repeated
           the nav label the admin just clicked (QA warning). The subtitle
           stays. */}
-      <div className="flex items-center justify-between gap-4">
-        <p className="text-sm text-neutral-600 dark:text-neutral-400">
-          {t('crmSettings.subtitle', 'Fine-tune quote and invoice behaviour.')}
-        </p>
-        <Button onClick={() => saveAll.mutate()} disabled={saveAll.isPending || !anySection}>
-          <SaveIcon className="w-4 h-4 mr-1" />{t('common.save', 'Save')}
-        </Button>
-      </div>
+      <p className="text-sm text-soft">
+        {subtitle}
+      </p>
 
       {!anySection && (
         <Card>
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          <p className="text-sm text-muted">
             {t('crmSettings.emptyState',
               'No CRM features are currently enabled. Turn on Quotes, Invoices, or Contracts in Settings → Features to see the matching configuration here.')}
           </p>
@@ -196,7 +238,7 @@ export const CrmSettingsPage: React.FC = () => {
 
       {showQuotes && (
       <Card>
-        <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-3">{t('crmSettings.section.quotes', 'Quotes')}</h3>
+        <h3 className="font-semibold text-heading mb-3">{t('crmSettings.section.quotes', 'Quotes')}</h3>
         {checkbox('crm_quotes_pdf_attachment_enabled', 'Attach quote PDF to email')}
         {checkbox('crm_quotes_skonto_enabled', 'Allow early-payment discount (Skonto) on quotes')}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
@@ -218,8 +260,8 @@ export const CrmSettingsPage: React.FC = () => {
             public quote response page shows a checkbox the customer
             must tick before Accept fires. The text snapshot is
             recorded on the quote at acceptance time for audit. */}
-        <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
-          <h4 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-2 text-sm">
+        <div className="mt-4 pt-4 border-t border-line">
+          <h4 className="font-semibold text-heading mb-2 text-sm">
             {t('crmSettings.section.quotesTos', 'Terms of Service / AGB step')}
           </h4>
           {checkbox('crm_quotes_tos_required', 'Require customers to tick "I accept the Terms of Service" before accepting')}
@@ -231,12 +273,12 @@ export const CrmSettingsPage: React.FC = () => {
               onChange={(e) => setVal('crm_quotes_tos_url', e.target.value)} />
           </div>
           <div className="mt-3">
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+            <label className="block text-sm font-medium text-body mb-1">
               {t('crmSettings.crm_quotes_tos_text.label', 'Inline Terms text shown on the quote page')}
             </label>
             <textarea
               rows={6}
-              className="w-full rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+              className="w-full rounded-md border border-line-strong bg-panel text-heading px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
               value={values.crm_quotes_tos_text ?? ''}
               onChange={(e) => setVal('crm_quotes_tos_text', e.target.value)}
               placeholder={t('crmSettings.crm_quotes_tos_text.placeholder',
@@ -249,7 +291,7 @@ export const CrmSettingsPage: React.FC = () => {
 
       {showInvoices && (
       <Card>
-        <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-3">{t('crmSettings.section.invoices', 'Invoices')}</h3>
+        <h3 className="font-semibold text-heading mb-3">{t('crmSettings.section.invoices', 'Invoices')}</h3>
         {checkbox('crm_invoices_qr_enabled', 'Render payment QR on invoice PDFs')}
         {checkbox('crm_invoice_round_total', 'Reconcile sub-cent rounding to a clean total (adds a "Rundung" row when per-line rounding drifts from qty × rate)')}
 
@@ -257,7 +299,7 @@ export const CrmSettingsPage: React.FC = () => {
             line on every invoice PDF. Data-driven: the admin types the exact
             wording (Austrian Kleinunternehmer, German §19, reverse-charge, …). */}
         <div className="mt-3">
-          <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+          <label className="block text-sm font-medium text-body mb-1">
             {t('crmSettings.crm_invoices_vat_note_text.label', 'VAT / free-text note on invoices')}
           </label>
           <textarea
@@ -265,10 +307,32 @@ export const CrmSettingsPage: React.FC = () => {
             onChange={(e) => setVal('crm_invoices_vat_note_text', e.target.value)}
             rows={2}
             placeholder={t('crmSettings.crm_invoices_vat_note_text.placeholder', 'e.g. Gemäß § 6 Abs. 1 Z 27 UStG 1994 wird keine Umsatzsteuer berechnet (Kleinunternehmer).') as string}
-            className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100"
+            className="w-full px-3 py-2 rounded-lg border border-line-strong bg-shell text-heading"
           />
-          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-            {t('crmSettings.crm_invoices_vat_note_text.help', 'Printed directly under the MwSt. line on every invoice PDF. Leave empty to hide. Please confirm the exact wording with your tax advisor.')}
+          <p className="mt-1 text-xs text-muted">
+            {t('crmSettings.crm_invoices_vat_note_text.help', 'Printed directly under the MwSt. line on every invoice PDF. If the business isn\'t VAT-registered (Settings → Accounting), it replaces that line on invoices without VAT. Quotes never carry it — an offer is not the tax document. Leave empty to hide. Please confirm the exact wording with your tax advisor.')}
+          </p>
+        </div>
+
+        {/* Leistungsdatum when the service date IS the invoice date (#1546).
+            The time of supply belongs on the document (MWSTG Art. 26, §14(4)
+            Nr. 6 UStG), but printing the same date twice reads as a mistake —
+            so the default states it in words. */}
+        <div className="mt-3">
+          <label className="block text-sm font-medium text-body mb-1">
+            {t('crmSettings.crm_invoices_service_date_mode.label', 'Service date equal to the invoice date')}
+          </label>
+          <select
+            value={values.crm_invoices_service_date_mode ?? 'note'}
+            onChange={(e) => setVal('crm_invoices_service_date_mode', e.target.value)}
+            className="w-full px-3 py-2 rounded-lg border border-line-strong bg-shell text-heading"
+          >
+            <option value="note">{t('crmSettings.crm_invoices_service_date_mode.note', 'State it in words ("same as invoice date")')}</option>
+            <option value="repeat">{t('crmSettings.crm_invoices_service_date_mode.repeat', 'Print the date again')}</option>
+            <option value="omit">{t('crmSettings.crm_invoices_service_date_mode.omit', 'Leave the row out')}</option>
+          </select>
+          <p className="mt-1 text-xs text-muted">
+            {t('crmSettings.crm_invoices_service_date_mode.help', 'Only applies when the service date falls on the invoice date; a service period always prints. Tax law in CH/LI and DE/AT wants the time of supply on the invoice, so leaving the row out is a decision to confirm with your tax advisor.')}
           </p>
         </div>
 
@@ -283,7 +347,7 @@ export const CrmSettingsPage: React.FC = () => {
               <p className="font-medium">{t('crmSettings.dunningMoved.title', 'Reminder schedule is now in Workflows')}</p>
               <p className="mt-1">
                 {t('crmSettings.dunningMoved.body', 'When and how often overdue reminders go out is configured in the “Invoice dunning” workflow. Late-fee amounts below still apply.')}{' '}
-                <Link to="/admin/workflows" className="underline font-medium">{t('crmSettings.dunningMoved.link', 'Open Workflows')}</Link>
+                <Link to="/admin/automation/workflows" className="underline font-medium">{t('crmSettings.dunningMoved.link', 'Open Workflows')}</Link>
               </p>
             </div>
           </div>
@@ -311,13 +375,13 @@ export const CrmSettingsPage: React.FC = () => {
             </>
           )}
           <div>
-            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+            <label className="block text-sm font-medium text-body mb-1">
               {t('crmSettings.crm_invoices_late_fee_type.label', 'Late fee type')}
             </label>
             <select
               value={values.crm_invoices_late_fee_type ?? 'flat'}
               onChange={(e) => setVal('crm_invoices_late_fee_type', e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100"
+              className="w-full px-3 py-2 rounded-lg border border-line-strong bg-shell text-heading"
             >
               <option value="flat">{t('crmSettings.lateFeeType.flat', 'Flat amount (Rappen)')}</option>
               <option value="percent">{t('crmSettings.lateFeeType.percent', 'Percentage of invoice')}</option>
@@ -357,8 +421,8 @@ export const CrmSettingsPage: React.FC = () => {
             panel — admins type these defaults exactly once instead of
             on every new multi-installment plan. Per-document edits
             still override. */}
-        <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
-          <h4 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-2 text-sm">
+        <div className="mt-4 pt-4 border-t border-line">
+          <h4 className="font-semibold text-heading mb-2 text-sm">
             {t('crmSettings.section.installmentDefaults', 'Default installment triggers')}
           </h4>
           <p className="text-xs text-neutral-500 mb-3">
@@ -367,13 +431,13 @@ export const CrmSettingsPage: React.FC = () => {
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('crmSettings.crm_invoices_installment_trigger_first.label', 'First installment trigger')}
               </label>
               <select
                 value={values.crm_invoices_installment_trigger_first ?? 'quote_accepted'}
                 onChange={(e) => setVal('crm_invoices_installment_trigger_first', e.target.value)}
-                className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 text-sm"
+                className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-heading text-sm"
               >
                 <option value="quote_accepted">{t('crmSettings.installmentDefaults.trigger.quote_accepted', 'At signing / creation')}</option>
                 <option value="before_event">{t('crmSettings.installmentDefaults.trigger.before_event', 'Before event')}</option>
@@ -402,8 +466,8 @@ export const CrmSettingsPage: React.FC = () => {
             per-quote / per-invoice editor still always shows the
             pickers — admin can override per document — but new
             drafts auto-prefill from these two settings. */}
-        <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
-          <h4 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-2 text-sm">
+        <div className="mt-4 pt-4 border-t border-line">
+          <h4 className="font-semibold text-heading mb-2 text-sm">
             {t('crmSettings.section.paymentDefaults', 'Default payment conditions')}
           </h4>
           <p className="text-xs text-neutral-500 mb-3">
@@ -412,11 +476,11 @@ export const CrmSettingsPage: React.FC = () => {
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('crmSettings.crm_invoices_default_payment_net_days_template_id.label', 'Default net days')}
               </label>
               <select
-                className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 text-sm"
+                className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-heading text-sm"
                 value={values.crm_invoices_default_payment_net_days_template_id ?? ''}
                 onChange={(e) => setVal('crm_invoices_default_payment_net_days_template_id', e.target.value ? Number(e.target.value) : null)}
               >
@@ -427,11 +491,11 @@ export const CrmSettingsPage: React.FC = () => {
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('crmSettings.crm_invoices_default_payment_timing_template_id.label', 'Default payment schedule')}
               </label>
               <select
-                className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 text-sm"
+                className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-heading text-sm"
                 value={values.crm_invoices_default_payment_timing_template_id ?? ''}
                 onChange={(e) => setVal('crm_invoices_default_payment_timing_template_id', e.target.value ? Number(e.target.value) : null)}
               >
@@ -452,7 +516,7 @@ export const CrmSettingsPage: React.FC = () => {
          shape: 3 behaviour toggles, then a 2-column input grid, then
          the number-format input with helper text. */
       <Card>
-        <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-3">{t('crmSettings.section.contracts', 'Contracts')}</h3>
+        <h3 className="font-semibold text-heading mb-3">{t('crmSettings.section.contracts', 'Contracts')}</h3>
         {/* Three of these four toggles use `!== false` semantics on
             the backend — a missing app_settings row behaves as if
             checked. `checkboxDefaultOn` mirrors that so the UI tells
@@ -467,11 +531,35 @@ export const CrmSettingsPage: React.FC = () => {
           {t('crmSettings.crm_contracts_store_ip.help',
             "When off, the customer's and admin's IP at signing time is NOT recorded into the contract row or the public sign-page audit confirmation. Per GDPR data-minimisation principle some operators prefer this — but IP is corroborating identity evidence if the contract is challenged, so we recommend keeping it on.")}
         </p>
+        {checkboxDefaultOn('crm_contracts_notify_each_signature', 'Email me every time a signer signs (not only when everyone has)')}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
           <Input type="number" min={1} max={365}
             label={t('crmSettings.crm_contracts_default_valid_days.label', 'Signing window (days)') as string}
             value={values.crm_contracts_default_valid_days ?? 30}
             onChange={(e) => setVal('crm_contracts_default_valid_days', Number(e.target.value))} />
+          <div>
+            <Input
+              label={t('crmSettings.crm_contracts_reminder_days.label', 'Signing reminders (days after the last link)') as string}
+              value={values.crm_contracts_reminder_days ?? '3,7'}
+              onChange={(e) => setVal('crm_contracts_reminder_days', e.target.value)}
+              placeholder="3,7"
+            />
+            <p className="text-xs text-neutral-500 mt-1">
+              {t('crmSettings.crm_contracts_reminder_days.help', 'Comma-separated, e.g. 3,7: a reminder with a new link 3 days after the last one, then 7 days after that. Leave empty for no reminders.')}
+            </p>
+          </div>
+          <Input type="number" min={1} max={10000}
+            label={t('crmSettings.crm_contracts_alert_unknown_tokens_per_ip.label', 'Alert after unknown signing links per client and hour') as string}
+            value={values.crm_contracts_alert_unknown_tokens_per_ip ?? 20}
+            onChange={(e) => setVal('crm_contracts_alert_unknown_tokens_per_ip', Number(e.target.value))} />
+          <Input type="number" min={1} max={100000}
+            label={t('crmSettings.crm_contracts_alert_unknown_tokens_per_hour.label', 'Alert after unknown signing links per hour, all visitors together') as string}
+            value={values.crm_contracts_alert_unknown_tokens_per_hour ?? 200}
+            onChange={(e) => setVal('crm_contracts_alert_unknown_tokens_per_hour', Number(e.target.value))} />
+          <Input type="number" min={1} max={10000}
+            label={t('crmSettings.crm_contracts_alert_otp_failures_per_contract.label', 'Alert after wrong codes per contract and hour') as string}
+            value={values.crm_contracts_alert_otp_failures_per_contract ?? 10}
+            onChange={(e) => setVal('crm_contracts_alert_otp_failures_per_contract', Number(e.target.value))} />
           <Input
             label={t('crmSettings.crm_contracts_number_format.label', 'Contract number format') as string}
             value={values.crm_contracts_number_format ?? ''}
@@ -479,10 +567,103 @@ export const CrmSettingsPage: React.FC = () => {
             placeholder="C-{YEAR}-{SEQ:04d}"
           />
         </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+          {(['de', 'en'] as const).map((locale) => (
+            <div key={locale}>
+              <label htmlFor={`crm-legal-notice-${locale}`} className="block text-sm font-medium text-body mb-1">
+                {locale === 'de'
+                  ? t('crmSettings.crm_contracts_legal_notice.labelDe', 'Legal notice on signed contracts (German)')
+                  : t('crmSettings.crm_contracts_legal_notice.labelEn', 'Legal notice on signed contracts (English)')}
+              </label>
+              <textarea
+                id={`crm-legal-notice-${locale}`}
+                rows={4}
+                maxLength={2000}
+                className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-heading text-sm"
+                value={(values.crm_contracts_legal_notice && values.crm_contracts_legal_notice[locale]) || ''}
+                placeholder={t('crmSettings.crm_contracts_legal_notice.placeholder', 'Empty: the standard notice (simple electronic signature, not for contracts that need written form).') as string}
+                onChange={(e) => setVal('crm_contracts_legal_notice', { ...(values.crm_contracts_legal_notice || {}), [locale]: e.target.value })}
+              />
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-neutral-500 mt-1">
+          {t('crmSettings.crm_contracts_legal_notice.help', 'Frozen into each contract when it is sent, shown on the signing page and printed on the signing certificate. Changing it affects only contracts sent afterwards.')}
+        </p>
         <p className="text-xs text-neutral-500 mt-2">
           {t('crmSettings.crm_contracts_number_format.help',
             'Supported tokens: {YEAR}, {MONTH}, {SEQ:04d}. Example: LBM-C-{YEAR}-{SEQ:04d} → LBM-C-2026-0001.')}
         </p>
+      </Card>
+      )}
+
+      {showDocuments && (
+      /* Customer documents (#1444). The limits are read by
+         customerDocumentsService.getLimits / getRetentionDays, which fall
+         back to their defaults for an empty or invalid value. */
+      <Card>
+        <h3 className="font-semibold text-heading mb-1">
+          {t('crmSettings.section.documents', 'Customer documents')}
+        </h3>
+        <p className="text-xs text-neutral-500 mb-3">
+          {t('crmSettings.section.documentsHint',
+            'Documents exchanged with customers in their portal. Customer uploads stay unavailable to them until reviewed.')}
+        </p>
+        {checkboxDefaultOn('customer_documents_notify_on_share', 'Email the customer when a document is shared with them (default for the checkbox on the customer record)')}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+          <Input type="number" min={1} max={500}
+            label={t('crmSettings.customer_documents_max_upload_size_mb.label', 'Largest file (MB)') as string}
+            value={values.customer_documents_max_upload_size_mb ?? 25}
+            onChange={(e) => setVal('customer_documents_max_upload_size_mb', Number(e.target.value))} />
+          <Input type="number" min={1} max={100000}
+            label={t('crmSettings.customer_documents_quota_mb.label', 'Storage per customer (MB)') as string}
+            value={values.customer_documents_quota_mb ?? 250}
+            onChange={(e) => setVal('customer_documents_quota_mb', Number(e.target.value))} />
+          <Input type="number" min={1} max={3650}
+            label={t('crmSettings.customer_documents_retention_days.label', 'Keep rejected and deleted files (days)') as string}
+            value={values.customer_documents_retention_days ?? 30}
+            onChange={(e) => setVal('customer_documents_retention_days', Number(e.target.value))} />
+          <Input type="number" min={1} max={10000}
+            label={t('crmSettings.customer_documents_forbidden_alert_threshold.label', 'Alert after attempts on other customers\' documents (per hour)') as string}
+            value={values.customer_documents_forbidden_alert_threshold ?? 20}
+            onChange={(e) => setVal('customer_documents_forbidden_alert_threshold', Number(e.target.value))} />
+        </div>
+        {/* The formats are a fixed, inspected allowlist (backend
+            services/documentFormats); this picks which of them the install
+            accepts. PDF is the default. */}
+        <fieldset className="mt-3">
+          <legend className="text-sm font-medium text-body mb-1">
+            {t('crmSettings.customer_documents_allowed_formats.label', 'File types customers can upload')}
+          </legend>
+          <p className="text-xs text-neutral-500 mb-2">
+            {t('crmSettings.customer_documents_allowed_formats.help',
+              'Every file is checked by its content. PDF is the only type on by default. The check of Word, Excel and OpenDocument files is best-effort: it refuses macros, embedded objects and the known ways of linking to outside content (including web links), but it does not detect every active-content mechanism these formats have. Turn them on only for customers you trust, and open such files with care. CSV files are passed on as they are: a formula in one runs when someone opens it in a spreadsheet.')}
+          </p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {ALL_DOCUMENT_FORMATS.map((f) => {
+              const current = normaliseFormats(values.customer_documents_allowed_formats);
+              return (
+                <label key={f} className="flex items-center gap-2 text-sm text-body">
+                  <input
+                    type="checkbox"
+                    checked={current.includes(f)}
+                    onChange={(e) => {
+                      const next = e.target.checked ? [...current, f] : current.filter((x) => x !== f);
+                      setVal('customer_documents_allowed_formats', normaliseFormats(next));
+                    }}
+                  />
+                  <span>{f.toUpperCase()}</span>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+        <div className="mt-3">
+          <Input
+            label={t('crmSettings.customer_documents_request_reminder_days.label', 'Remind about requested documents after (days, comma-separated; empty = off)') as string}
+            value={values.customer_documents_request_reminder_days ?? '3,7'}
+            onChange={(e) => setVal('customer_documents_request_reminder_days', e.target.value)} />
+        </div>
       </Card>
       )}
 
@@ -493,7 +674,7 @@ export const CrmSettingsPage: React.FC = () => {
          component reads these via /public/settings and hides the
          matching tile when the value is explicit false. */
       <Card>
-        <h3 className="font-semibold text-neutral-900 dark:text-neutral-100 mb-1">
+        <h3 className="font-semibold text-heading mb-1">
           {t('crmSettings.section.dashboardOverview', 'Dashboard CRM overview')}
         </h3>
         <p className="text-xs text-neutral-500 mb-3">
@@ -506,6 +687,14 @@ export const CrmSettingsPage: React.FC = () => {
         {checkboxDefaultOn('crm_overview_show_invoices', 'Invoices pipeline (per-status)')}
       </Card>
       )}
+
+      <SettingsSaveBar
+        isDirty={isDirty}
+        isSaving={saveAll.isPending}
+        canSave={anySection}
+        onSave={() => saveAll.mutate()}
+        onDiscard={() => setValues(loaded)}
+      />
     </div>
   );
 };

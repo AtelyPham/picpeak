@@ -7,11 +7,54 @@ const { db, logActivity } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
 const { parseBooleanInput } = require('../utils/parsers');
 const { adminAuth } = require('../middleware/auth');
-const { requirePermission } = require('../middleware/permissions');
-const { requireEventOwnership } = require('../middleware/ownership');
+const { requirePermission, userHasAllPermissions } = require('../middleware/permissions');
+const folderTree = require('../services/folderTreeService');
+const { requireEventOwnership, canAccessEvent } = require('../middleware/ownership');
 const { getEventCategoriesOrdered } = require('../utils/categoryOrder');
 const logger = require('../utils/logger');
 const router = express.Router();
+
+/**
+ * A per-event category belongs to its event, so creating, editing or deleting
+ * one needs access to that event: the rule requireEventOwnership applies.
+ * Global categories are shared and stay on settings.edit alone. Answers the
+ * refusal itself and returns true when the caller may not continue.
+ */
+/**
+ * Folders (issue 1786) are edited with folders.manage, on top of the
+ * settings.edit these routes already require. Answers the refusal itself.
+ */
+async function refuseWithoutFolderPermission(req, res) {
+  if (await userHasAllPermissions(req.admin.id, ['folders.manage'])) return false;
+  res.status(403).json({ error: 'The folders.manage permission is required to change folders' });
+  return true;
+}
+
+async function refuseForeignCategoryEvent(req, res, eventId) {
+  if (eventId === null || eventId === undefined) return false;
+  const event = await db('events').where('id', eventId).first();
+  if (!event) {
+    res.status(404).json({ error: 'Event not found' });
+    return true;
+  }
+  if (!canAccessEvent(req.admin, event)) {
+    res.status(403).json({ error: 'Access denied' });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A photo that may become this category's cover (GHSA-j2f4: it must belong to
+ * the category). For a folder that is any photo in the folder or below it.
+ */
+async function heroCandidate(category, photoId) {
+  if (parseBooleanInput(category.is_folder, false) && category.event_id) {
+    const ids = await folderTree.subtreeIds(category.event_id, category.id);
+    return db('photos').where('id', photoId).whereIn('folder_id', ids).first();
+  }
+  return db('photos').where({ id: photoId, category_id: category.id }).first();
+}
 
 // Get all global categories
 router.get('/global', adminAuth, requirePermission('settings.view'), async (req, res) => {
@@ -60,6 +103,15 @@ router.post('/', adminAuth, requirePermission('settings.edit'), [
     }
     
     const { name, slug, is_global = true, event_id = null, is_folder = false } = req.body;
+    if (!is_global && await refuseForeignCategoryEvent(req, res, event_id)) return;
+    if (parseBooleanInput(is_folder, false)) {
+      // Folders belong to one gallery (issue 1160, option b); a global folder
+      // would restructure every gallery at once.
+      if (parseBooleanInput(is_global, true) || !event_id) {
+        return res.status(400).json({ error: 'Folders belong to one gallery; create them on the event' });
+      }
+      if (await refuseWithoutFolderPermission(req, res)) return;
+    }
     
     // Generate slug if not provided
     const categorySlug = slug || name
@@ -157,8 +209,35 @@ router.put('/:id', adminAuth, requirePermission('settings.edit'), [
     if (!category) {
       return res.status(404).json({ error: 'Category not found' });
     }
+    if (await refuseForeignCategoryEvent(req, res, category.event_id)) return;
+    const wasFolder = parseBooleanInput(category.is_folder, false);
+    const togglesFolder = Object.prototype.hasOwnProperty.call(req.body, 'is_folder')
+      && parseBooleanInput(req.body.is_folder, false) !== wasFolder;
+    if ((wasFolder || togglesFolder) && await refuseWithoutFolderPermission(req, res)) return;
+    if (togglesFolder && !wasFolder && (parseBooleanInput(category.is_global, false) || !category.event_id)) {
+      return res.status(400).json({ error: 'Folders belong to one gallery; global categories cannot become folders' });
+    }
+    if (togglesFolder && wasFolder) {
+      const child = await db('photo_categories').where('parent_id', id).first('id');
+      if (child) {
+        return res.status(400).json({ error: 'Move or delete the subfolders first; a filter category cannot contain folders' });
+      }
+    }
 
-    const updateData = {
+    // A folder (issue 1786) renames through the tree service: sibling-name
+    // clash as 409, path-joined slug. The generic slug below would collide
+    // for "Activity A" under two different parents.
+    const staysFolder = wasFolder && !togglesFolder && category.event_id;
+    if (staysFolder && name !== category.name) {
+      try {
+        await folderTree.renameFolder(category.event_id, category.id, name);
+      } catch (err) {
+        if (err instanceof folderTree.FolderError) return res.status(err.status).json({ error: err.message, code: err.code });
+        throw err;
+      }
+    }
+
+    const updateData = staysFolder ? {} : {
       name,
       slug: name
         .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -174,9 +253,7 @@ router.put('/:id', adminAuth, requirePermission('settings.edit'), [
     // update path previously wrote it with no membership check at all.
     if (Object.prototype.hasOwnProperty.call(req.body, 'hero_photo_id')) {
       if (hero_photo_id) {
-        const heroPhoto = await db('photos')
-          .where({ id: hero_photo_id, category_id: id })
-          .first();
+        const heroPhoto = await heroCandidate(category, hero_photo_id);
         if (!heroPhoto) {
           return res.status(404).json({ error: 'Photo not found in this category' });
         }
@@ -196,11 +273,31 @@ router.put('/:id', adminAuth, requirePermission('settings.edit'), [
       updateData.is_folder = formatBoolean(parseBooleanInput(req.body.is_folder, false));
     }
 
-    await db('photo_categories')
-      .where('id', id)
-      .update(updateData);
+    await db.transaction(async (trx) => {
+      if (Object.keys(updateData).length > 0) {
+        await trx('photo_categories')
+          .where('id', id)
+          .update(updateData);
+      }
+      // Since migration 265 a folder holds its photos in folder_id and a
+      // filter category in category_id, so the flip moves them across.
+      if (togglesFolder && !wasFolder) {
+        await trx('photos').where('category_id', id).update({ folder_id: Number(id), category_id: null });
+      } else if (togglesFolder && wasFolder) {
+        await trx('photos').where('folder_id', id).whereNull('category_id').update({ category_id: Number(id), folder_id: null });
+        await trx('photos').where('folder_id', id).update({ folder_id: null });
+        // A filter category is no tree node: without this the next upload of
+        // its old path collides on the source_path index and lands photos in
+        // a "folder" that is a filter category.
+        await trx('photo_categories').where('id', id).update({ parent_id: null, source_path: null });
+      }
+    });
 
     const updated = await db('photo_categories').where('id', id).first();
+    // Folder moves and download flags change what the guest ZIP may hold.
+    if (category.event_id && (togglesFolder || Object.prototype.hasOwnProperty.call(req.body, 'allow_downloads'))) {
+      require('../services/downloadZipService').invalidate(Number(category.event_id));
+    }
 
     // Log activity
     await logActivity('category_updated',
@@ -238,15 +335,14 @@ router.put('/:id/hero', adminAuth, requirePermission('settings.edit'), [
     if (!category) {
       return res.status(404).json({ error: 'Category not found' });
     }
+    if (await refuseForeignCategoryEvent(req, res, category.event_id)) return;
 
     // If hero_photo_id is provided, verify the photo actually belongs to
     // THIS category — checking existence alone let an admin point a
     // category's hero at a photo from a different category or event
     // (GHSA-j2f4).
     if (hero_photo_id) {
-      const photo = await db('photos')
-        .where({ id: hero_photo_id, category_id: id })
-        .first();
+      const photo = await heroCandidate(category, hero_photo_id);
       if (!photo) {
         return res.status(404).json({ error: 'Photo not found in this category' });
       }
@@ -281,6 +377,19 @@ router.delete('/:id', adminAuth, requirePermission('settings.edit'), async (req,
     const category = await db('photo_categories').where('id', id).first();
     if (!category) {
       return res.status(404).json({ error: 'Category not found' });
+    }
+    if (await refuseForeignCategoryEvent(req, res, category.event_id)) return;
+
+    // A folder (issue 1786) is deleted without deleting anything in it: its
+    // photos and subfolders move up to its parent.
+    if (parseBooleanInput(category.is_folder, false) && category.event_id) {
+      if (await refuseWithoutFolderPermission(req, res)) return;
+      const moved = await folderTree.deleteFolder(category.event_id, category.id);
+      require('../services/downloadZipService').invalidate(Number(category.event_id));
+      await logActivity('folder_deleted', { name: category.name, movedPhotos: moved }, category.event_id,
+        { type: 'admin', id: req.admin.id, name: req.admin.username });
+      capabilityEvidence(res, 'category_editing');
+      return res.json({ message: 'Folder deleted successfully', moved_photos: moved });
     }
     
     // Check if category has photos
@@ -327,17 +436,15 @@ router.post('/reorder', adminAuth, requirePermission('settings.edit'), [
     const orderedIds = req.body.orderedIds.map((id) => parseInt(id, 10));
 
     // Event ownership (event_id comes from the body, so requireEventOwnership —
-    // which reads req.params — can't be used here). Mirror it: super_admins
-    // bypass; other admins may only reorder events they own (ownerless
-    // legacy/system events allowed).
-    if (req.admin.roleName !== 'super_admin') {
-      const event = await db('events').where('id', eventId).first();
-      if (!event) {
-        return res.status(404).json({ error: 'Event not found' });
-      }
-      if (event.created_by && event.created_by !== req.admin.id) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
+    // which reads req.params — can't be used here). Same rule, same helper:
+    // super_admin bypasses; other admins may only reorder events they own
+    // (ownerless legacy/system events allowed).
+    const event = await db('events').where('id', eventId).first();
+    if (!event) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+    if (!canAccessEvent(req.admin, event)) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
     // Every id must be a category available to this event: a shared global OR

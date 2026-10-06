@@ -16,6 +16,7 @@ import {
   Trash2,
   CheckCircle,
   XCircle,
+  MailCheck,
 } from 'lucide-react';
 import { parseISO, isPast } from 'date-fns';
 
@@ -39,7 +40,7 @@ const getRoleBadgeColor = (roleName: string): string => {
       return 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800';
     case 'viewer':
     default:
-      return 'bg-neutral-100 dark:bg-neutral-700 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-600';
+      return 'bg-inset text-body border-line';
   }
 };
 
@@ -100,22 +101,22 @@ const CreateInvitationModal: React.FC<CreateInvitationModalProps> = ({
       <Card className="w-full max-w-md">
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">
+            <h2 className="text-xl font-semibold text-heading">
               {t('userManagement.createInvitation')}
             </h2>
             <button
               onClick={handleClose}
-              className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-700 rounded-lg transition-colors"
+              className="p-1 hover:bg-hover rounded-lg transition-colors"
               disabled={isLoading}
             >
-              <X className="w-5 h-5 text-neutral-500 dark:text-neutral-400" />
+              <X className="w-5 h-5 text-muted" />
             </button>
           </div>
 
           <form onSubmit={handleSubmit}>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('userManagement.email')}
                 </label>
                 <Input
@@ -134,7 +135,7 @@ const CreateInvitationModal: React.FC<CreateInvitationModalProps> = ({
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label className="block text-sm font-medium text-body mb-1">
                   {t('userManagement.role')}
                 </label>
                 <select
@@ -143,7 +144,7 @@ const CreateInvitationModal: React.FC<CreateInvitationModalProps> = ({
                     setRoleId(e.target.value ? Number(e.target.value) : '');
                     setErrors((prev) => ({ ...prev, role: undefined }));
                   }}
-                  className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+                  className="w-full px-3 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
                   disabled={isLoading}
                 >
                   <option value="">{t('userManagement.selectRole')}</option>
@@ -229,34 +230,34 @@ const EditUserModal: React.FC<EditUserModalProps> = ({
       <Card className="w-full max-w-md">
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">
+            <h2 className="text-xl font-semibold text-heading">
               {t('userManagement.editUser')}
             </h2>
             <button
               onClick={handleClose}
-              className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-700 rounded-lg transition-colors"
+              className="p-1 hover:bg-hover rounded-lg transition-colors"
               disabled={isLoading}
             >
-              <X className="w-5 h-5 text-neutral-500 dark:text-neutral-400" />
+              <X className="w-5 h-5 text-muted" />
             </button>
           </div>
 
-          <div className="mb-4 p-3 bg-neutral-50 dark:bg-neutral-700 rounded-lg">
-            <p className="text-sm text-neutral-600 dark:text-neutral-300">
+          <div className="mb-4 p-3 bg-inset rounded-lg">
+            <p className="text-sm text-body">
               {t('userManagement.editingUser')}: <strong>{user.username}</strong>
             </p>
-            <p className="text-sm text-neutral-500 dark:text-neutral-400">{user.email}</p>
+            <p className="text-sm text-muted">{user.email}</p>
           </div>
 
           <form onSubmit={handleSubmit}>
             <div>
-              <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label className="block text-sm font-medium text-body mb-1">
                 {t('userManagement.role')}
               </label>
               <select
                 value={roleId}
                 onChange={(e) => setRoleId(e.target.value ? Number(e.target.value) : '')}
-                className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
+                className="w-full px-3 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-accent-dark"
                 disabled={isLoading}
               >
                 <option value="">{t('userManagement.selectRole')}</option>
@@ -336,8 +337,8 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
               />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">{title}</h2>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">{message}</p>
+              <h2 className="text-lg font-semibold text-heading">{title}</h2>
+              <p className="text-sm text-soft mt-1">{message}</p>
             </div>
           </div>
 
@@ -371,7 +372,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 export const UserManagementPage: React.FC = () => {
   const { t } = useTranslation();
   const { formatDistanceToNow } = useLocalizedDate()
-  const { hasAnyPermission } = usePermissions();
+  const { hasAnyPermission, isSuperAdmin } = usePermissions();
   const canManageRoles = hasAnyPermission(['roles.manage', 'users.view']);
 
   // State
@@ -382,9 +383,10 @@ export const UserManagementPage: React.FC = () => {
   const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
-    type: 'deactivate' | 'activate' | 'delete' | 'cancelInvitation';
+    type: 'deactivate' | 'activate' | 'delete' | 'cancelInvitation' | 'confirmEmail';
     id: number;
     name: string;
+    email?: string;
   } | null>(null);
 
   // Queries
@@ -420,7 +422,9 @@ export const UserManagementPage: React.FC = () => {
       userManagementService.createInvitation({ email, role_id: roleId }),
     invalidateKeys: [['admin-invitations']],
     successMessage: t('userManagement.invitationSent'),
-    errorMessage: (error: Error) => error.message || t('userManagement.invitationError'),
+    // Same here: the function form would show axios's own "Request failed with
+    // status code 409" instead of the server's reason for refusing the invite.
+    errorMessage: t('userManagement.invitationError'),
     onSuccess: () => {
       createInvitationModal.close();
     },
@@ -465,6 +469,23 @@ export const UserManagementPage: React.FC = () => {
     invalidateKeys: [['admin-users']],
     successMessage: t('userManagement.userActivated', 'User reactivated successfully'),
     errorMessage: () => t('userManagement.activateUserError', 'Failed to reactivate user'),
+    onSuccess: () => {
+      setConfirmDialog(null);
+    },
+  });
+
+  // SSO email linking (migration 227): a Super Admin re-saving an admin's own
+  // address is what marks it as set by a trusted flow. The address itself does
+  // not change — this only confirms it — so the page sends it back unaltered.
+  const confirmEmailMutation = useMutationWithToast({
+    mutationFn: ({ id, email }: { id: number; email: string }) =>
+      userManagementService.updateUser(id, { email }),
+    invalidateKeys: [['admin-users']],
+    successMessage: t('userManagement.emailConfirmed', 'Email confirmed for single sign-on'),
+    // The string form, not a function: useMutationWithToast reads the server's
+    // own message first for that one and falls back to this. A 409 here means
+    // the address changed under the dialog, and saying so is the whole point.
+    errorMessage: t('userManagement.confirmEmailError', 'Failed to confirm the email'),
     onSuccess: () => {
       setConfirmDialog(null);
     },
@@ -547,6 +568,16 @@ export const UserManagementPage: React.FC = () => {
     });
   };
 
+  const handleConfirmEmail = (user: AdminUser) => {
+    setConfirmDialog({
+      isOpen: true,
+      type: 'confirmEmail',
+      id: user.id,
+      name: user.username,
+      email: user.email,
+    });
+  };
+
   const handleCancelInvitation = (invitation: AdminInvitation) => {
     setConfirmDialog({
       isOpen: true,
@@ -565,6 +596,12 @@ export const UserManagementPage: React.FC = () => {
       activateUserMutation.mutate(confirmDialog.id);
     } else if (confirmDialog.type === 'delete') {
       deleteUserMutation.mutate(confirmDialog.id);
+    } else if (confirmDialog.type === 'confirmEmail') {
+      // The dialog is only ever opened from a row, which always has an
+      // address; an empty one would be a 400 with no useful message.
+      if (confirmDialog.email) {
+        confirmEmailMutation.mutate({ id: confirmDialog.id, email: confirmDialog.email });
+      }
     } else if (confirmDialog.type === 'cancelInvitation') {
       cancelInvitationMutation.mutate(confirmDialog.id);
     }
@@ -577,10 +614,10 @@ export const UserManagementPage: React.FC = () => {
     return (
       <div>
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+          <h1 className="text-2xl font-bold text-heading">
             {t('userManagement.title')}
           </h1>
-          <p className="text-neutral-600 dark:text-neutral-400 mt-1">{t('userManagement.subtitle')}</p>
+          <p className="text-soft mt-1">{t('userManagement.subtitle')}</p>
         </div>
         <div className="flex items-center justify-center min-h-[400px]">
           <Loading size="lg" text={t('userManagement.loading')} />
@@ -594,10 +631,10 @@ export const UserManagementPage: React.FC = () => {
     return (
       <div>
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+          <h1 className="text-2xl font-bold text-heading">
             {t('userManagement.title')}
           </h1>
-          <p className="text-neutral-600 dark:text-neutral-400 mt-1">{t('userManagement.subtitle')}</p>
+          <p className="text-soft mt-1">{t('userManagement.subtitle')}</p>
         </div>
         <div className="text-center py-12">
           <p className="text-red-600">{t('userManagement.loadError')}</p>
@@ -626,10 +663,10 @@ export const UserManagementPage: React.FC = () => {
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+          <h1 className="text-2xl font-bold text-heading">
             {t('userManagement.title')}
           </h1>
-          <p className="text-neutral-600 dark:text-neutral-400 mt-1">{t('userManagement.subtitle')}</p>
+          <p className="text-soft mt-1">{t('userManagement.subtitle')}</p>
         </div>
         <Button
           variant="primary"
@@ -645,10 +682,10 @@ export const UserManagementPage: React.FC = () => {
         <Card padding="sm">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+              <p className="text-sm text-soft">
                 {t('userManagement.stats.totalUsers')}
               </p>
-              <p className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+              <p className="text-2xl font-bold text-heading">
                 {users?.length || 0}
               </p>
             </div>
@@ -659,10 +696,10 @@ export const UserManagementPage: React.FC = () => {
         <Card padding="sm">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+              <p className="text-sm text-soft">
                 {t('userManagement.stats.activeUsers')}
               </p>
-              <p className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+              <p className="text-2xl font-bold text-heading">
                 {users?.filter((u) => u.isActive).length || 0}
               </p>
             </div>
@@ -673,10 +710,10 @@ export const UserManagementPage: React.FC = () => {
         <Card padding="sm">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+              <p className="text-sm text-soft">
                 {t('userManagement.stats.pendingInvitations')}
               </p>
-              <p className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+              <p className="text-2xl font-bold text-heading">
                 {invitations?.length || 0}
               </p>
             </div>
@@ -687,10 +724,10 @@ export const UserManagementPage: React.FC = () => {
         <Card padding="sm">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+              <p className="text-sm text-soft">
                 {t('userManagement.stats.inactiveUsers')}
               </p>
-              <p className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+              <p className="text-2xl font-bold text-heading">
                 {users?.filter((u) => !u.isActive).length || 0}
               </p>
             </div>
@@ -700,7 +737,7 @@ export const UserManagementPage: React.FC = () => {
       </div>
 
       {/* Tab Navigation */}
-      <div className="border-b border-neutral-200 dark:border-neutral-700 mb-6">
+      <div className="border-b border-line mb-6">
         <nav className="-mb-px flex gap-6">
           {tabs.map((tab) => (
             <button
@@ -709,7 +746,7 @@ export const UserManagementPage: React.FC = () => {
               className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors flex items-center gap-2 ${
                 activeTab === tab.key
                   ? 'border-accent text-accent'
-                  : 'border-transparent text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300'
+                  : 'border-transparent text-muted hover:text-body'
               }`}
             >
               {tab.label}
@@ -717,7 +754,7 @@ export const UserManagementPage: React.FC = () => {
                 className={`px-2 py-0.5 text-xs rounded-full ${
                   activeTab === tab.key
                     ? 'bg-accent-dark/15 text-accent-dark'
-                    : 'bg-neutral-100 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-400'
+                    : 'bg-inset text-soft'
                 }`}
               >
                 {tab.count}
@@ -753,29 +790,29 @@ export const UserManagementPage: React.FC = () => {
         <Card className="overflow-visible">
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-neutral-50 dark:bg-neutral-800 border-b border-neutral-200 dark:border-neutral-700">
+              <thead className="bg-subtle border-b border-line">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.user')}
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.role')}
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.status')}
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.lastLogin')}
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.actions')}
                   </th>
                 </tr>
               </thead>
-              <tbody className="bg-white dark:bg-neutral-800 divide-y divide-neutral-200 dark:divide-neutral-700">
+              <tbody className="bg-panel divide-y divide-line">
                 {filteredUsers.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-6 py-12 text-center text-neutral-500 dark:text-neutral-400">
+                    <td colSpan={5} className="px-6 py-12 text-center text-muted">
                       {searchTerm
                         ? t('userManagement.noUsersFound')
                         : t('userManagement.noUsers')}
@@ -792,10 +829,16 @@ export const UserManagementPage: React.FC = () => {
                             </span>
                           </div>
                           <div>
-                            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
+                            <p className="text-sm font-medium text-heading">
                               {user.username}
                             </p>
-                            <p className="text-xs text-neutral-500 dark:text-neutral-400">{user.email}</p>
+                            <p className="text-xs text-muted">{user.email}</p>
+                            {isSuperAdmin && user.emailLinkEligible === false && (
+                              <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-300">
+                                <AlertTriangle className="w-3 h-3" />
+                                {t('userManagement.ssoNotConfirmed', 'Email not confirmed for SSO')}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -814,7 +857,7 @@ export const UserManagementPage: React.FC = () => {
                           className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                             user.isActive
                               ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
-                              : 'bg-neutral-100 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400'
+                              : 'bg-inset text-muted'
                           }`}
                         >
                           {user.isActive
@@ -824,20 +867,31 @@ export const UserManagementPage: React.FC = () => {
                       </td>
                       <td className="px-6 py-4">
                         {user.lastLogin ? (
-                          <div className="flex items-center gap-1 text-sm text-neutral-600 dark:text-neutral-300">
+                          <div className="flex items-center gap-1 text-sm text-body">
                             <Clock className="w-4 h-4" />
                             {formatDistanceToNow(parseISO(user.lastLogin), {
                               addSuffix: true,
                             })}
                           </div>
                         ) : (
-                          <span className="text-sm text-neutral-400 dark:text-neutral-500">
+                          <span className="text-sm text-faint">
                             {t('userManagement.neverLoggedIn')}
                           </span>
                         )}
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex items-center justify-end gap-2">
+                          {/* Only a Super Admin can set email_link_eligible, and the
+                              row only needs it while it is false (migration 227). */}
+                          {isSuperAdmin && user.emailLinkEligible === false && (
+                            <button
+                              onClick={() => handleConfirmEmail(user)}
+                              className="p-1.5 text-neutral-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 rounded-lg transition-colors"
+                              title={t('userManagement.confirmEmailForSso', 'Confirm email for SSO')}
+                            >
+                              <MailCheck className="w-4 h-4" />
+                            </button>
+                          )}
                           <button
                             onClick={() => handleEditUser(user)}
                             className="p-1.5 text-neutral-400 hover:text-accent hover:bg-accent-dark/15 rounded-lg transition-colors"
@@ -887,29 +941,29 @@ export const UserManagementPage: React.FC = () => {
         <Card className="overflow-visible">
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-neutral-50 dark:bg-neutral-800 border-b border-neutral-200 dark:border-neutral-700">
+              <thead className="bg-subtle border-b border-line">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.email')}
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.role')}
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.invitedBy')}
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.expires')}
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-muted uppercase tracking-wider">
                     {t('userManagement.table.actions')}
                   </th>
                 </tr>
               </thead>
-              <tbody className="bg-white dark:bg-neutral-800 divide-y divide-neutral-200 dark:divide-neutral-700">
+              <tbody className="bg-panel divide-y divide-line">
                 {filteredInvitations.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-6 py-12 text-center text-neutral-500 dark:text-neutral-400">
+                    <td colSpan={5} className="px-6 py-12 text-center text-muted">
                       {searchTerm
                         ? t('userManagement.noInvitationsFound')
                         : t('userManagement.noInvitations')}
@@ -925,7 +979,7 @@ export const UserManagementPage: React.FC = () => {
                             <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/40 flex items-center justify-center">
                               <Mail className="w-5 h-5 text-blue-600 dark:text-blue-400" />
                             </div>
-                            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
+                            <p className="text-sm font-medium text-heading">
                               {invitation.email}
                             </p>
                           </div>
@@ -940,13 +994,13 @@ export const UserManagementPage: React.FC = () => {
                             {invitation.roleName}
                           </span>
                         </td>
-                        <td className="px-6 py-4 text-sm text-neutral-600 dark:text-neutral-300">
+                        <td className="px-6 py-4 text-sm text-body">
                           {invitation.invitedBy || '-'}
                         </td>
                         <td className="px-6 py-4">
                           <span
                             className={`inline-flex items-center gap-1 text-sm ${
-                              isExpired ? 'text-red-600 dark:text-red-400' : 'text-neutral-600 dark:text-neutral-300'
+                              isExpired ? 'text-red-600 dark:text-red-400' : 'text-body'
                             }`}
                           >
                             <Clock className="w-4 h-4" />
@@ -1011,18 +1065,21 @@ export const UserManagementPage: React.FC = () => {
             confirmDialog.type === 'deactivate' ? t('userManagement.confirmDeactivate.title')
             : confirmDialog.type === 'activate'  ? t('userManagement.confirmActivate.title', 'Reactivate user?')
             : confirmDialog.type === 'delete'    ? t('userManagement.confirmDelete.title', 'Delete user permanently?')
+            : confirmDialog.type === 'confirmEmail' ? t('userManagement.confirmEmailForSsoDialog.title', 'Confirm this email for SSO?')
             : t('userManagement.confirmCancelInvitation.title')
           }
           message={
             confirmDialog.type === 'deactivate' ? t('userManagement.confirmDeactivate.message', { name: confirmDialog.name })
             : confirmDialog.type === 'activate'  ? t('userManagement.confirmActivate.message', 'Reactivate {{name}}? They will be able to log in again immediately.', { name: confirmDialog.name })
             : confirmDialog.type === 'delete'    ? t('userManagement.confirmDelete.message', 'Permanently delete {{name}}? This cannot be undone. Their pending invitations and API tokens will be removed; records they created elsewhere will be kept but de-attributed.', { name: confirmDialog.name })
+            : confirmDialog.type === 'confirmEmail' ? t('userManagement.confirmEmailForSsoDialog.message', 'Confirm {{email}} as {{name}}\'s address? A single sign-on login that arrives with this verified email will then be linked to this account. The address itself is not changed. Only confirm it if you know it belongs to them.', { name: confirmDialog.name, email: confirmDialog.email })
             : t('userManagement.confirmCancelInvitation.message', { email: confirmDialog.name })
           }
           confirmText={
             confirmDialog.type === 'deactivate' ? t('userManagement.deactivate')
             : confirmDialog.type === 'activate'  ? t('userManagement.activate', 'Reactivate')
             : confirmDialog.type === 'delete'    ? t('userManagement.delete', 'Delete permanently')
+            : confirmDialog.type === 'confirmEmail' ? t('userManagement.confirmEmail', 'Confirm email')
             // Not the generic `cancel` — that collides with ConfirmDialog's own
             // dismiss button, giving the dialog two "Cancel" buttons (QA I.04).
             : t('userManagement.cancelInvitation')
@@ -1031,6 +1088,7 @@ export const UserManagementPage: React.FC = () => {
             confirmDialog.type === 'deactivate' ? deactivateUserMutation.isPending
             : confirmDialog.type === 'activate'  ? activateUserMutation.isPending
             : confirmDialog.type === 'delete'    ? deleteUserMutation.isPending
+            : confirmDialog.type === 'confirmEmail' ? confirmEmailMutation.isPending
             : cancelInvitationMutation.isPending
           }
           variant={

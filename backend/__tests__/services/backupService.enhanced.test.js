@@ -87,6 +87,8 @@ describe('Enhanced Backup Service Tests', () => {
       upload: jest.fn().mockResolvedValue({ Location: 's3://bucket/key' }),
       uploadStream: jest.fn().mockResolvedValue({ Location: 's3://bucket/key' }),
       download: jest.fn().mockResolvedValue(),
+      getMetadata: jest.fn().mockResolvedValue({ ContentLength: 2 }),
+      downloadStream: jest.fn().mockImplementation(async () => require('stream').Readable.from([Buffer.from('{}')])),
       exists: jest.fn().mockResolvedValue(false),
       delete: jest.fn().mockResolvedValue(),
       list: jest.fn().mockResolvedValue({ Contents: [] })
@@ -231,7 +233,9 @@ describe('Enhanced Backup Service Tests', () => {
         forcePathStyle: false,
         sslEnabled: true,
         maxRetries: 3,
-        retryDelay: 1000
+        retryDelay: 1000,
+        // A public endpoint with no stored approval (issue 1641).
+        allowPrivateEndpoint: false
       });
       
       expect(mockS3Client.testConnection).toHaveBeenCalled();
@@ -755,6 +759,23 @@ describe('Enhanced Backup Service Tests', () => {
       });
     });
 
+    // Issue 1641: the management header read lastBackup as "last successful".
+    // The two fields mean different things and must stay apart.
+    it('reports a failed newest attempt as lastBackup and the older success as lastSuccessfulBackup', async () => {
+      const recentRuns = [
+        { id: 2, started_at: new Date('2026-09-24T08:38:00Z'), status: 'failed', error_message: 'EACCES' },
+        { id: 1, started_at: new Date('2026-09-23T03:00:00Z'), completed_at: new Date('2026-09-23T03:05:00Z'), status: 'completed' },
+      ];
+      mockDb.limit.mockResolvedValue(recentRuns);
+      mockDb.select.mockResolvedValue([]);
+
+      const status = await backupService.getBackupStatus();
+
+      expect(status.lastBackup).toMatchObject({ id: 2, status: 'failed' });
+      expect(status.lastSuccessfulBackup).toMatchObject({ id: 1, status: 'completed' });
+      expect(status.isHealthy).toBe(false);
+    });
+
     it('should clean up old backup runs', async () => {
       mockDb.delete.mockResolvedValue(5);
       
@@ -805,10 +826,10 @@ describe('Enhanced Backup Service Tests', () => {
       await backupService.getBackupManifest(1);
       
       expect(S3StorageAdapter).toHaveBeenCalled();
-      expect(mockS3Client.download).toHaveBeenCalledWith(
-        'backups/manifests/backup-123.json',
-        expect.any(String)
-      );
+      // Bounded fetch: size check first, then the body stream (finding 19f1f5df).
+      expect(mockS3Client.getMetadata).toHaveBeenCalledWith('backups/manifests/backup-123.json');
+      expect(mockS3Client.downloadStream).toHaveBeenCalledWith('backups/manifests/backup-123.json');
+      expect(mockS3Client.download).not.toHaveBeenCalled();
     });
   });
 });

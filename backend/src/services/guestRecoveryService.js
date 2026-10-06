@@ -120,22 +120,34 @@ async function verifyCode(eventId, email, submittedCode) {
     return { ok: false, reason: 'expired_or_missing' };
   }
 
-  if (row.attempts >= MAX_ATTEMPTS) {
-    await db('guest_verification_codes').where('id', row.id).update({ consumed_at: db.fn.now() });
-    return { ok: false, reason: 'too_many_attempts' };
+  // Claim an attempt before the (slow) bcrypt compare, in one conditional
+  // UPDATE. Reading the counter and writing `attempts + 1` afterwards let
+  // concurrent guesses all pass the limit and overwrite each other's count.
+  const claimed = await db('guest_verification_codes')
+    .where('id', row.id)
+    .whereNull('consumed_at')
+    .andWhere('attempts', '<', MAX_ATTEMPTS)
+    .increment('attempts', 1);
+  if (!claimed) {
+    // Do not consume the code here: a request that claimed the last allowed
+    // attempt may still be comparing, and consuming it would reject that
+    // valid guess. With no attempts left the claim can never succeed again,
+    // so the code is dead without being consumed.
+    const current = await db('guest_verification_codes').where('id', row.id).first('consumed_at');
+    return { ok: false, reason: current && !current.consumed_at ? 'too_many_attempts' : 'expired_or_missing' };
   }
 
   const matches = await bcrypt.compare(normalized, row.code_hash);
   if (!matches) {
-    await db('guest_verification_codes')
-      .where('id', row.id)
-      .update({ attempts: row.attempts + 1 });
     return { ok: false, reason: 'wrong_code' };
   }
 
-  await db('guest_verification_codes')
+  // Consume once: a second correct request racing this one gets nothing.
+  const consumed = await db('guest_verification_codes')
     .where('id', row.id)
+    .whereNull('consumed_at')
     .update({ consumed_at: db.fn.now() });
+  if (!consumed) return { ok: false, reason: 'expired_or_missing' };
 
   return { ok: true };
 }

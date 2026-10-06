@@ -46,10 +46,12 @@ vi.mock('../../../services/events.service', () => ({
 
 const getEventPhotos = vi.fn();
 vi.mock('../../../services/photos.service', () => ({
+  CREDIT_FILTER_NONE: '__none__',
   photosService: {
     getEventPhotos: (...args: unknown[]) => getEventPhotos(...args),
     getFilterSummary: vi.fn().mockResolvedValue({}),
     getExportFormats: vi.fn().mockResolvedValue([]),
+    getPhotoCredits: vi.fn().mockResolvedValue({ credits: [], none: 0 }),
   },
 }));
 
@@ -73,11 +75,18 @@ vi.mock('../../../contexts/FeatureFlagsContext', () => ({
   useFeatureEnabled: () => false,
 }));
 
+// The Settings draft reads the download-resolution overrides directly.
+vi.mock('../../../config/api', () => ({
+  api: { get: vi.fn().mockResolvedValue({ data: undefined }), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+}));
+
 vi.mock('../../../contexts/PermissionsContext', () => ({
   usePermissions: () => ({ hasAnyPermission: () => true, hasPermission: () => true, isLoading: false }),
 }));
 
 import { EventDetailsPage } from '../EventDetailsPage';
+import { ConfirmDialogProvider } from '../../../components/common/ConfirmDialog';
+import { UnsavedChangesProvider } from '../../../contexts/UnsavedChangesContext';
 
 const EVENT = {
   id: 1,
@@ -96,12 +105,16 @@ function renderPage(entry: string) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[entry]}>
-        <Routes>
-          <Route path="/admin/events/:id" element={<EventDetailsPage />} />
-          <Route path="/admin/events" element={<div>events list</div>} />
-        </Routes>
-      </MemoryRouter>
+      <ConfirmDialogProvider>
+        <UnsavedChangesProvider>
+          <MemoryRouter initialEntries={[entry]}>
+            <Routes>
+              <Route path="/admin/events/:id" element={<EventDetailsPage />} />
+              <Route path="/admin/events" element={<div>events list</div>} />
+            </Routes>
+          </MemoryRouter>
+        </UnsavedChangesProvider>
+      </ConfirmDialogProvider>
     </QueryClientProvider>
   );
 }

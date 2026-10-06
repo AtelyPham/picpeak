@@ -1,4 +1,7 @@
 const { toIso } = require('../utils/dateNormalize');
+const { toDateOnly } = require('../utils/dateOnly');
+const { captureDateOrderSql } = require('../utils/captureDateSql');
+const { publicThemeFields } = require('./galleryTheme');
 const { db } = require('../database/db');
 const { parseBooleanInput } = require('../utils/parsers');
 const { getAppSetting } = require('../utils/appSettings');
@@ -7,11 +10,16 @@ const { SHARED_COLOR_LABEL_IDENTITY } = require('../constants/colorLabels');
 const watermarkService = require('./watermarkService');
 const logger = require('../utils/logger');
 const { getEventCategoriesOrdered } = require('../utils/categoryOrder');
+const folderTree = require('./folderTreeService');
+const { guestDeliveryPayload } = require('./deliveryService');
 const { getUseOriginalFilenames } = require('./downloadFilenameService');
 const { resolveEventDownloadPolicy } = require('../utils/downloadResolutions');
 const { resolveHeroLogoVisible, originalNeedsPreview } = require('./galleryModel');
+const { heroAnchorQuery } = require('../utils/heroAnchor');
 const { applyFeedbackFilter } = require('./galleryPhotoQuery');
-async function getGalleryPhotos({ event, query = {}, identity, accessLevel, adminPreview, hiddenForGuest, slug }) {
+const { getQuota, grantedPhotoIds, drawsOnQuota } = require('./downloadQuota');
+const { guestNameModeOf, creditVisibleToGuest } = require('./photoCredit');
+async function getGalleryPhotos({ event, query = {}, identity, accessLevel, viaCustomer = false, adminPreview, hiddenForGuest, slug }) {
   // Get filter and sort parameters from query
   // `guest_id` is deliberately NOT read from the query string: the viewer's
   // own feedback is resolved from the request identity instead (see the
@@ -51,7 +59,18 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
   // viewer can't widen the set: when the event pins show_category_id, the
   // slideshow only sees that category. NULL = all photos (unchanged).
   if (accessLevel === 'slideshow' && event.show_category_id) {
-    photosQuery = photosQuery.where('photos.category_id', event.show_category_id);
+    // A folder (issue 1786) pins the slideshow to the folder and everything
+    // below it; a filter category to its own photos.
+    const pinned = await db('photo_categories').where('id', event.show_category_id).first('id', 'is_folder', 'event_id');
+    if (pinned && parseBooleanInput(pinned.is_folder, false)) {
+      // A global (pre-265) folder has no event tree: just itself. Rows that
+      // still carry their folder in category_id (an older backup restored)
+      // match on that column, the way the grid reads them.
+      const ids = pinned.event_id ? await folderTree.subtreeIds(event.id, pinned.id) : [Number(pinned.id)];
+      photosQuery = photosQuery.where((q) => q.whereIn('photos.folder_id', ids).orWhereIn('photos.category_id', ids));
+    } else {
+      photosQuery = photosQuery.where('photos.category_id', event.show_category_id);
+    }
   }
 
   // Apply sort option.
@@ -65,49 +84,10 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
   // order, so it also makes the fallback ordering meaningful rather than
   // arbitrary.
   if (sort === 'capture_date') {
-    // Sort by capture date, falling back to uploaded_at if capture date is null.
-    //
-    // On SQLite that fallback cannot be a plain COALESCE, because the two
-    // columns do not hold one type. photos.captured_at ends up carrying three
-    // different storage classes:
-    //
-    //   integer  managed uploads — photoProcessor.js:488 writes a Date, which
-    //            the sqlite3 binding stores as epoch milliseconds
-    //   text     external imports and the backfill, which write ISO-8601
-    //            ('2026-06-03T01:15:00.000Z') per the CLAUDE.md rule that
-    //            Dates must not be handed to the binding in tests
-    //   null     no capture date, so the sort falls through to uploaded_at —
-    //            usually text in knex's 'YYYY-MM-DD HH:MM:SS' default shape,
-    //            but epoch milliseconds on rows written by a legacy archive
-    //            restore (see __tests__/integration/sqliteEpochTimestamps.js),
-    //            so that column needs the same two branches
-    //
-    // SQLite orders INTEGER before TEXT unconditionally, so every managed
-    // photo carrying EXIF sorted ahead of every photo that did not, whatever
-    // the actual dates — a 2027 capture landing before a 2020 one. Among the
-    // text values the 'T' separator (0x54) also outranks the space (0x20), so
-    // a same-day ISO 01:15 sorted after a fallback 23:00.
-    //
-    // Normalising in the ORDER BY rather than rewriting the column: the data
-    // fix would have to touch every existing row and every writer, which is a
-    // much heavier change than the sort it is meant to correct. The cost here
-    // is that this sort stops using idx_photos_captured_at on SQLite — an
-    // acceptable trade on the fallback engine, where the alternative is an
-    // index-assisted wrong answer.
-    //
-    // Postgres is untouched: captured_at is a real timestamp there, so
-    // COALESCE already compares correctly.
-    if (db.client.config.client === 'pg') {
-      photosQuery = photosQuery
-        .orderByRaw('COALESCE(photos.captured_at, photos.uploaded_at) ' + sortOrder);
-    } else {
-      photosQuery = photosQuery.orderByRaw(`CASE
-            WHEN typeof(photos.captured_at) IN ('integer', 'real') THEN datetime(photos.captured_at / 1000, 'unixepoch')
-            WHEN photos.captured_at IS NOT NULL THEN replace(replace(substr(photos.captured_at, 1, 19), 'T', ' '), 'Z', '')
-            WHEN typeof(photos.uploaded_at) IN ('integer', 'real') THEN datetime(photos.uploaded_at / 1000, 'unixepoch')
-            ELSE substr(photos.uploaded_at, 1, 19)
-          END ${sortOrder}`);
-    }
+    // Sort by capture date, falling back to uploaded_at if capture date is
+    // null. The expression is engine-specific, see utils/captureDateSql.
+    photosQuery = photosQuery
+      .orderByRaw(`${captureDateOrderSql(db.client.config.client)} ${sortOrder}`);
     photosQuery = photosQuery.orderBy('photos.id', sortOrder);
   } else if (sort === 'filename') {
     photosQuery = photosQuery.orderBy('photos.filename', sortOrder).orderBy('photos.id', sortOrder);
@@ -190,6 +170,37 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
     }
     const likedRows = await likeQuery.select('photo_id');
     likedRows.forEach(row => likedPhotoIds.add(row.photo_id));
+  }
+
+  // Per-viewer star rating (issue 1733, A3a), same identity resolution and
+  // the same hidden-row rule as the likes above. The tile renders a rating
+  // control from this, so it has to know the viewer's own stars without
+  // opening the lightbox. Only read when ratings are switched on for the
+  // event — the control is not rendered otherwise, so there is nothing to
+  // seed. Not gated on showFeedbackToGuests: it is the viewer's own
+  // selection, like is_liked and my_color_label.
+  const ratingsOn = parseBooleanInput(feedbackSettings.feedback_enabled, false)
+    && parseBooleanInput(feedbackSettings.allow_ratings, false);
+  const myRatingByPhoto = {};
+  if (photos.length > 0 && ratingsOn) {
+    const ratingQuery = db('photo_feedback')
+      .where({ event_id: event.id, feedback_type: 'rating', is_hidden: formatBoolean(false) })
+      .whereIn('photo_id', photos.map(p => p.id));
+    if (identity.guestId) {
+      ratingQuery.where('guest_id', identity.guestId);
+    } else {
+      ratingQuery.where('guest_identifier', identity.guestIdentifier);
+    }
+    // submitFeedback's check-then-insert is not atomic, so one viewer can own
+    // two rating rows for a photo. The row mutated last wins (updated_at,
+    // created_at, id) — the same rule getPhotoFeedback applies for the
+    // lightbox, so the tile and the lightbox never show different stars.
+    const ratingRows = await ratingQuery.select('id', 'photo_id', 'rating', 'created_at', 'updated_at');
+    Array.from(ratingRows).sort(feedbackService.lastMutatedFirst).forEach(row => {
+      if (row.rating && myRatingByPhoto[row.photo_id] === undefined) {
+        myRatingByPhoto[row.photo_id] = Number(row.rating);
+      }
+    });
   }
 
   // Per-viewer colour label (#1044), same identity resolution as the likes
@@ -309,11 +320,42 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
 
   // Get actual categories used by photos in this event
   // This includes both global categories and event-specific ones
-  const usedCategoryIds = hiddenForGuest ? [] : await db('photos')
+  const usedFilterIds = hiddenForGuest ? [] : await db('photos')
     .where('event_id', event.id)
     .whereNotNull('category_id')
     .distinct('category_id')
     .pluck('category_id');
+  // Folders (issue 1786): every folder that holds photos, plus all of its
+  // ancestors — a parent that only contains subfolders still has to render
+  // as a tile, or the subfolders below it are unreachable.
+  const allFolders = hiddenForGuest ? [] : await folderTree.eventFolders(event.id);
+  const folderById = folderTree.indexById(allFolders);
+  const usedFolderIds = new Set();
+  if (!hiddenForGuest) {
+    // Only folders holding a photo this viewer may see: a folder with
+    // nothing but hidden or still-processing photos must not ship its name
+    // (and its ancestors' names) to guests. Same rules as the photo list.
+    let directQuery = db('photos')
+      .where('event_id', event.id)
+      .whereNotNull('folder_id')
+      .where((q) => q.where('processing_status', 'complete').orWhereNull('processing_status'));
+    if (!isClient) directQuery = directQuery.where((q) => q.where('visibility', 'visible').orWhereNull('visibility'));
+    const direct = await directQuery.distinct('folder_id').pluck('folder_id');
+    for (const id of direct) {
+      let cur = folderById.get(Number(id));
+      const seen = new Set();
+      while (cur && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        usedFolderIds.add(Number(cur.id));
+        cur = cur.parent_id ? folderById.get(Number(cur.parent_id)) : null;
+      }
+      // A legacy global "folder" (pre-265 data) is not in the event tree
+      // but still holds photos; keep it reachable as a top-level folder.
+      if (!folderById.has(Number(id))) usedFolderIds.add(Number(id));
+    }
+  }
+  const usedCategoryIds = [...new Set([...usedFilterIds.map(Number), ...usedFolderIds])];
+  const blockedFolderIds = folderTree.blockedFolderIdsFrom(allFolders);
 
   // Fetch category details from photo_categories table
   let categories = [];
@@ -322,7 +364,7 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
     // default, else name — restricted to categories that have photos.
     const categoryDetails = await getEventCategoriesOrdered(event.id, {
       onlyIds: usedCategoryIds,
-      select: ['c.id', 'c.name', 'c.slug', 'c.is_global', 'c.hero_photo_id', 'c.allow_downloads', 'c.is_folder'],
+      select: ['c.id', 'c.name', 'c.slug', 'c.is_global', 'c.hero_photo_id', 'c.allow_downloads', 'c.is_folder', 'c.parent_id'],
     });
 
     categories = categoryDetails.map(cat => ({
@@ -338,7 +380,9 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
       // Folder vs filter (#1160). true = the category CONTAINS its photos:
       // they leave the root grid and only render inside the folder. Defaults
       // false so categories predating migration 185 keep filtering.
-      is_folder: parseBooleanInput(cat.is_folder, false)
+      is_folder: parseBooleanInput(cat.is_folder, false),
+      // Nesting (issue 1786): null = top level. Only folders nest.
+      parent_id: cat.parent_id == null ? null : Number(cat.parent_id),
     }));
   }
 
@@ -347,6 +391,21 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
   categories.forEach(cat => {
     categoryMap[cat.id] = cat;
   });
+
+  // A row written before migration 265 (or restored from an older backup)
+  // can still carry its folder in category_id. Report it the way current
+  // rows are stored — folder in folder_id, no filter category — so the
+  // gallery's containment never depends on how the row was written.
+  const legacyFolderId = (photo) => (photo.category_id && categoryMap[photo.category_id]?.is_folder
+    ? Number(photo.category_id) : null);
+  // A folder_id with no folder row (deleted while an upload placed into it
+  // was in flight; there is no FK) reads as the gallery root.
+  const folderIdOf = (photo) => {
+    if (!photo.folder_id) return legacyFolderId(photo);
+    const id = Number(photo.folder_id);
+    return categoryMap[id] ? id : null;
+  };
+  const filterCategoryIdOf = (photo) => (legacyFolderId(photo) ? null : (photo.category_id || null));
     
   // Include protection settings in response
   const protectionSettings = {
@@ -391,32 +450,79 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
   const globalLogoSize = await getAppSetting('branding_logo_size', 'medium');
   const downloadPolicy = await resolveEventDownloadPolicy(event);
 
+  // Download limit (issue 1560). Here rather than in the public /info payload:
+  // usage is gallery data and only goes to an authenticated viewer. The
+  // granted set lets the UI price a selection (already-downloaded photos are
+  // free again) and decides which photos may still load their original.
+  // An admin preview is exempt from the limit, so it gets the payload of an
+  // unlimited gallery: otherwise the UI would refuse downloads the server
+  // lets through.
+  const eventQuota = await getQuota(event);
+  const downloadQuota = adminPreview ? null : eventQuota;
+  const grantedIds = downloadQuota ? await grantedPhotoIds(event.id) : new Set();
+  // A zip still streaming holds reserved grants it may give back; its photos
+  // keep the preview until it has shipped them.
+  const deliveredIds = downloadQuota
+    ? await grantedPhotoIds(event.id, null, undefined, { deliveredOnly: true })
+    : new Set();
+  const withholdOriginals = !!downloadQuota;
+  // Only the client (PIN or portal) draws on the quota. A share-link guest
+  // downloads preview-size copies instead, so they get no counter they could
+  // not use, and no resolution picker: a job would build originals.
+  const downloadPreviewOnly = !!downloadQuota && !drawsOnQuota({ accessLevel, viaCustomer });
+  const quotaForViewer = downloadPreviewOnly ? null : downloadQuota;
+
+  // Uploader names / photo credits (#1561). Recorded for the admin; a guest
+  // sees them only when the per-event switch is on, and a guest-given name
+  // only when the switch was also on as it was uploaded (creditVisibleToGuest)
+  // — turning it off hides every name again. The PIN client is the host, who
+  // sees them regardless — the same exemption the face strip makes.
+  // Never for the slideshow: a projector link is display-only and easy to
+  // leak, and a name on a wall screen is not what "show to guests" agreed to.
+  const creditsVisible = accessLevel !== 'slideshow'
+    && (isClient || parseBooleanInput(event.show_credits_to_guests, false));
+
+  const theme = await publicThemeFields(event);
   return {
     pagination: { page, limit: limit || total, total, has_more: !!limit && page * limit < total },
     event: {
       id: event.id,
       event_name: event.event_name,
       event_type: event.event_type,
-      event_date: event.event_date,
+      // Calendar date, like /info and the login responses: GalleryAuthContext
+      // refreshes its cached event from this payload, so a pg Date here
+      // would reintroduce the previous-day shift west of UTC.
+      event_date: toDateOnly(event.event_date),
       welcome_message: event.welcome_message,
-      color_theme: event.color_theme,
+      color_theme: theme.color_theme,
       expires_at: event.expires_at,
       hero_photo_id: event.hero_photo_id,
       // Defaults match /info: downloads on unless explicitly disabled,
       // uploads off unless explicitly enabled (#1028).
       allow_downloads: parseBooleanInput(event.allow_downloads, true),
       allow_user_uploads: parseBooleanInput(event.allow_user_uploads, false),
+      // Upload dialog name step (#1561): off | optional | required.
+      guest_name_mode: guestNameModeOf(event),
+      // Whether photos carry credit_name, so the UI can show the "By" filter
+      // and the lightbox line.
+      credits_visible: creditsVisible,
       // Download resolutions (#858). `choices` drives the picker modal and is
       // empty when the picker is off, so the UI can never offer a size the
       // server would reject.
+      download_limit: quotaForViewer ? quotaForViewer.limit : null,
+      downloads_used: quotaForViewer ? quotaForViewer.used : 0,
+      downloads_remaining: quotaForViewer ? quotaForViewer.remaining : null,
+      download_preview_only: downloadPreviewOnly,
       download_resolution: {
         standard: downloadPolicy.standard,
-        picker_enabled: downloadPolicy.pickerEnabled,
-        choices: downloadPolicy.pickerEnabled ? downloadPolicy.choices : [],
+        picker_enabled: downloadPolicy.pickerEnabled && !downloadPreviewOnly,
+        choices: downloadPolicy.pickerEnabled && !downloadPreviewOnly ? downloadPolicy.choices : [],
       },
       // Reveal mode (#838): armed flag lets an open VISIBLE gallery keep
       // polling so a re-hide propagates without a manual reload.
       reveal_armed: parseBooleanInput(event.reveal_mode, false),
+      // Two-stage delivery (issue 1562): null for an ordinary gallery.
+      delivery: hiddenForGuest ? null : guestDeliveryPayload(event, total),
       disable_right_click: parseBooleanInput(event.disable_right_click, false),
       watermark_downloads: parseBooleanInput(event.watermark_downloads, false),
       watermark_text: event.watermark_text,
@@ -426,8 +532,8 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
       hero_logo_size: event.hero_logo_size || globalLogoSize || 'medium',
       hero_logo_position: event.hero_logo_position || 'top',
       hero_logo_url: event.hero_logo_url || null,
-      header_style: event.header_style || 'standard',
-      hero_divider_style: event.hero_divider_style || 'wave',
+      header_style: theme.header_style,
+      hero_divider_style: theme.hero_divider_style,
       hero_image_anchor: event.hero_image_anchor || 'center',
       default_photo_sort: event.default_photo_sort || 'upload_date_desc',
       // Promo banner override (#440). GalleryView has always read
@@ -442,7 +548,10 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
       // authenticated.
       info_mode: event.info_mode || 'inherit',
       info_markdown: event.info_markdown || null,
-      download_zip_ready: !!(event.download_zip_path && event.download_zip_generated_at),
+      // A limited gallery always streams its zip (routes/gallery/downloads.js),
+      // and the client must fetch it rather than navigate to it so a refusal
+      // can be shown instead of landing as a broken download.
+      download_zip_ready: !eventQuota && !!(event.download_zip_path && event.download_zip_generated_at),
       // Mirror of the admin-side toggle so the lightbox can decide
       // whether to surface original camera filenames (#508).
       use_original_filenames: useOriginalFilenames,
@@ -459,17 +568,16 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
     reveal_at: hiddenForGuest ? (event.reveal_at || null) : undefined,
     categories: categories,
     photos: photos.map(photo => {
-      // Videos always take the JWT route (#1370). The secure-images template
-      // below can never serve one — the route runs the bytes through sharp,
-      // which throws on an mp4 — and nothing substitutes the {{token}}
-      // placeholder for the <video> element either, so under enhanced/maximum
-      // a video resolved to a 403 and the lightbox sat at 0:00. The matching
-      // exemption is in routes/gallery/media.js.
+      // Every protection level takes the JWT route. Under enhanced/maximum
+      // this used to emit `/api/secure-images/.../{{token}}` and rely on the
+      // frontend to mint a token and fill the placeholder; nothing in the
+      // shipped frontend does (the service that could is imported nowhere),
+      // so every still image at those levels answered 403 — the same failure
+      // #1370 fixed for videos only. Enhanced and maximum are client-side
+      // rendering modes (canvas, context-menu and shortcut guards); the bytes
+      // come from the same authenticated route as at standard.
       const isVideo = photo.media_type === 'video'
         || (photo.mime_type && photo.mime_type.startsWith('video/'));
-      const useJwtUrl = isVideo
-        || protectionSettings.protection_level === 'basic'
-        || protectionSettings.protection_level === 'standard';
       // Watermark version (cache-busting) + admin-preview flag (#868). In
       // preview mode no gallery cookie is minted, so each <img> request must
       // re-assert the admin session — thread the flag onto every /api/gallery
@@ -477,9 +585,18 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
       // same-origin).
       const imgQuery = [wmVersion, adminPreview ? 'admin_preview=1' : ''].filter(Boolean).join('&');
       const wmQuery = imgQuery ? `?${imgQuery}` : '';
-      const photoUrl = useJwtUrl ?
-        `/api/gallery/${slug}/photo/${photo.id}${wmQuery}` :
-        `/api/secure-images/${slug}/secure/${photo.id}/{{token}}`;
+      // The hero crop follows the event's focal point (issue 1737) and the
+      // hero route caches for an hour, so a non-centre anchor rides in the
+      // URL: a changed anchor is a new URL, not a stale cached crop.
+      const heroQuery = [imgQuery, heroAnchorQuery(event.hero_image_anchor)].filter(Boolean).join('&');
+      const previewUrl = `/api/gallery/${slug}/preview/${photo.id}${wmQuery}`;
+      // A limited gallery withholds the original of every image it has not
+      // granted yet (routes/gallery/media.js), so point straight at the
+      // preview instead of at a redirect.
+      const originalWithheld = withholdOriginals && !isVideo && !deliveredIds.has(Number(photo.id));
+      const photoUrl = originalWithheld
+        ? previewUrl
+        : `/api/gallery/${slug}/photo/${photo.id}${wmQuery}`;
 
       return {
         id: photo.id,
@@ -487,20 +604,34 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
         // Raw camera filename (or null for pre-migration-062 uploads).
         // The lightbox renders it when `use_original_filenames` is on.
         original_filename: photo.original_filename || null,
+        // The name the camera gave the file, written once at ingest and kept
+        // across a replace (migration 193) — what the admin export uses to
+        // find the master, so the guest filename list can use it too
+        // (issue 1733, A3d).
+        source_filename: photo.source_filename || null,
         url: photoUrl,
-        thumbnail_url: photo.thumbnail_path ? `/api/gallery/${slug}/thumbnail/${photo.id}${wmQuery}` : null,
+        // Videos are offered the thumbnail route even with no thumbnail_path
+        // recorded yet (#1414). The route regenerates lazily, and for a video
+        // it now produces a poster frame or the SVG placeholder rather than
+        // failing — whereas a null here makes every grid layout fall back to
+        // `thumbnail_url || url` and render the ORIGINAL VIDEO into an <img>,
+        // which is both a broken tile and a full download of the file. Images
+        // keep the old behaviour: for them the original is a usable fallback.
+        thumbnail_url: (photo.thumbnail_path || isVideo)
+          ? `/api/gallery/${slug}/thumbnail/${photo.id}${wmQuery}`
+          : null,
         // Hero-optimized image URL (1920x1080) for full-width hero sections
-        hero_url: `/api/gallery/${slug}/hero/${photo.id}${wmQuery}`,
+        hero_url: `/api/gallery/${slug}/hero/${photo.id}${heroQuery ? `?${heroQuery}` : ''}`,
         // Lightbox preview URL (#492). Only emitted when the admin
         // has flipped lightbox_preview_enabled — the frontend
         // lightbox reads preview_url with a fallback to url so
         // installs that haven't opted in keep loading the original
         // (current behaviour). Skipped for videos since they don't
         // get a preview tier; lightbox will use the original .url.
-        preview_url: (lightboxPreviewEnabled || originalNeedsPreview(photo))
+        preview_url: (lightboxPreviewEnabled || originalNeedsPreview(photo) || originalWithheld)
             && photo.media_type !== 'video'
             && (!photo.mime_type || !photo.mime_type.startsWith('video/'))
-          ? `/api/gallery/${slug}/preview/${photo.id}${wmQuery}`
+          ? previewUrl
           : null,
         // Slideshow source (#1015). Same preview tier, but emitted
         // unconditionally: the slideshow has no `url` fallback worth
@@ -513,17 +644,24 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
             && (!photo.mime_type || !photo.mime_type.startsWith('video/'))
           ? `/api/gallery/${slug}/preview/${photo.id}${wmQuery}`
           : null,
-        secure_url_template: `/api/secure-images/${slug}/secure/${photo.id}/{{token}}`,
-        download_url_template: `/api/secure-images/${slug}/secure-download/${photo.id}/{{token}}`,
         type: photo.type,
-        category_id: photo.category_id || null,
-        category_name: photo.category_id && categoryMap[photo.category_id] ? categoryMap[photo.category_id].name : null,
+        category_id: filterCategoryIdOf(photo),
+        category_name: filterCategoryIdOf(photo) && categoryMap[photo.category_id] ? categoryMap[photo.category_id].name : null,
         // Per-category download permission (#640). Defaults true for photos
         // without a category or for categories that pre-date migration 135.
-        category_allow_downloads: photo.category_id && categoryMap[photo.category_id]
+        // Since issue 1786 the folder chain counts too (inherited, the most
+        // restrictive wins) — the download routes apply the same rule.
+        category_allow_downloads: (photo.category_id && categoryMap[photo.category_id]
           ? parseBooleanInput(categoryMap[photo.category_id].allow_downloads, true)
-          : true,
-        category_slug: photo.category_id && categoryMap[photo.category_id] ? categoryMap[photo.category_id].slug : null,
+          : true) && !(photo.folder_id && blockedFolderIds.has(Number(photo.folder_id))),
+        // Folder (issue 1786); null = gallery root.
+        folder_id: folderIdOf(photo),
+        // Delivered as part of a first look (issue 1562); the badge stays.
+        first_look: parseBooleanInput(photo.first_look, false),
+        category_slug: filterCategoryIdOf(photo) && categoryMap[photo.category_id] ? categoryMap[photo.category_id].slug : null,
+        // Download limit (issue 1560): already granted, so downloading it
+        // again costs nothing.
+        download_granted: grantedIds.has(Number(photo.id)),
         size: photo.size_bytes,
         // toIso: on SQLite installs rows written with a raw Date (e.g.
         // the pre-fix archive-restore path) hold epoch numbers — the
@@ -532,8 +670,6 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
         // Image dimensions for layout calculations
         width: photo.width || null,
         height: photo.height || null,
-        // Fixed: Use the calculated useJwtUrl variable instead of recalculating
-        requires_token: !useJwtUrl,
         // EXIF capture date
         captured_at: toIso(photo.captured_at) || null,
         // Media type
@@ -551,6 +687,9 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
         // Survives show_feedback_to_guests being off (#1286): the viewer's
         // own heart is theirs, and the like_count beside it stays hidden.
         is_liked: likedPhotoIds.has(photo.id),
+        // The viewer's own star rating (issue 1733), 1-5 or null. Null
+        // whenever ratings are off for the event, not just when unrated.
+        my_rating: myRatingByPhoto[photo.id] || null,
         favorite_count: showFeedbackToGuests ? (photo.favorite_count || 0) : 0,
         // Colour labels (#1044). The COUNT is aggregate data and follows
         // show_feedback_to_guests like its siblings; the viewer's OWN label
@@ -568,6 +707,14 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, admi
         // face filtering client-side and instant, like the category and
         // liked/rated filters.
         person_ids: personIdsByPhoto.get(photo.id) || [],
+        // Photo credit (#1561), only when the viewer may see names — the key is
+        // left out otherwise rather than sent as null. `uploaded_by_guest`
+        // lets the "By" filter tell a nameless guest upload from the
+        // photographer's own photos.
+        ...(creditsVisible ? {
+          credit_name: (isClient || creditVisibleToGuest(photo)) ? (photo.credit_name || null) : null,
+          uploaded_by_guest: photo.uploaded_by === 'guest',
+        } : {}),
         // Visibility (only included for clients)
         ...(isClient ? { visibility: photo.visibility || 'visible' } : {})
       };

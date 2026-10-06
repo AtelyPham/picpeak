@@ -54,6 +54,7 @@ const fs = require('fs');
 const path = require('path');
 const { AppError } = require('./errors');
 const { getStoragePath } = require('../config/storage');
+const { resolveStoredPath } = require('./storedPath');
 
 /**
  * Resolve the canonical (symlink-followed) absolute path. Throws
@@ -111,11 +112,48 @@ function assertPathInside(filePath, allowedRoots) {
 }
 
 /**
- * Convenience helper that builds the standard contract PDF roots
- * (system-stamped + wet-upload) and delegates to assertPathInside.
- * Use from contract PDF stream / read sites.
+ * assertPathInside for a path read from the database. The stored value may be
+ * storage-relative or an absolute path recorded by another install; it is
+ * placed on this install's storage root first (storedPath.js), and a value
+ * that cannot be placed inside it is refused like any other outside path.
  */
-function assertContractPdfPath(filePath) {
+function assertStoredPathInside(storedPath, allowedRoots) {
+  if (!storedPath) throw new AppError('No path provided', 400);
+  const resolved = resolveStoredPath(storedPath);
+  if (!resolved) {
+    throw new AppError('Refusing to serve a file outside the storage roots', 403, 'PATH_OUTSIDE_STORAGE');
+  }
+  return assertPathInside(resolved, allowedRoots);
+}
+
+/**
+ * The directories a stored path may name at all: the storage root, and
+ * <cwd>/storage, where the contract writers put files before they moved onto
+ * the shared resolver (the same directory on a stock install).
+ */
+function storageRoots() {
+  return [getStoragePath(), path.join(process.cwd(), 'storage')];
+}
+
+/**
+ * The file a stored path names, for a reader that opens it: placed on this
+ * install's storage root, then checked with symlinks followed. Returns null
+ * when there is no value or the file is simply not there, so the caller keeps
+ * its own "missing" handling. A value that cannot be placed inside
+ * `allowedRoots` (tampering, a crafted restore) throws AppError 403.
+ */
+function resolveStoredPathStrict(storedPath, allowedRoots = storageRoots()) {
+  if (!storedPath) return null;
+  try {
+    return assertStoredPathInside(storedPath, allowedRoots);
+  } catch (err) {
+    if (err && err.statusCode === 404) return null;
+    throw err;
+  }
+}
+
+/** Where contract PDFs and signature images live (see assertContractPdfPath). */
+function contractPdfRoots() {
   const cwd = process.cwd();
   // getStoragePath() rather than a second `STORAGE_PATH || cwd` expression:
   // the two disagree whenever STORAGE_PATH is unset, because the shared
@@ -125,7 +163,7 @@ function assertContractPdfPath(filePath) {
   // resolver, so a guard with its own idea of the root refuses exactly the
   // files it is meant to serve.
   const storageRoot = getStoragePath();
-  return assertPathInside(filePath, [
+  return [
     // The configured storage root is where the contract writers persist, so it
     // has to be allowed here or every generated PDF is refused with
     // PATH_OUTSIDE_STORAGE the moment STORAGE_PATH is not <cwd>/storage. The
@@ -135,7 +173,17 @@ function assertContractPdfPath(filePath) {
     path.join(storageRoot, 'business-docs', 'contract'),
     path.join(cwd, 'storage', 'business-docs', 'contract'),
     path.join(storageRoot, 'uploads', 'contracts', 'signed'),
-  ]);
+  ];
+}
+
+/**
+ * Convenience helper that builds the standard contract PDF roots
+ * (system-stamped + wet-upload) and delegates to assertPathInside.
+ * Use from contract PDF stream / read sites.
+ */
+function assertContractPdfPath(filePath) {
+  // The stored value may be storage-relative or recorded by another install.
+  return assertStoredPathInside(filePath, contractPdfRoots());
 }
 
 /**
@@ -160,7 +208,11 @@ function assertZipEntriesWithin(entries, extractRoot) {
   for (const entry of entries || []) {
     const name = entry && entry.name;
     if (!name) continue;
-    const target = path.resolve(rootResolved, name);
+    // Backslashes are plain characters to path.resolve on Linux, so
+    // `..\..\x` reads as one long filename that stays inside the root. The
+    // storage backends turn them into '/' before normalising, and so would
+    // an extract on Windows, so the check has to see the same path they do.
+    const target = path.resolve(rootResolved, name.replace(/\\/g, '/'));
     if (target !== rootResolved && !target.startsWith(prefix)) {
       throw new AppError(
         `Archive contains an entry that escapes the extraction directory: ${name}`,
@@ -202,19 +254,45 @@ function uploadedAssetPath(url, kind, storageRoot) {
  * `pdf-logo-1./../../../<anything>` -- or any absolute path containing the
  * marker -- delete arbitrary files. Only a flat `pdf-logo-<n>.<ext>` leaf
  * inside uploads/logos is ever named.
+ *
+ * With `imageOnly`, only the image extensions the upload route writes are
+ * accepted: that is the check for a logo_path an admin sets. Cleanup keeps
+ * the default, so a non-image `pdf-logo-*` file written before the upload
+ * derived its extension from the MIME type is still removed on replace.
  */
-function uploadedPdfLogoPath(logoPath, storageRoot) {
+const PDF_LOGO_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.svg'];
+
+function uploadedPdfLogoPath(logoPath, storageRoot, { imageOnly = false } = {}) {
   if (!logoPath || typeof logoPath !== 'string') return null;
   const normalized = logoPath.replace(/^\/+/, '');
   const match = /^uploads\/logos\/(pdf-logo-\d+\.[A-Za-z0-9]+)$/.exec(normalized);
   if (!match) return null;
+  if (imageOnly && !PDF_LOGO_IMAGE_EXTENSIONS.includes(path.extname(match[1]).toLowerCase())) return null;
   return path.join(storageRoot, 'uploads', 'logos', match[1]);
+}
+
+/**
+ * Extensions the public /uploads/logos and /uploads/favicons trees serve.
+ * Every upload route that writes there accepts only these image types, but
+ * older versions kept the client's extension, so a file named .html or .js
+ * can still be on disk from before. It is not served from the app origin.
+ */
+const PUBLIC_UPLOAD_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'];
+
+function isPublicUploadImage(filePath) {
+  return PUBLIC_UPLOAD_IMAGE_EXTENSIONS.includes(path.extname(String(filePath || '')).toLowerCase());
 }
 
 module.exports = {
   assertPathInside,
+  assertStoredPathInside,
+  resolveStoredPathStrict,
+  storageRoots,
+  contractPdfRoots,
   assertContractPdfPath,
   assertZipEntriesWithin,
   uploadedAssetPath,
   uploadedPdfLogoPath,
+  isPublicUploadImage,
+  PUBLIC_UPLOAD_IMAGE_EXTENSIONS,
 };

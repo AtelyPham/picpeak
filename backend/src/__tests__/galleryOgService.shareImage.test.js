@@ -65,8 +65,11 @@ function chain(result) {
 }
 
 function mockResolveSlug(event) {
-  // events table query → return event row (or null + no redirects).
-  db.mockImplementationOnce(() => chain({ first: event || null }));
+  // events table query → return event row (or null + no redirects). A real
+  // row always carries is_active (column default true); the OG service now
+  // applies the shared isGalleryAvailable predicate, which requires it.
+  const row = event ? { is_active: true, ...event } : null;
+  db.mockImplementationOnce(() => chain({ first: row }));
   if (!event) {
     // event_slug_redirects fallback — unused here, return null.
     db.schema = db.schema || {};
@@ -197,6 +200,30 @@ describe('buildOgMetadata — share-image opt-in', () => {
 
 // ---- handleGalleryOgCover: unauthenticated 404 contract ----------------
 
+describe('public preview welcome text', () => {
+  test('withholds welcome text until a password-free gallery is revealed', async () => {
+    mockResolveSlug({ id: 1, slug: 'hidden', event_name: 'Surprise',
+      require_password: false, reveal_mode: true, welcome_message: 'PRIVATE SURPRISE' });
+    mockBranding();
+    expect(JSON.stringify(await buildOgMetadata('hidden', '/gallery/hidden'))).not.toContain('PRIVATE SURPRISE');
+  });
+  test.each([true, 1, '1', 'true', 'false', null, undefined])('withholds protected/legacy welcome text (%p)', async (requirePassword) => {
+    mockResolveSlug({ id: 1, slug: 'private', event_name: 'Private event',
+      require_password: requirePassword, welcome_message: 'PRIVATE ACCESS DETAILS' });
+    mockBranding();
+    const meta = await buildOgMetadata('private', '/gallery/private');
+    expect(JSON.stringify(meta)).not.toContain('PRIVATE ACCESS DETAILS');
+    expect(meta.description).toBe('Photo gallery from Private event.');
+  });
+
+  test.each([false, 0, '0'])('preserves public gallery welcome text (%p)', async (requirePassword) => {
+    mockResolveSlug({ id: 1, slug: 'public', event_name: 'Public event',
+      require_password: requirePassword, welcome_message: 'Public welcome' });
+    mockBranding();
+    expect((await buildOgMetadata('public', '/gallery/public')).description).toBe('Public welcome');
+  });
+});
+
 function makeRes() {
   const res = { headers: {} };
   res.status = jest.fn().mockReturnValue(res);
@@ -226,6 +253,7 @@ describe('buildOgMetadata — share-token fallback', () => {
     const token = '00000000000000000000000000000001';
     const event = {
       id: 10,
+      is_active: true,
       slug: 'senior-2026-06-05',
       share_token: token,
       event_name: 'Senior Photo Gallery',

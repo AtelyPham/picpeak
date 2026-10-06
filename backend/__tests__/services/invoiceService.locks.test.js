@@ -69,6 +69,7 @@ function pickChainFor(name) {
 }
 
 const mockDbFn = jest.fn((name) => pickChainFor(name));
+mockDbFn.client = { config: { client: 'sqlite3' } };
 // db.transaction(cb) runs the callback with a "trx" — for our
 // purposes the same chain factory works as trx.
 mockDbFn.transaction = jest.fn(async (cb) => cb(mockDbFn));
@@ -77,6 +78,14 @@ jest.mock('../../src/database/db', () => ({
   db: mockDbFn,
   withRetry: jest.fn(async (fn) => fn()),
   logActivity: jest.fn(async () => {}),
+}));
+
+// The change-history recorder reads rows back and needs a real knex
+// client; against the chain mock, replay the plain write it wraps.
+jest.mock('../../src/services/accountingHistory', () => ({
+  auditedInsert: jest.fn(async (conn, table, rows) => conn(table).insert(rows).returning('id')),
+  auditedUpdate: jest.fn(async (conn, table, where, values) => conn(table).where(where).update(values)),
+  auditedDelete: jest.fn(async (conn, table, where) => conn(table).where(where).del()),
 }));
 
 jest.mock('../../src/utils/appSettings', () => ({
@@ -306,7 +315,7 @@ describe('invoiceService.recordPaymentCheckAction', () => {
       expires_at: new Date(Date.now() + 86400000),
     };
     pickChainFor('invoices')._firstValue = {
-      id: 5, total_amount_minor: 10000, paid_amount_minor: 0, late_fee_amount_minor: 0,
+      id: 5, status: 'sent', total_amount_minor: 10000, paid_amount_minor: 0, late_fee_amount_minor: 0,
     };
     await expect(invoiceService.recordPaymentCheckAction({
       token: 'a'.repeat(64), action: 'partial', amountMinor: 0,
@@ -319,7 +328,7 @@ describe('invoiceService.recordPaymentCheckAction', () => {
       expires_at: new Date(Date.now() + 86400000),
     };
     pickChainFor('invoices')._firstValue = {
-      id: 5, total_amount_minor: 5000, paid_amount_minor: 0, late_fee_amount_minor: 0,
+      id: 5, status: 'sent', total_amount_minor: 5000, paid_amount_minor: 0, late_fee_amount_minor: 0,
     };
     await expect(invoiceService.recordPaymentCheckAction({
       token: 'a'.repeat(64), action: 'partial', amountMinor: 9999,
@@ -386,8 +395,10 @@ describe('invoiceService.recordPaymentCheckAction', () => {
     // Token was actually consumed (the real assertion that the write
     // committed): the mock chain's .update() ran with used_at set.
     const tokenChain = pickChainFor('invoice_payment_check_tokens');
+    // used_at is an ISO string: a Date written through node-sqlite3 under
+    // jest lands as "[object Object]".
     expect(tokenChain.update).toHaveBeenCalledWith(
-      expect.objectContaining({ used_at: expect.any(Date), used_action: 'paid_full' }),
+      expect.objectContaining({ used_at: expect.any(String), used_action: 'paid_full' }),
     );
   });
 });

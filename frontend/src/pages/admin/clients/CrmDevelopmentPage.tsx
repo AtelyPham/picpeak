@@ -22,6 +22,7 @@ import { Button, Card, Loading } from '../../../components/common';
 import { billsService, type InvoiceStatus } from '../../../services/bills.service';
 import { devToolsService, type CrmEmailTemplateKey } from '../../../services/devTools.service';
 import { toast } from 'react-toastify';
+import { SectionPageHeader } from '../../../components/admin/SectionPageHeader';
 
 // Translation keys for each template's display title + description.
 // The lookup table holds (titleKey, titleFallback, descKey, descFallback)
@@ -194,16 +195,11 @@ export const CrmDevelopmentPage: React.FC = () => {
 
   return (
     <div>
-      <div className="mb-6">
-        <h2 className="text-xl font-bold text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
-          <Wrench className="w-5 h-5" />
-          {t('crmDev.title', 'CRM Development')}
-        </h2>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
-          {t('crmDev.subtitle',
-            'Internal tools for verifying CRM flows. Hidden by default — enabled via Settings → Features → Development.')}
-        </p>
-      </div>
+      <SectionPageHeader
+        icon={Wrench}
+        title={t('crmDev.title', 'CRM Development')}
+        description={t('crmDev.subtitle', 'Internal tools for verifying CRM flows. Hidden by default — enabled via Settings → Features → Development.')}
+      />
 
       <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-3 mb-5 flex items-start gap-2">
         <AlertTriangle className="w-4 h-4 text-amber-700 dark:text-amber-300 mt-0.5 shrink-0" />
@@ -239,20 +235,20 @@ export const CrmDevelopmentPage: React.FC = () => {
           <MailCheck className="w-4 h-4" />
           {t('crmDev.paymentCheck.title', 'Test payment-check email (real invoice)')}
         </h3>
-        <p className="text-sm text-neutral-500 dark:text-neutral-400 mb-4">
+        <p className="text-sm text-muted mb-4">
           {t('crmDev.paymentCheck.help',
             'Fires the admin payment-check email for a real sent/overdue invoice, bypassing the 24h throttle. The three buttons in the email are real signed tokens — clicking them will affect the invoice status.')}
         </p>
 
         {invoiceListLoading ? <Loading /> : (
           <>
-            <label className="block text-xs uppercase tracking-wider text-neutral-500 dark:text-neutral-400 mb-1">
+            <label className="block text-xs uppercase tracking-wider text-muted mb-1">
               {t('crmDev.paymentCheck.selectInvoice', 'Sent or overdue invoice')}
             </label>
             <select
               value={selectedInvoiceId || ''}
               onChange={(e) => setSelectedInvoiceId(e.target.value ? Number(e.target.value) : null)}
-              className="w-full px-3 py-2 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm mb-3"
+              className="w-full px-3 py-2 rounded-md border border-line-strong bg-panel text-sm mb-3"
             >
               <option value="">{t('crmDev.paymentCheck.selectPlaceholder', '— Pick an invoice —')}</option>
               {(invoiceList?.invoices || []).map((inv) => (
@@ -262,7 +258,7 @@ export const CrmDevelopmentPage: React.FC = () => {
               ))}
             </select>
             {invoiceList && invoiceList.invoices.length === 0 && (
-              <p className="text-sm text-neutral-500 dark:text-neutral-400 mb-3">
+              <p className="text-sm text-muted mb-3">
                 {t('crmDev.paymentCheck.noneAvailable',
                   'No sent or overdue invoices in the database.')}
               </p>
@@ -285,7 +281,7 @@ export const CrmDevelopmentPage: React.FC = () => {
           <Mail className="w-4 h-4" />
           {t('crmDev.templates.title', 'Send any CRM email to me (mock data)')}
         </h3>
-        <p className="text-sm text-neutral-500 dark:text-neutral-400 mb-4">
+        <p className="text-sm text-muted mb-4">
           {t('crmDev.templates.help',
             'Queues the chosen template to your own admin email with placeholder values. When the install has a real quote / invoice on file, the appropriate PDF is attached so you can verify the full output.')}
         </p>
@@ -294,17 +290,17 @@ export const CrmDevelopmentPage: React.FC = () => {
           // Env gate banner above already explains the situation —
           // keep this card empty rather than rendering a misleading
           // "0 templates" list.
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          <p className="text-sm text-muted">
             {t('crmDev.envDisabled.cardHint',
               'Email templates can\'t be listed until the dev-tools env gate is opened.')}
           </p>
         ) : (templates && templates.length === 0) ? (
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          <p className="text-sm text-muted">
             {t('crmDev.templates.empty',
               'No CRM email templates found — run migrations to seed them.')}
           </p>
         ) : (
-          <ul className="divide-y divide-neutral-200 dark:divide-neutral-700">
+          <ul className="divide-y divide-line">
             {(templates || []).map((tpl) => {
               const meta = TEMPLATE_LABEL_KEYS[tpl.key];
               const busy = sendingKey === tpl.key;
@@ -323,7 +319,7 @@ export const CrmDevelopmentPage: React.FC = () => {
                     </div>
                     <div className="text-sm font-medium mt-0.5">{title}</div>
                     {description && (
-                      <div className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">{description}</div>
+                      <div className="text-xs text-muted mt-0.5">{description}</div>
                     )}
                   </div>
                   <Button

@@ -201,6 +201,10 @@ async function createPublicToken(db, tableName, opts = {}) {
  */
 function buildRouteApp(mount, router) {
   const app = express();
+  // Same as the server: the address comes from req.ip through trust proxy,
+  // so a suite can give each case its own client address and stay clear of
+  // the per-IP rate limits the public routes carry.
+  app.set('trust proxy', true);
   app.use(express.json());
   app.use(cookieParser());
   app.use(mount, router);

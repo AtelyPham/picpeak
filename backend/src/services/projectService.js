@@ -16,6 +16,16 @@
 const { db, logActivity } = require('../database/db');
 const { AppError } = require('../utils/errors');
 const { hasColumnCached } = require('../utils/schemaCache');
+const { auditedUpdate } = require('./accountingHistory');
+const { redactBearerLinks, hasMaskedRecoveryLink, parseEmailData } = require('../utils/emailSecretRedaction');
+
+// A sent invitation or password-reset mail no longer holds its link (see
+// emailProcessor), so sending that row again would deliver a dead link.
+function assertResendable(row) {
+  if (hasMaskedRecoveryLink(parseEmailData(row.email_data))) {
+    throw new AppError('This invitation or password-reset email cannot be sent again: its link is not kept after sending. Send a new invitation or password reset instead.', 409);
+  }
+}
 
 function transformProject(p) {
   if (!p) return null;
@@ -390,11 +400,12 @@ async function linkDealToProject(dealUuid, projectId, conn = db, actor = null) {
 
   // Cleared to write: link the deal's quotes/contracts, re-point its events so
   // invoices/emails/gallery roll up automatically.
+  const history = { actor: actor?.id ?? null, source: 'project.link_deal' };
   if (quotesHaveDeal && await hasColumnCached('quotes', 'project_id')) {
-    await conn('quotes').where({ deal_uuid: dealUuid }).update({ project_id: projectId });
+    await auditedUpdate(conn, 'quotes', { deal_uuid: dealUuid }, { project_id: projectId }, history);
   }
   if (contractsHaveDeal && await hasColumnCached('contracts', 'project_id')) {
-    await conn('contracts').where({ deal_uuid: dealUuid }).update({ project_id: projectId });
+    await auditedUpdate(conn, 'contracts', { deal_uuid: dealUuid }, { project_id: projectId }, history);
   }
   if (eventIds.size && await hasColumnCached('events', 'project_id')) {
     await conn('events').whereIn('id', Array.from(eventIds)).update({ project_id: projectId });
@@ -441,7 +452,8 @@ async function assignDocument(table, projectId, documentId, actor = null) {
   if (projectId && doc.deal_uuid) {
     await linkDealToProject(doc.deal_uuid, projectId, db, actor);
   }
-  await db(table).where({ id: documentId }).update({ project_id: projectId || null });
+  await auditedUpdate(db, table, { id: documentId }, { project_id: projectId || null },
+    { actor: actor?.id ?? null, source: 'project.assign_document' });
   return { projectId: projectId || null, documentId };
 }
 
@@ -699,7 +711,8 @@ async function getEmailPreview(emailId) {
   if (!row) throw new AppError('Email not found', 404);
 
   if (row.rendered_html) {
-    return { id: row.id, recipient: row.recipient_email, type: row.email_type, status: row.status, available: true, exact: true, html: row.rendered_html };
+    // Document links in the body carry the customer's contract or quote token.
+    return { id: row.id, recipient: row.recipient_email, type: row.email_type, status: row.status, available: true, exact: true, html: redactBearerLinks(row.rendered_html) };
   }
 
   // Fallback: re-render from the current template + stored variables.
@@ -719,7 +732,7 @@ async function getEmailPreview(emailId) {
     status: row.status,
     available: !!html,
     exact: false,
-    html,
+    html: redactBearerLinks(html),
   };
 }
 
@@ -741,6 +754,7 @@ async function logEmailAction(activityType, emailId, row, adminId) {
 async function resendEmail(emailId, adminId = null) {
   const row = await db('email_queue').where({ id: emailId }).first();
   if (!row) throw new AppError('Email not found', 404);
+  assertResendable(row);
   // Normalise email_data to match the canonical enqueue (emailProcessor.js
   // stores JSON.stringify(...) in the json column). PG returns jsonb as a
   // parsed object, SQLite as a string — re-stringify the object form so the
@@ -755,6 +769,9 @@ async function resendEmail(emailId, adminId = null) {
     status: 'pending',
     retry_count: 0,
     created_at: new Date(),
+    // Explicit NULL: the column default is text on SQLite and never comes
+    // due (issue 1670) — see queueEmail.
+    scheduled_at: null,
   }).returning('id');
   const id = (insert[0] && typeof insert[0] === 'object') ? insert[0].id : insert[0];
   await logEmailAction('project_email_resent', id, row, adminId);
@@ -773,6 +790,7 @@ async function cancelEmail(emailId, adminId = null) {
 async function retryEmail(emailId, adminId = null) {
   const row = await db('email_queue').where({ id: emailId }).first();
   if (!row) throw new AppError('Email not found', 404);
+  assertResendable(row);
   await db('email_queue').where({ id: emailId })
     .update({ status: 'pending', retry_count: 0, error_message: null, scheduled_at: null });
   await logEmailAction('project_email_retried', emailId, row, adminId);
@@ -782,6 +800,7 @@ async function retryEmail(emailId, adminId = null) {
 async function sendEmailNow(emailId, adminId = null) {
   const row = await db('email_queue').where({ id: emailId }).first();
   if (!row) throw new AppError('Email not found', 404);
+  assertResendable(row);
   await db('email_queue').where({ id: emailId }).update({ status: 'pending', scheduled_at: null });
   // Flush ONLY this email — passing onlyId scopes processEmailQueue to a single
   // row so a forced "send now" never force-retries OTHER dead-lettered emails

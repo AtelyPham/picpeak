@@ -132,6 +132,8 @@
     "noCategory": "Geen categorie",
     "eventSpecific": "(Evenement-specifiek)",
     "clickToUpload": "Klik om te uploaden of sleep bestanden hierheen",
+    "clickToUploadOrDropFolder": "Klik om te uploaden of sleep bestanden of een map hierheen",
+    "takePhoto": "Foto maken",
     "fileRequirements": "{{formats}} (max. {{sizeLimit}} MB per bestand, {{limit}} bestanden per upload)",
     "selectedFiles": "Geselecteerde bestanden",
     "uploading": "Uploaden...",
@@ -155,7 +157,54 @@
     "transferring": "Overdragen",
     "uploadingChunks_one": "{{count}} deel wordt geüpload",
     "uploadingChunks_other": "{{count}} delen worden geüpload",
-    "retryFailed": "Mislukte opnieuw proberen"
+    "retryFailed": "Mislukte opnieuw proberen",
+    "invalidFileType": "Niet-ondersteund bestandstype: {{names}}",
+    "uploadingAs": "Uploaden als {{name}}",
+    "notYou": "Niet jij?",
+    "yourName": "Je naam",
+    "yourNameOptional": "Je naam (optioneel)",
+    "nameRequired": "Vul je naam in om te uploaden.",
+    "nameSaveFailed": "Je naam kon niet worden opgeslagen. Probeer het opnieuw.",
+    "namePrivacyShown": "Je naam wordt bij je foto’s opgeslagen en aan andere gasten getoond. De gastheer kan hem altijd verwijderen.",
+    "namePrivacyHidden": "Je naam wordt bij je foto’s opgeslagen voor de gastheer. Andere gasten zien hem niet, en de gastheer kan hem altijd verwijderen.",
+    "addFiles": "Bestanden toevoegen",
+    "chooseFolder": "Map kiezen",
+    "structure": {
+      "galleryRoot": "hoofdniveau van de galerij",
+      "folderCount_one": "{{count}} map",
+      "folderCount_other": "{{count}} mappen",
+      "uploadRequesting_one": "{{count}} bestand uploaden · {{folders}} aanvragen",
+      "uploadRequesting_other": "{{count}} bestanden uploaden · {{folders}} aanvragen",
+      "uploadIntoFolders_one": "{{count}} bestand uploaden naar {{folders}}",
+      "uploadIntoFolders_other": "{{count}} bestanden uploaden naar {{folders}}",
+      "tooManyFolders": "Deze selectie bevat meer dan {{limit}} mappen. Upload ze in delen.",
+      "resolveFailed": "De mappen voor deze upload konden niet worden voorbereid. Er is niets geüpload.",
+      "looseFilesGoTo": "Losse bestanden gaan naar",
+      "uploadInto": "Uploaden naar",
+      "statusNew": "Nieuw",
+      "statusNeedsAdmin": "Beheerder nodig",
+      "statusExists": "Bestaat",
+      "keepStructure": "Mapstructuur behouden",
+      "keepStructureHelp": "Submappen worden galerijmappen. De standaardwaarde komt uit de instelling Mappen van het evenement.",
+      "skipOuter": "Buitenste map \"{{name}}\" overslaan",
+      "skipOuterHelp": "Alles zat in één map, dus die wordt weggelaten. Anders zouden gasten eerst een extra map moeten openen.",
+      "previewFailed": "Het mapvoorbeeld kon niet worden geladen. Bij het starten van de upload worden de mappen opnieuw bepaald.",
+      "loading": "Mappen controleren…",
+      "firstLookRow": "→ hoofdniveau van de galerij, gemarkeerd als \"Eerste selectie\"",
+      "looseFiles_one": "{{count}} los bestand → {{target}}",
+      "looseFiles_other": "{{count}} losse bestanden → {{target}}",
+      "hiddenSkipped_one": "{{count}} bestand in verborgen mappen wordt overgeslagen",
+      "hiddenSkipped_other": "{{count}} bestanden in verborgen mappen worden overgeslagen",
+      "folded": "Mappen die dieper dan {{depth}} niveaus liggen, worden samengevoegd in hun map op niveau {{depth}}.",
+      "needsAdminNotice_one": "{{count}} map bestaat nog niet. Uw rol mag uploaden, maar geen mappen aanmaken, daarom gaat deze als mapaanvraag naar een beheerder. Totdat een beheerder bevestigt, wachten de {{files}} foto's in de dichtstbijzijnde bestaande map (aangegeven met →) en gaan ze na bevestiging automatisch naar de nieuwe map.",
+      "needsAdminNotice_other": "{{count}} mappen bestaan nog niet. Uw rol mag uploaden, maar geen mappen aanmaken, daarom gaan deze als mapaanvragen naar een beheerder. Totdat een beheerder bevestigt, wachten de {{files}} foto's in de dichtstbijzijnde bestaande map (aangegeven met →) en gaan ze na bevestiging automatisch naar de nieuwe mappen.",
+      "firstLookCallout_one": "Map voor eerste selectie gevonden: \"{{name}}\". De {{count}} foto daarin wordt gemarkeerd als \"Eerste selectie\" en deze galerij schakelt over op levering in twee fasen: gasten zien dat er meer foto's onderweg zijn, totdat u de volledige galerij als gereed markeert.",
+      "firstLookCallout_other": "Map voor eerste selectie gevonden: \"{{name}}\". De {{count}} foto's daarin worden gemarkeerd als \"Eerste selectie\" en deze galerij schakelt over op levering in twee fasen: gasten zien dat er meer foto's onderweg zijn, totdat u de volledige galerij als gereed markeert.",
+      "firstLookSettings": "Datum en badge: Instellingen van deze galerie → Mappen en levering. Trefwoorden: Instellingen → Evenementen.",
+      "nothingToUpload": "Geen van de geselecteerde bestanden kan worden geüpload: ze staan allemaal in verborgen of overgeslagen mappen.",
+      "keptForNext": "Bestanden die werden toegevoegd terwijl de mappen werden voorbereid, zijn nog geselecteerd: {{count}}."
+    },
+    "largeFileReplaceSkipped": "Vervangen op naam wordt niet ondersteund voor bestanden boven de batchgrootte; upload het bestand zonder vervangen."
   },
   "navigation": {
     "dashboard": "Dashboard",
@@ -169,7 +218,9 @@
     "cmsPages": "CMS-pagina's",
     "users": "Gebruikers",
     "calendar": "Agenda",
-    "clients": "Klanten"
+    "clients": "Klanten",
+    "automation": "Automatisering",
+    "sharing": "Delen"
   },
   "archives": {
     "title": "Archieven",
@@ -243,6 +294,8 @@
     "noPhotosFound": "Geen foto's gevonden",
     "failedToLoad": "Kan foto's niet laden",
     "tryAgain": "Opnieuw proberen",
+    "passwordChangeRequired": "Wijzig uw wachtwoord in het beheergedeelte voordat u deze galerij bekijkt.",
+    "goToAdminArea": "Naar het beheergedeelte",
     "loading": "Galerij laden...",
     "expiredOn": "Deze galerij is verlopen op {{date}}.",
     "downloadBefore": "Download uw foto's voordat ze niet meer beschikbaar zijn.",
@@ -250,9 +303,23 @@
     "downloadAll": "Alles downloaden",
     "downloadError": "Sommige foto's konden niet worden gedownload",
     "selectPhotos": "Foto's selecteren",
+    "selectMedia": "Media selecteren",
     "cancelSelection": "Selectie annuleren",
     "selectAll": "Alles selecteren",
     "deselectAll": "Alles deselecteren",
+    "copyFilenames": {
+      "button": "Bestandsnamen kopiëren",
+      "title": "Bestandsnamen kopiëren",
+      "selectedCount": "Geselecteerde foto's: {{count}}",
+      "favoritesCount": "Favoriete foto's: {{count}}",
+      "hint": "Plak de lijst in de zoekfunctie op bestandsnaam van uw RAW-editor. De extensies zijn weggelaten zodat ook de RAW-bestanden gevonden worden.",
+      "separator": "Scheidingsteken",
+      "separatorComma": "Komma",
+      "separatorSpace": "Spatie",
+      "copy": "Kopiëren",
+      "copied": "Gekopieerd",
+      "copyFailed": "Kopiëren is geblokkeerd. De tekst is geselecteerd, druk op Ctrl+C of Cmd+C om te kopiëren."
+    },
     "deleteSelected": "Geselecteerde verwijderen",
     "searchByFilename": "Zoeken op bestandsnaam...",
     "uncategorized": "Niet gecategoriseerd",
@@ -323,6 +390,7 @@
     },
     "footer": {
       "forgetMeConfirm": "Uw naam en selecties worden verwijderd uit deze galerij.",
+      "forgetMeConfirmUploads": "Uw naam wordt verwijderd van de foto’s die u naar deze galerij hebt geüpload.",
       "forgetMe": "Vergeet mij ({{name}})",
       "socials": "Sociale media"
     },
@@ -330,6 +398,8 @@
     "photosCount_other": "{{count}} foto's",
     "colorFilter": "Kleur",
     "filterByColor": "Alleen {{color}} tonen",
+    "minRatingFilter": "Mijn beoordeling",
+    "filterByMinRating": "Mijn beoordeling: {{min}} sterren of meer",
     "folders": "Mappen",
     "openFolder": "Map {{name}} openen",
     "folderPhotoCount": "{{count}} foto's",
@@ -338,7 +408,47 @@
     "downloadFolderCapped": "Eerste {{limit}} van {{total}} downloaden",
     "downloadEverything": "Alle foto's downloaden",
     "videoFormatUnsupported": "Deze video-indeling kan niet in deze browser worden afgespeeld. Download de video om hem te bekijken.",
-    "videoLoadFailed": "Deze video kon niet worden geladen."
+    "videoLoadFailed": "Deze video kon niet worden geladen.",
+    "downloadLimit": {
+      "reached": "Downloadlimiet bereikt. Neem contact op met je fotograaf voor meer downloads.",
+      "notEnough": "Nog maar {{remaining}} downloads over. Selecteer minder foto’s of neem contact op met je fotograaf.",
+      "counter": "{{used}} van {{limit}} downloads gebruikt",
+      "selectionCost": "Gebruikt {{cost}} van je {{remaining}} resterende downloads",
+      "selectionTooLarge": "Downloadlimiet: deze selectie heeft {{cost}} downloads nodig, nog maar {{remaining}} over",
+      "downloadAllBlocked": "Deze galerij bevat meer foto’s dan je resterende downloads",
+      "previewOnly": "Downloads in deze galerij zijn op voorbeeldformaat. De originele bestanden zijn beschikbaar voor de klant.",
+      "videoClientOnly": "Deze video is alleen beschikbaar voor de klant."
+    },
+    "credits": {
+      "filterLabel": "Door",
+      "everyone": "Iedereen",
+      "unnamedGuests": "Gasten zonder naam",
+      "photographer": "Fotograaf",
+      "uploadedBy": "Geüpload door {{name}}",
+      "photoBy": "Foto door {{name}}"
+    },
+    "firstLook": "Eerste selectie",
+    "viewAllPhotos": "Alle foto's",
+    "viewSwitch": "Foto's tonen per",
+    "folderRoot": "Galerie",
+    "folderPath": "Mappad",
+    "folderUp": "Terug naar {{name}}",
+    "subfolderCount": "Mappen: {{count}}",
+    "downloadFolderWithSubfolders": "Map met submappen downloaden ({{count}})",
+    "collapseFolder": "{{name}} inklappen",
+    "expandFolder": "{{name}} uitklappen",
+    "subfolderCount_one": "Mappen: {{count}}",
+    "downloadFolderWithSubfolders_one": "Map met submappen downloaden ({{count}})",
+    "subfolderCount_other": "Mappen: {{count}}",
+    "downloadFolderWithSubfolders_other": "Map met submappen downloaden ({{count}})",
+    "delivery": {
+      "title": "Er komen nog meer foto's",
+      "progressWithDate": "{{delivered}} van ca. {{expected}} foto's zijn er al. De overige foto's worden nog bewerkt — de volledige galerie volgt uiterlijk op {{date}}.",
+      "progress": "{{delivered}} van ca. {{expected}} foto's zijn er al. De overige foto's worden nog bewerkt.",
+      "withDate": "De overige foto's worden nog bewerkt — de volledige galerie volgt uiterlijk op {{date}}.",
+      "noDetails": "De overige foto's worden nog bewerkt.",
+      "progressLabel": "Tot nu toe geleverde foto's"
+    }
   },
   "categories": {
     "title": "Fotocategorieen",
@@ -359,7 +469,8 @@
     "coverPhotoSet": "Omslagfoto succesvol ingesteld",
     "coverPhotoRemoved": "Omslagfoto verwijderd",
     "failedToSetCoverPhoto": "Kan omslagfoto niet instellen",
-    "categoryHeroHint": "Als er geen omslagfoto is ingesteld voor een categorie, wordt de standaard hero-foto gebruikt."
+    "categoryHeroHint": "Als er geen omslagfoto is ingesteld voor een categorie, wordt de standaard hero-foto gebruikt.",
+    "nestedFoldersHint": "Mappen binnen mappen beheert u in de mappenbalk op het tabblad Foto's."
   },
   "events": {
     "revealMode": "Onthullingsmodus (galerij verbergen tot de onthulling)",
@@ -418,6 +529,7 @@
     "eventExpiresIn": "Dit evenement verloopt over {{days}} dagen",
     "overview": "Overzicht",
     "photos": "Foto's",
+    "media": "Media",
     "categories": "Categorieen",
     "eventInformation": "Evenementinformatie",
     "sourceMode": "Bronmodus",
@@ -439,8 +551,16 @@
     "creationEmailResent": "Aanmaakmail is in de wachtrij geplaatst",
     "failedToResendEmail": "Kan aanmaakmail niet opnieuw verzenden",
     "photoStatistics": "Fotostatistieken",
+    "mediaStatistics": "Mediastatistieken",
     "totalPhotos": "Totaal foto's",
+    "videos": "Video's",
+    "videoRuntime": "Videoduur",
+    "photosCount_one": "{{count}} foto",
+    "photosCount_other": "{{count}} foto's",
+    "videosCount_one": "{{count}} video",
+    "videosCount_other": "{{count}} video's",
     "managePhotos": "Foto's beheren",
+    "manageMedia": "Media beheren",
     "actions": "Acties",
     "archivingInfo": "Archiveren maakt een ZIP-bestand van alle foto's en verwijdert de galerij uit openbare toegang.",
     "archivedOn": "Gearchiveerd op",
@@ -657,7 +777,7 @@
     "devtoolsDetection": "Ontwikkelaarshulpmiddelen detectie",
     "watermarked": "Voorzien van watermerk",
     "importExternal": "Importeren vanuit externe map",
-    "externalImportInfo": "Alle afbeeldingen uit de geselecteerde map worden geïmporteerd.",
+    "externalImportInfo": "Alle afbeeldingen uit de geselecteerde map worden geïmporteerd. Video's worden ook geïmporteerd als hun bestandstype voor uploads is toegestaan.",
     "selectExternalFolder": "Externe map selecteren onder /external-media",
     "importFromSelectedFolder": "Importeren vanuit geselecteerde map",
     "promoBanner": {
@@ -673,6 +793,116 @@
       "title": "Hero-foto gebruiken als social-share-voorbeeld",
       "help": "Wanneer deze galerij-URL wordt gedeeld op WhatsApp, Facebook, Slack enz., toont de link-preview de bovenstaande hero-foto. De thumbnail wordt niet-geauthenticeerd opgehaald door link-preview-crawlers — wie de URL deelt maakt deze afbeelding daarmee in feite openbaar. Standaard uit; kies eerst een hero die je bewust openbaar wilt tonen voordat je dit inschakelt.",
       "heroRequired": "Kies eerst hierboven een hero-foto — deze optie gebruikt die als WhatsApp- / Facebook- / Slack-voorbeeldafbeelding."
+    },
+    "downloadLimit": "Downloadlimiet",
+    "downloadLimitHelp": "Maximaal aantal foto’s dat de klant kan downloaden. 0 = onbeperkt",
+    "downloadLimitUsage": "{{used}} / {{limit}} gedownload",
+    "downloadLimitReset": "Resetten",
+    "downloadLimitResetConfirm": "Downloads voor deze galerij resetten? De klant krijgt de volledige limiet terug en al gedownloade foto’s tellen opnieuw.",
+    "downloadLimitResetDone": "Downloads gereset",
+    "downloadLimitResetFailed": "Downloads konden niet worden gereset",
+    "uploaderNames": {
+      "label": "Namen van uploaders",
+      "help": "Gasten kunnen bij het uploaden hun naam opgeven, zodat je weet wie welke foto heeft geüpload.",
+      "modes": {
+        "off": "Uit",
+        "optional": "Optioneel",
+        "required": "Verplicht"
+      },
+      "showToGuests": "Namen aan gasten tonen",
+      "showToGuestsHelp": "Gasten zien de namen bij uploads die zijn gedaan terwijl dit aan stond; namen die zijn opgegeven terwijl het uit stond, blijven alleen voor jou en de gastheer. Uitzetten verbergt alle namen voor gasten. Geldt ook voor fotografenvermeldingen uit EXIF.",
+      "shownToGuests": "Zichtbaar voor gasten",
+      "hiddenFromGuests": "Alleen zichtbaar voor jou"
+    },
+    "sortNameAsc": "A – Z",
+    "sortNameDesc": "Z – A",
+    "sortDateNewest": "Nieuwste eerst",
+    "sortDateOldest": "Oudste eerst",
+    "sortCreatedNewest": "Recent aangemaakt",
+    "sortCreatedOldest": "Eerst aangemaakt",
+    "sortPhotosMost": "Meeste foto’s",
+    "sortPhotosFewest": "Minste foto’s",
+    "sortStatusActive": "Actieve eerst",
+    "sortStatusArchived": "Gearchiveerde eerst",
+    "sortExpiresSoonest": "Verloopt het eerst",
+    "sortExpiresLatest": "Verloopt het laatst",
+    "filterAllTypes": "Alle typen",
+    "filterByType": "Filteren op type",
+    "sortByName": "Sorteren op naam",
+    "sortByDate": "Sorteren op datum",
+    "sortByPhotos": "Sorteren op aantal foto’s",
+    "sortByStatus": "Sorteren op status",
+    "sortByExpiry": "Sorteren op vervaldatum",
+    "settingsTab": {
+      "delivery": "Mappen en levering",
+      "about": {
+        "delivery": "Geneste mappen uit uploads en een eerste selectie vóór de volledige galerie."
+      },
+      "summary": {
+        "folderStructureOn": "Mapstructuur aan",
+        "folderStructureOff": "Uploads zonder mappen",
+        "firstLookDue": "eerste selectie, volledige galerie uiterlijk {{date}}",
+        "firstLook": "eerste selectie, meer volgt"
+      }
+    },
+    "folders": {
+      "sectionTitle": "Mappen",
+      "sectionHelp": "Submappen van een upload of van de gekoppelde externe map worden geneste galeriemappen (maximaal drie niveaus). Uitschakelen geldt alleen voor nieuwe uploads en scans; bestaande mappen blijven zoals ze zijn.",
+      "mirror": "Mapstructuur overnemen bij uploaden en importeren",
+      "mirrorHelp": "In het uploadvenster is dit per upload nog aan te passen."
+    },
+    "delivery": {
+      "sectionTitle": "Levering in twee fasen",
+      "sectionHelp": "Lever nu een eerste selectie en later de volledige galerie. Gasten zien de eerste foto's met een badge, een melding dat er meer komt en plaatshouders totdat u de volledige galerie als klaar markeert.",
+      "statusComplete": "Volledig",
+      "statusPartial": "Eerste selectie, meer volgt",
+      "ofApprox": "van ~{{count}}",
+      "badged": "Foto's met badge „{{label}}”: {{count}}",
+      "overdueSince": "Toegezegd voor {{date}} — te laat",
+      "promisedBy": "Toegezegd voor {{date}} · nog {{count}} dagen",
+      "completeButton": "Volledige galerie is klaar",
+      "completedOn": "Voltooid op {{date}}. De badges van de eerste selectie blijven op hun foto's.",
+      "expected": "Verwacht aantal foto's",
+      "expectedHelp": "Bij benadering. Alleen gebruikt voor de melding aan gasten en de plaatshouders.",
+      "dueAt": "Volledige galerie toegezegd voor",
+      "dueDefault": "standaard",
+      "dueHelp": "Getoond aan gasten en gebruikt voor uw herinnering. Leeg: evenementdatum plus de standaard uit Instellingen → Evenementen.",
+      "badgeLabel": "Badgetekst",
+      "badgeHelp": "Bijvoorbeeld „Vooraf voor social media”. De badge blijft op deze foto's nadat de volledige galerie er is.",
+      "switchOffHint": "„Volledig” hier opslaan verwijdert alleen de melding en de plaatshouders — er wordt geen e-mail verstuurd. Gebruik „Volledige galerie is klaar” om de klant te informeren.",
+      "invalidExpected": "Het verwachte aantal foto's moet een geheel getal boven 0 zijn of leeg blijven.",
+      "completeTitle": "Volledige galerie als klaar markeren?",
+      "completeBody": "De melding en de plaatshouders verdwijnen. De badges van de eerste selectie blijven. Gasten zien daarna {{count}} foto's.",
+      "sendMail": "E-mail „Uw volledige galerie is er” versturen",
+      "sendMailHelp": "Naar het klant-e-mailadres van deze galerie. Workflows kunnen ook reageren op „gallery.completed”.",
+      "removeDuplicates": "Duplicaten van de eerste selectie verwijderen ({{count}})",
+      "removeDuplicatesHelp": "Foto's van de eerste selectie die opnieuw in de volledige galerie staan: dezelfde oorspronkelijke bestandsnaam, aan beide kanten uniek, en dezelfde opnametijd (of, zonder opnametijd, dezelfde grootte). Verwijderen is definitief; de kopieën in de volledige galerie nemen de badge over.",
+      "removeDuplicatesNoPermission": "Voor het verwijderen van foto's is de machtiging photos.delete nodig.",
+      "completeAndNotify": "Als klaar markeren en informeren",
+      "completeOnly": "Als klaar markeren",
+      "completedMailed": "De galerie is volledig. De klant is geïnformeerd.",
+      "completed": "De galerie is volledig.",
+      "completeFailed": "De galerie kon niet als volledig worden gemarkeerd.",
+      "pill": "Eerste selectie",
+      "pillOverdue": "Eerste selectie · te laat",
+      "pillDue": "Eerste selectie · over {{count}} d",
+      "awaitingFilter": "Volledige galerie in afwachting",
+      "progressShort": "{{count}} van ~{{expected}} foto's",
+      "progressNoExpected": "Foto's tot nu toe: {{count}}",
+      "overdueShort": "Te laat sinds {{date}}",
+      "dueShort": "Uiterlijk {{date}}",
+      "viewAllAwaiting": "Alles tonen",
+      "duplicatesNotRemoved": "De galerie is volledig, maar de duplicaten van de eerste selectie konden niet worden verwijderd. Verwijder ze op het tabblad Foto's."
+    },
+    "externalSource": {
+      "applyStructure": "Mapstructuur toepassen",
+      "applyStructureHint": "De submappen overnemen voor foto's die zijn geïmporteerd voordat de mapstructuur aan stond",
+      "applyStructureTitle": "Mapstructuur toepassen?",
+      "applyStructureMessage": "Foto's die nog niet in een galerijmap staan, gaan naar mappen die de submappen van de externe map weerspiegelen. Foto's die al in een map staan, blijven waar ze zijn.",
+      "structureApplied_one": "{{count}} foto naar mappen verplaatst",
+      "structureApplied_other": "{{count}} foto's naar mappen verplaatst",
+      "structureNothing": "Alle foto's uit een submap staan al in een map",
+      "structureFailed": "De mapstructuur kon niet worden toegepast"
     }
   },
   "settings": {
@@ -686,6 +916,8 @@
       "siteUrlHelp": "Wordt gebruikt voor het genereren van galerijlinks in e-mails",
       "defaultExpiration": "Standaard vervaltijd (dagen)",
       "maxFileSize": "Max. bestandsgrootte (MB)",
+      "videoWebRendition": "In de browser afspeelbare kopieën van video’s",
+      "videoWebRenditionHelp": "Codeert video’s die een browser niet kan afspelen (HEVC, QuickTime, niet-streambare MP4’s) om naar een H.264-MP4 voor het afspelen. Het origineel blijft de download. Kost CPU per video en een tweede bestand; bij inschakelen worden de al geüploade video’s in de wachtrij gezet.",
       "maxFilesPerUpload": "Max. bestanden per upload",
       "maxFilesPerUploadHelp": "Maximaal aantal foto's per uploadbatch (1-{{max}}).",
       "allowedFileTypes": "Toegestane bestandstypen",
@@ -712,7 +944,10 @@
       "accountEmailRequired": "E-mailadres is verplicht",
       "accountEmailInvalid": "Voer een geldig e-mailadres in",
       "accountSaveButton": "Accountgegevens opslaan",
-      "accountSaveSuccess": "Accountgegevens bijgewerkt"
+      "accountSaveSuccess": "Accountgegevens bijgewerkt",
+      "adminLanguage": "Jouw beheertaal",
+      "adminLanguageHelp": "Geldt voor het beheergedeelte, alleen voor jou op dit apparaat. Werkt direct — opslaan is niet nodig.",
+      "customerLanguage": "Taal voor galerie en gasten"
     },
     "publicSite": {
       "badge": "Openbare landingspagina",
@@ -805,7 +1040,7 @@
       "aboutText": "Globale categorieen zijn beschikbaar voor alle evenementen. U kunt ook evenement-specifieke categorieen aanmaken bij het bewerken van individuele evenementen. Categorieen helpen foto's te organiseren en stellen gasten in staat om foto's op type te filteren in de galerijweergave."
     },
     "systemStatus": {
-      "title": "Systeemstatus",
+      "title": "Status",
       "storageOverview": "Opslagoverzicht",
       "systemInfo": "Systeeminformatie",
       "databaseInfo": "Database-informatie",
@@ -829,7 +1064,8 @@
       "pending": "In afwachting",
       "sent": "Verzonden",
       "failed": "Mislukt",
-      "lastUpdate": "Laatste update"
+      "lastUpdate": "Laatste update",
+      "description": "Diensten, wachtrijen, opslag en versie — wat deze instantie nu draait."
     },
     "photoDimensions": {
       "title": "Fotoafmetingen",
@@ -898,7 +1134,17 @@
       "defaultAllowColorLabels": "Kleurlabels",
       "defaultKeybindMode": "Standaard sneltoetsen in de weergave",
       "keybindColors": "Alleen kleuren — 1 groen, 2 geel, 3 rood",
-      "keybindLightroom": "Lightroom — 1-5 sterren, 6-9 kleuren"
+      "keybindLightroom": "Lightroom — 1-5 sterren, 6-9 kleuren",
+      "defaultDownloadLimit": "Standaard downloadlimiet",
+      "defaultDownloadLimitHelp": "Vooraf ingevuld bij nieuwe events: hoeveel foto’s een klant kan downloaden. 0 = onbeperkt.",
+      "defaultFolderStructure": "Mapstructuur overnemen in nieuwe galerieën",
+      "defaultFolderStructureHelp": "Submappen van uploads en externe mappen worden geneste galeriemappen. Bestaande galerieën houden hun eigen instelling.",
+      "firstLookDetection": "Eerste selectie starten vanuit trefwoordmappen",
+      "firstLookDetectionHelp": "Een map op het hoogste niveau waarvan de naam een van deze woorden bevat (bijv. „Bruiloft (FirstLook)”) wordt niet als map aangemaakt: de foto's krijgen een badge en de galerie gaat over op levering in twee fasen.",
+      "firstLookKeywords": "Trefwoorden",
+      "firstLookKeywordsHelp": "Gescheiden door komma's. Hoofdletters, spaties, streepjes en underscores worden genegeerd, dus „FirstLook” past ook op „first-look”.",
+      "deliveryDays": "Volledige galerie verschuldigd na (dagen)",
+      "deliveryDaysHelp": "Als een eerste selectie start zonder toegezegde datum, is de volledige galerie zoveel dagen na de evenementdatum verschuldigd."
     },
     "imageSecurity": {
       "title": "Afbeeldingsbeveiliging",
@@ -1045,7 +1291,8 @@
       "integrations": "Integraties",
       "system": "Systeem",
       "appearance": "Inhoud & Weergave",
-      "communication": "Communicatie"
+      "communication": "Communicatie",
+      "people": "Personen en toegang"
     },
     "apiTokens": {
       "title": "API-tokens",
@@ -1174,7 +1421,9 @@
       "clients": {
         "title": "Klanten",
         "description": "Hoofdschakelaar voor het Klanten-onderdeel in de zijbalk. Uitgeschakeld verbergt het onderdeel en alle subfuncties ongeacht hun individuele schakelaars — opnieuw inschakelen herstelt de vorige status."
-      }
+      },
+      "configure": "Configureren",
+      "sidebarInSettings": "Geen item in de zijbalk — staat in Instellingen"
     },
     "customerSurface": {
       "brandingTitle": "Kopregel klantdashboard",
@@ -1183,9 +1432,28 @@
       "showLogoHint": "Gebruikt hetzelfde brandinglogo dat hierboven is geconfigureerd.",
       "showCompanyName": "Bedrijfsnaam in klantheader tonen",
       "showCompanyNameHint": "Verberg dit als je logo de bedrijfsnaam al bevat.",
-      "save": "Wijzigingen opslaan",
+      "save": "Kopregelinstellingen opslaan",
       "saved": "Branding van klantdashboard opgeslagen",
       "error": "Instellingen konden niet worden opgeslagen"
+    },
+    "creditBackfill": {
+      "title": "Fotomakers",
+      "description": "Leest de maker (EXIF Artist, XMP Creator of de naam in Copyright) voor foto’s die zijn toegevoegd voordat makers werden vastgelegd. Uploads van gasten en handmatig ingestelde namen worden nooit gewijzigd.",
+      "withCredit": "Met maker",
+      "undecided": "Nog niet gelezen",
+      "result": "Laatste run: {{success}} met maker, {{noCredit}} zonder naam in het bestand, {{failed}} onbereikbaar",
+      "running": "Makers worden gelezen...",
+      "noneToRead": "Geen foto’s meer te lezen",
+      "button": "Makers uit EXIF lezen"
+    },
+    "health": {
+      "title": "Gezondheid",
+      "description": "Achtergrondfouten die aandacht nodig hebben — vastgelopen e-mails, mislukte controles en opruiming."
+    },
+    "search": {
+      "placeholder": "Instellingen zoeken…",
+      "label": "Instellingen zoeken",
+      "noResults": "Geen instelling komt overeen met “{{query}}”."
     }
   },
   "analytics": {
@@ -1515,6 +1783,7 @@
     "recentActivity": "Recente activiteit",
     "storageUsed": "Gebruikte opslag",
     "totalPhotos": "Totaal foto's",
+    "totalMedia": "Totaal media",
     "storagePercent": "{{percent}}% van limiet {{limit}}",
     "storageSoftLimitConfigured": "Geconfigureerde limiet: {{limit}}",
     "storageSoftLimitRecommended": "Aanbevolen limiet: {{limit}}",
@@ -1590,6 +1859,7 @@
       "adminProfileUpdated": "Beheerdersprofiel bijgewerkt door {{actorName}}",
       "photosUploaded_one": "{{count}} foto geüpload naar \"{{eventName}}\"",
       "photosUploaded_other": "{{count}} foto's geüpload naar \"{{eventName}}\"",
+      "mediaUploaded": "{{media}} geüpload naar \"{{eventName}}\"",
       "photosBulkDeleted_one": "{{count}} foto verwijderd uit \"{{eventName}}\"",
       "photosBulkDeleted_other": "{{count}} foto's verwijderd uit \"{{eventName}}\"",
       "bulkDownload_one": "{{count}} foto gedownload uit \"{{eventName}}\"",
@@ -1660,6 +1930,12 @@
       "processingStatus": "Verwerken…",
       "processingFailed": "Mislukt",
       "retryQueued": "Nieuwe poging in wachtrij",
+      "webCopyFailed": "Geen webkopie",
+      "individualPhotos": "Losse foto's",
+      "individualVideos": "Losse video's",
+      "collages": "Collages",
+      "noPosterFrame": "Geen posterframe",
+      "noPosterFrameRetry": "Posterframe opnieuw maken",
       "myMarks": "Jouw markeringen",
       "myMarksHelp": "Alleen jij ziet deze. Ze verschijnen nooit in de klantgalerij en gaan als XMP naar Lightroom.",
       "myRating": "Jouw beoordeling",
@@ -1667,7 +1943,26 @@
       "rateStars": "{{count}} sterren geven",
       "markError": "Markering opslaan mislukt",
       "yourMarkColor": "Jouw markering: {{color}}",
-      "yourMarkRating": "Jouw beoordeling: {{count}}"
+      "yourMarkRating": "Jouw beoordeling: {{count}}",
+      "columns": {
+        "credit": "Maker"
+      },
+      "credit": {
+        "label": "Maker",
+        "edit": "Bewerken",
+        "save": "Naam opslaan",
+        "clear": "Naam verwijderen",
+        "saved": "Naam opgeslagen",
+        "cleared": "Naam verwijderd",
+        "none": "Geen naam",
+        "unnamedGuest": "Gast, zonder naam",
+        "manualHint": "Een naam die je hier instelt is definitief: EXIF-gegevens vervangen hem niet.",
+        "bulkAction": "Naam instellen",
+        "bulkTitle": "Naam instellen voor {{count}} foto’s",
+        "filterLabel": "Filteren op maker",
+        "filterAll": "Alle namen",
+        "filterNone": "Geen naam"
+      }
     },
     "events": {
       "tabs": {
@@ -1762,6 +2057,7 @@
       "gallery_opened": "Galerij “{{eventName}}” is geopend",
       "gallery_downloaded": "Foto’s uit “{{eventName}}” zijn gedownload",
       "photos_uploaded": "{{count}} foto's geüpload naar {{eventName}}",
+      "media_uploaded": "{{media}} geüpload naar {{eventName}}",
       "event_archived": "Evenement gearchiveerd: {{eventName}}",
       "archive_restored": "Archief hersteld: {{eventName}}",
       "archive_deleted": "Archief verwijderd: {{eventName}}",
@@ -1852,7 +2148,19 @@
       "photo_uploaded": "Foto geüpload naar {{eventName}}",
       "category_hero_updated": "Categorie hero-foto bijgewerkt",
       "public_site_reset_to_default": "Publieke site teruggezet naar standaard",
-      "cms_page_logo_uploaded": "CMS-pagina-logo geüpload: {{slug}}"
+      "cms_page_logo_uploaded": "CMS-pagina-logo geüpload: {{slug}}",
+      "folder_created": "Map aangemaakt: {{name}}",
+      "folder_updated": "Map gewijzigd in {{eventName}}",
+      "folder_deleted": "Map verwijderd: {{name}}",
+      "folders_created": "Mappen aangemaakt in {{eventName}}: {{count}}",
+      "folder_requested": "Mappen aangevraagd voor {{eventName}}: {{count}}",
+      "folder_request_approved": "Mapaanvraag goedgekeurd: {{path}}",
+      "folder_request_rejected": "Mapaanvraag afgewezen: {{path}}",
+      "folder_structure_applied": "Mapstructuur toegepast in {{eventName}}",
+      "delivery_first_look_started": "Eerste selectie gestart voor {{eventName}}",
+      "delivery_completed": "Volledige galerie geleverd: {{eventName}}",
+      "delivery_due_soon": "Volledige galerie voor {{eventName}} is bijna verschuldigd",
+      "delivery_overdue": "Volledige galerie voor {{eventName}} is te laat"
     },
     "catalogedMedia": "{{size}} gecatalogiseerd",
     "storageUnavailable": "niet beschikbaar",
@@ -2233,17 +2541,14 @@
       },
       "fields": {
         "destinationPath": "Bestemmingspad",
-        "destinationPathHelp": "Lokaal mappad voor het opslaan van back-ups",
-        "destinationPathPlaceholder": "/pad/naar/back-up/map",
+        "destinationPathHelp": "Map zoals de backend die ziet. Met Docker is dit een pad in de backend-container, niet op de host: gebruik een map die in de container is gemount.",
+        "destinationPathPlaceholder": "/app/storage/backups",
         "rsyncHost": "Externe host",
         "rsyncHostPlaceholder": "backup.voorbeeld.nl",
         "rsyncUser": "SSH-gebruiker",
         "rsyncUserPlaceholder": "backup-gebruiker",
         "rsyncPath": "Extern pad",
         "rsyncPathPlaceholder": "/home/backup/photo-sharing",
-        "rsyncSshKey": "SSH-prive-sleutel",
-        "rsyncSshKeyHelp": "SSH-prive-sleutel voor authenticatie (optioneel)",
-        "rsyncSshKeyPlaceholder": "-----BEGIN RSA PRIVATE KEY-----",
         "s3Endpoint": "S3-eindpunt",
         "s3EndpointHelp": "S3 API-eindpunt (bijv. s3.amazonaws.com)",
         "s3Bucket": "Bucketnaam",
@@ -2588,10 +2893,6 @@
       "moderateCommentsDesc": "Opmerkingen vereisen goedkeuring voordat ze zichtbaar zijn",
       "showToGuests": "Feedback tonen aan gasten",
       "showToGuestsDesc": "Andere gasten kunnen beoordelingen, likes en goedgekeurde opmerkingen zien",
-      "enableRateLimiting": "Snelheidsbeperking inschakelen",
-      "rateLimitingDesc": "Voorkom spam door de feedbackfrequentie te beperken",
-      "timeWindow": "Tijdvenster (minuten)",
-      "maxRequests": "Max. verzoeken",
       "colorLabels": "Kleurlabels",
       "colorLabelsDesc": "Eén kleur per gast per foto, met de kleurenset van Lightroom zodat de selectie via XMP meegaat",
       "keybindMode": "Sneltoetsen",
@@ -2652,6 +2953,7 @@
     "ratingError": "Indienen beoordeling mislukt",
     "rateStar_one": "{{count}} ster beoordelen",
     "rateStar_other": "{{count}} sterren beoordelen",
+    "removeRating": "Beoordeling verwijderen",
     "ratingsCount_one": "{{count}} beoordeling",
     "ratingsCount_other": "{{count}} beoordelingen",
     "likeError": "Bijwerken like mislukt",
@@ -2697,6 +2999,7 @@
     "hasFavorites": "Heeft favorieten",
     "hasComments": "Heeft opmerkingen",
     "showingPhotos": "Totaal foto's",
+    "showingMedia": "Totaal media",
     "withRatings": "Met beoordelingen",
     "combineWith": "Combineren met",
     "allPhotos": "Alle foto's",
@@ -2764,6 +3067,7 @@
     "enableToggle": "Klanttoegang inschakelen",
     "enableDescription": "Sta klanten toe foto's te beoordelen en te verbergen voordat de galerij wordt gedeeld met gasten.",
     "pinHelperText": "De klant gebruikt deze PIN om de beoordelingspagina te openen.",
+    "linkAfterCreate": "De link voor klanttoegang verschijnt op de evenementpagina zodra het evenement is aangemaakt.",
     "pinUpdated": "Klant-PIN bijgewerkt",
     "setPin": "PIN instellen",
     "linkLabel": "Klanttoegangslink",
@@ -2790,7 +3094,74 @@
     "movedToCategory_one": "{{count}} foto verplaatst naar {{category}}",
     "movedToCategory_other": "{{count}} foto's verplaatst naar {{category}}",
     "moveToCategoryFailed": "Verplaatsen naar categorie mislukt",
-    "moveToCategory": "Naar categorie verplaatsen"
+    "moveToCategory": "Naar categorie verplaatsen",
+    "folders": {
+      "title": "Mappen",
+      "galleryRoot": "Hoofdniveau van de galerij",
+      "allPhotos": "Alle foto's",
+      "breadcrumb": "Mappad",
+      "waitingView": "Wachten op mapaanvragen",
+      "waitingChip": "Wacht op een map",
+      "noFolders": "Nog geen mappen",
+      "name": "Mapnaam",
+      "newFolder": "Nieuwe map",
+      "newSubfolder": "Nieuwe submap",
+      "newSubfolderIn": "Nieuwe submap in \"{{name}}\"",
+      "create": "Aanmaken",
+      "created": "Map aangemaakt",
+      "createFailed": "De map kon niet worden aangemaakt",
+      "rename": "Hernoemen",
+      "renameTitle": "Map hernoemen",
+      "renamed": "Map hernoemd",
+      "move": "Verplaatsen",
+      "moveTitle": "\"{{name}}\" verplaatsen naar…",
+      "moveHint": "Submappen en foto's gaan mee. Mappen kunnen maximaal {{depth}} niveaus diep worden genest.",
+      "moved": "Map verplaatst",
+      "updateFailed": "De map kon niet worden gewijzigd",
+      "maxDepthReached": "Mappen kunnen maximaal {{depth}} niveaus diep worden genest",
+      "delete": "Map verwijderen",
+      "deleteTitle": "Map \"{{name}}\" verwijderen?",
+      "deleteMessage": "De foto's ({{photos}}) en submappen ({{folders}}) gaan naar {{parent}}. Er wordt geen foto verwijderd.",
+      "deleted": "Map verwijderd",
+      "deleteFailed": "De map kon niet worden verwijderd",
+      "allowDownloads": "Downloads in deze map toestaan",
+      "downloadsAllowed": "Downloads toegestaan",
+      "downloadsBlocked": "Downloads geblokkeerd",
+      "downloadsOn": "Downloads toegestaan in deze map",
+      "downloadsOff": "Downloads geblokkeerd in deze map en de submappen",
+      "downloadsBlockedBy": "Toch geblokkeerd door de bovenliggende map \"{{name}}\".",
+      "downloadsInherit": "Submappen nemen dit over: een map die downloads blokkeert, blokkeert ze in elke map daaronder.",
+      "moveToFolder": "Naar map verplaatsen…",
+      "moveToFolderTitle_one": "{{count}} foto naar een map verplaatsen",
+      "moveToFolderTitle_other": "{{count}} foto's naar een map verplaatsen",
+      "photosMoved_one": "{{count}} foto verplaatst naar {{folder}}",
+      "photosMoved_other": "{{count}} foto's verplaatst naar {{folder}}",
+      "moveFailed": "De foto's konden niet worden verplaatst"
+    },
+    "folderRequests": {
+      "title_one": "{{count}} mapaanvraag",
+      "title_other": "{{count}} mapaanvragen",
+      "hint": "De foto's wachten in de dichtstbijzijnde bestaande map totdat u beslist.",
+      "photoCount_one": "{{count}} foto",
+      "photoCount_other": "{{count}} foto's",
+      "waitIn": "wacht in {{folder}}",
+      "requestedBy": "aangevraagd door {{name}}",
+      "approve": "Goedkeuren",
+      "approveAll": "Alles goedkeuren",
+      "approveAs": "Goedkeuren als…",
+      "approveAsTitle": "\"{{path}}\" in een bestaande map plaatsen",
+      "approveAsHint": "In plaats van de aangevraagde map aan te maken, gaan de foto's naar de map die u kiest (bijvoorbeeld \"Samstag\" naar \"Saturday\").",
+      "reject": "Afwijzen",
+      "approved_one": "Mapaanvraag goedgekeurd, {{count}} foto verplaatst",
+      "approved_other": "Mapaanvraag goedgekeurd, {{count}} foto's verplaatst",
+      "approvedAll_one": "Alle mapaanvragen goedgekeurd, {{count}} foto verplaatst",
+      "approvedAll_other": "Alle mapaanvragen goedgekeurd, {{count}} foto's verplaatst",
+      "rejected": "Mapaanvraag afgewezen; de foto's blijven waar ze zijn",
+      "failed": "De mapaanvraag kon niet worden bijgewerkt",
+      "showWaiting": "Wachtende foto's tonen",
+      "waitingForAdmin_one": "{{count}} mapaanvraag wacht op een beheerder. Tot die tijd staan de {{photos}} foto's in de dichtstbijzijnde bestaande map.",
+      "waitingForAdmin_other": "{{count}} mapaanvragen wachten op een beheerder. Tot die tijd staan de {{photos}} foto's in de dichtstbijzijnde bestaande map."
+    }
   },
   "customer": {
     "login": {
@@ -3145,6 +3516,28 @@
       "net": "Netto",
       "vat": "Btw",
       "total": "Bruto"
+    }
+  },
+  "search": {
+    "groups": {
+      "pages": "Pagina's"
+    },
+    "palette": {
+      "label": "Zoeken in het beheergedeelte",
+      "placeholder": "Pagina's en instellingen zoeken…",
+      "noResults": "Niets komt overeen met “{{query}}”.",
+      "open": "Pagina's en instellingen zoeken"
+    }
+  },
+  "automation": {
+    "empty": {
+      "title": "Geen automatiseringsfuncties ingeschakeld",
+      "body": "Schakel Workflows of herinneringsmails in via Instellingen → Functies om te beginnen.",
+      "noAccessTitle": "Hier is niets dat je kunt openen",
+      "noAccessBody": "Deze functies staan aan, maar jouw rol kan geen van de bijbehorende pagina’s openen. Vraag een beheerder om toegang."
+    },
+    "subnav": {
+      "approvals": "Goedkeuringen"
     }
   }
 }

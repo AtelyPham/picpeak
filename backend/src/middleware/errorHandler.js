@@ -103,6 +103,16 @@ const handleKnownErrors = (err) => {
     return new ValidationError('Field name array index too large');
   }
 
+  // The multipart routes now size their parsers to the fields they read
+  // (`fields`, `parts`, `files`, `fieldSize`); a request that exceeds one of
+  // those budgets is a bad request, not a server fault.
+  if (err.code === 'LIMIT_FIELD_COUNT' || err.code === 'LIMIT_PART_COUNT'
+    || err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_FIELD_VALUE'
+    || err.code === 'LIMIT_FIELD_KEY') {
+    const { ValidationError } = require('../utils/errors');
+    return new ValidationError('Multipart request exceeds the allowed number or size of parts');
+  }
+
   return err;
 };
 
@@ -136,6 +146,9 @@ const errorHandler = (err, req, res, next) => {
     statusCode,
     errorCode: error.code,
     operational,
+    // Same id the client gets in the response, so a reported failure can be
+    // found in the log (middleware/requestId.js).
+    ...(req.id && { requestId: req.id }),
     ...(req.admin && { adminId: req.admin.id }),
     ...(req.gallerySlug && { gallerySlug: req.gallerySlug })
   };
@@ -147,19 +160,26 @@ const errorHandler = (err, req, res, next) => {
       message: error.message
     });
   } else {
-    // Programming errors are bugs, log at error level with stack
+    // Programming errors are bugs, log at error level with stack.
+    // errorClass is the driver/error code (e.g. SQLITE_BUSY, 42P01) or the
+    // constructor name: enough to count failures by kind without logging
+    // request content.
     logger.error('Unhandled error', {
       ...logContext,
+      errorClass: error.code || error.name,
       message: error.message,
       stack: error.stack
     });
   }
 
+  // A busy service says when to come back (e.g. PDF_RENDER_BUSY).
+  if (error.retryAfter) res.setHeader('Retry-After', String(error.retryAfter));
+
   // Format and send response
   const isDev = process.env.NODE_ENV === 'development';
   const response = isDev ? formatDevError(error) : formatProdError(error, operational);
 
-  res.status(statusCode).json(response);
+  res.status(statusCode).json(req.id ? { ...response, requestId: req.id } : response);
 };
 
 /**

@@ -5,6 +5,574 @@ All notable changes to PicPeak will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.164.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.163.0-beta.0...v3.164.0-beta.0) (2026-10-06)
+
+
+### Features
+
+* **gallery:** nested folders and two-stage delivery with a first look ([#1826](https://github.com/PicPeak/picpeak/issues/1826)) ([8337d48](https://github.com/PicPeak/picpeak/commit/8337d4805ee7b6755fc416f2b3e5da84f0e5a351))
+
+## [3.163.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.162.0-beta.0...v3.163.0-beta.0) (2026-10-06)
+
+
+### Features
+
+* **admin:** gallery settings as a split view, save bar pinned to the window bottom ([#1820](https://github.com/PicPeak/picpeak/issues/1820)) ([fa7e3e1](https://github.com/PicPeak/picpeak/commit/fa7e3e1575b7d299f6dce558b2891b002b06aaa4))
+
+## [3.162.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.161.0-beta.0...v3.162.0-beta.0) (2026-10-06)
+
+
+### Features
+
+* **uploads:** accept camera RAW at the gate and in the file picker ([#1783](https://github.com/PicPeak/picpeak/issues/1783)) ([382d9e2](https://github.com/PicPeak/picpeak/commit/382d9e2a934ec43b7a2d4cc52e5ec0d82c2a2052))
+
+## [3.161.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.160.0-beta.0...v3.161.0-beta.0) (2026-10-05)
+
+
+### Features
+
+* **gallery:** copy the selected or favourited filenames for a RAW editor search ([#1797](https://github.com/PicPeak/picpeak/issues/1797)) ([4652ef2](https://github.com/PicPeak/picpeak/commit/4652ef21847085f4c8aeae22619164f89ee11e3b))
+* **gallery:** filter by own star rating and select the filtered photos ([#1800](https://github.com/PicPeak/picpeak/issues/1800)) ([f093d46](https://github.com/PicPeak/picpeak/commit/f093d4661b98afd9d6f8847087ebba81534ed250))
+* **gallery:** link to a single photo with ?photo= ([#1799](https://github.com/PicPeak/picpeak/issues/1799)) ([04b29a6](https://github.com/PicPeak/picpeak/commit/04b29a617a79ddab03b5c32cde4889eba185ea5e))
+* **gallery:** rate a photo from the grid tile ([#1796](https://github.com/PicPeak/picpeak/issues/1796)) ([21b4274](https://github.com/PicPeak/picpeak/commit/21b4274adbfb76b7b62882878324f2439f309e07))
+* **notifications:** clear the bell per admin with notification_dismissals ([#1813](https://github.com/PicPeak/picpeak/issues/1813)) ([b2ca7b9](https://github.com/PicPeak/picpeak/commit/b2ca7b9d8990e118fd28fa500b16df259bb7cfee))
+* **upload:** drop a folder onto the admin uploader ([#1795](https://github.com/PicPeak/picpeak/issues/1795)) ([44d6dea](https://github.com/PicPeak/picpeak/commit/44d6dea2dc453c2f45e11a917aa31f573721867c))
+
+
+### Bug Fixes
+
+* **security:** close the contained findings of the October security scan ([#1809](https://github.com/PicPeak/picpeak/issues/1809)) ([16e91d6](https://github.com/PicPeak/picpeak/commit/16e91d6f80ea207cd98339b86906208144f4f5e7))
+
+
+### Performance Improvements
+
+* **gallery:** skip offscreen tile work in every layout ([#1798](https://github.com/PicPeak/picpeak/issues/1798)) ([b300408](https://github.com/PicPeak/picpeak/commit/b3004083c57e126ccb9c4e9c55aec2712efe5d13))
+
+## [3.160.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.159.0-beta.0...v3.160.0-beta.0) (2026-10-05)
+
+
+### Features
+
+* **gallery:** carry source_filename on the guest photo list ([#1802](https://github.com/PicPeak/picpeak/issues/1802)) ([0c0d0b9](https://github.com/PicPeak/picpeak/commit/0c0d0b9b017f450f30a462de8cf13b21f29adbc2))
+
+
+### Bug Fixes
+
+* **archives:** clear the event's child rows before deleting it ([#1790](https://github.com/PicPeak/picpeak/issues/1790)) ([e452cb4](https://github.com/PicPeak/picpeak/commit/e452cb4fdbe87b9c35a03041e0d8040aa1b6e3b8))
+* **db:** four PostgreSQL-only query defects (audit trail, XMP label, visitors alias, case-insensitive search) ([#1791](https://github.com/PicPeak/picpeak/issues/1791)) ([9fcb887](https://github.com/PicPeak/picpeak/commit/9fcb8875b8531803723fd1b13e6677a534d88dcb))
+* **downloads:** invalidate in-flight zips and answer a failed single-file send ([#1792](https://github.com/PicPeak/picpeak/issues/1792)) ([8101c7b](https://github.com/PicPeak/picpeak/commit/8101c7bab8e57ae7f9feee7fe7c9d2f2680a479d))
+* **events:** let an admin clear the customer contact, and refuse a resend with no recipient ([#1793](https://github.com/PicPeak/picpeak/issues/1793)) ([bc0c99d](https://github.com/PicPeak/picpeak/commit/bc0c99d0b886fa0b06d882e3e812c1537496d41f))
+* **expiry:** compare expires_at by value on SQLite whatever shape it was stored in ([#1788](https://github.com/PicPeak/picpeak/issues/1788)) ([ba42888](https://github.com/PicPeak/picpeak/commit/ba428882fff5b9f94a2fb07abfc33c83a2fdbbde))
+* **gallery:** send the event date as a calendar date, not a timestamp ([#1801](https://github.com/PicPeak/picpeak/issues/1801)) ([5cb1348](https://github.com/PicPeak/picpeak/commit/5cb13481a9fbb22a52d0d34814f6b02e3da4dc62))
+* **notifications:** send activity timestamps as UTC so the bell and dashboard do not show them in the future ([#1816](https://github.com/PicPeak/picpeak/issues/1816)) ([9f1b128](https://github.com/PicPeak/picpeak/commit/9f1b128d40c583c1c7192f562bb5a3324f79f3ab))
+
+## [3.159.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.158.2-beta.0...v3.159.0-beta.0) (2026-10-05)
+
+
+### Features
+
+* **updater:** opt-in in-app updater and its file contract ([#1811](https://github.com/PicPeak/picpeak/issues/1811)) ([bbe4427](https://github.com/PicPeak/picpeak/commit/bbe442748e771fa5759015001cba5eb6016f54d7))
+
+## [3.158.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.158.1-beta.0...v3.158.2-beta.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **backup:** local destination test names what blocks the path and where it is resolved ([#1778](https://github.com/PicPeak/picpeak/issues/1778)) ([97ee1d0](https://github.com/PicPeak/picpeak/commit/97ee1d031eb0cdcec589429e6d3b44a53654ebf4))
+
+## [3.158.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.158.0-beta.0...v3.158.1-beta.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **transfers:** link previews show the transfer name and branding tagline ([#1774](https://github.com/PicPeak/picpeak/issues/1774)) ([b1e93f8](https://github.com/PicPeak/picpeak/commit/b1e93f86d8a9cccef425b7dc89f70be35b3d31c9))
+
+## [3.158.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.157.0-beta.0...v3.158.0-beta.0) (2026-10-02)
+
+
+### Features
+
+* **photos:** natural filename order, capture-date sort and sortable headers in the event photo list ([#1773](https://github.com/PicPeak/picpeak/issues/1773)) ([09424e1](https://github.com/PicPeak/picpeak/commit/09424e1e96261e2a50c84d19affd6002a52ebaee))
+
+## [3.157.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.156.1-beta.0...v3.157.0-beta.0) (2026-10-02)
+
+
+### Features
+
+* **video:** opt-in browser-playable copies of videos ([#1761](https://github.com/PicPeak/picpeak/issues/1761)) ([db5e050](https://github.com/PicPeak/picpeak/commit/db5e0509a9757ac2685decbdfa95401657559b8a))
+
+## [3.156.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.156.0-beta.0...v3.156.1-beta.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **video:** note the missing poster frame on the tile and finish the media wording ([#1760](https://github.com/PicPeak/picpeak/issues/1760)) ([b61402c](https://github.com/PicPeak/picpeak/commit/b61402cb8bf431ef3f792f94b78a51fdd76bc1be))
+
+## [3.156.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.155.1-beta.0...v3.156.0-beta.0) (2026-10-02)
+
+
+### Features
+
+* **admin:** the brand in the sidebar and header goes to the dashboard ([#1762](https://github.com/PicPeak/picpeak/issues/1762)) ([76492c1](https://github.com/PicPeak/picpeak/commit/76492c11836fdf0e79e8cecfbc18e004e0cde9cc))
+
+## [3.155.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.155.0-beta.0...v3.155.1-beta.0) (2026-10-01)
+
+
+### Documentation
+
+* **frontend:** UX guide and styling-guide gaps (stacked on [#1747](https://github.com/PicPeak/picpeak/issues/1747)) ([#1756](https://github.com/PicPeak/picpeak/issues/1756)) ([e3a1b69](https://github.com/PicPeak/picpeak/commit/e3a1b696f5de522e077dfee2c7ce98b73d34cd78))
+
+## [3.155.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.154.1-beta.0...v3.155.0-beta.0) (2026-10-01)
+
+
+### Features
+
+* **admin:** one gallery page, support role, global theme with override, folders in one step ([#1747](https://github.com/PicPeak/picpeak/issues/1747)) ([09ea6b7](https://github.com/PicPeak/picpeak/commit/09ea6b7a5ad3146a9e75d952011e63c02c803b85))
+
+## [3.154.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.154.0-beta.0...v3.154.1-beta.0) (2026-10-01)
+
+
+### Bug Fixes
+
+* **deps:** close the sixteen open Trivy findings on the aio image ([#1757](https://github.com/PicPeak/picpeak/issues/1757)) ([f214df6](https://github.com/PicPeak/picpeak/commit/f214df62905472bfd70ea97730fb3c450d25bb9f))
+
+## [3.154.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.153.0-beta.0...v3.154.0-beta.0) (2026-10-01)
+
+
+### Features
+
+* **usage:** count a delivered webhook as webhook use under usage.v6 ([#1743](https://github.com/PicPeak/picpeak/issues/1743)) ([2aaa12f](https://github.com/PicPeak/picpeak/commit/2aaa12fb5dfea0bedbc262a991aa9b4851102184))
+
+## [3.153.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.152.0-beta.0...v3.153.0-beta.0) (2026-10-01)
+
+
+### Features
+
+* **admin:** count and filter videos, and import them from external folders ([#1738](https://github.com/PicPeak/picpeak/issues/1738)) ([b81352f](https://github.com/PicPeak/picpeak/commit/b81352fe1946b2b2120eed2634547af6eb571df8))
+
+
+### Bug Fixes
+
+* **admin:** stop the branding theme greying out the product usage tab ([#1742](https://github.com/PicPeak/picpeak/issues/1742)) ([8704fb9](https://github.com/PicPeak/picpeak/commit/8704fb943d16d04905c8a7f32cb57620f213dc89))
+* **admin:** type the warnWriteNotes translator as TFunction ([#1746](https://github.com/PicPeak/picpeak/issues/1746)) ([6edea1e](https://github.com/PicPeak/picpeak/commit/6edea1ea622b91cd34172ddf588cb09fd93d4a39))
+* **gallery:** cut the hero rendition at the event's focal point ([#1744](https://github.com/PicPeak/picpeak/issues/1744)) ([2c38498](https://github.com/PicPeak/picpeak/commit/2c38498959e00dfb1ddeadf883e17438dc7e64b1))
+* **gallery:** fetch the lightbox slide on screen ahead of its neighbours ([#1736](https://github.com/PicPeak/picpeak/issues/1736)) ([c9ffe05](https://github.com/PicPeak/picpeak/commit/c9ffe05aae536100fcd8a8b9dd4b6a773ac47295))
+
+## [3.152.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.151.2-beta.0...v3.152.0-beta.0) (2026-10-01)
+
+
+### Features
+
+* **transfers:** split PicTransfer into send and request, and give uploads their own type policy ([#1735](https://github.com/PicPeak/picpeak/issues/1735)) ([4d55ed6](https://github.com/PicPeak/picpeak/commit/4d55ed6ea55dd55a6f6cf14995abd078abe57c3d))
+
+
+### Bug Fixes
+
+* **admin:** remove a back arrow that led out of the admin, and give editors a named exit ([#1730](https://github.com/PicPeak/picpeak/issues/1730)) ([bd9f9da](https://github.com/PicPeak/picpeak/commit/bd9f9da5e5b861e91c32e2a7d0fc0a0dfa2a6cfd))
+* **gallery:** sort and search by the original camera filename ([#1702](https://github.com/PicPeak/picpeak/issues/1702)) ([d27830f](https://github.com/PicPeak/picpeak/commit/d27830fb74800897d589ecca966da58d7745ecb3))
+
+## [3.151.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.151.1-beta.0...v3.151.2-beta.0) (2026-09-30)
+
+
+### Bug Fixes
+
+* **deps:** close the four open Trivy findings on the backend image ([#1726](https://github.com/PicPeak/picpeak/issues/1726)) ([bb3c720](https://github.com/PicPeak/picpeak/commit/bb3c72056aa209771aac76ac1e6f1d70e92ebf4d))
+* **security:** close the findings of the 2026-09-29 security review and Codex audit ([#1728](https://github.com/PicPeak/picpeak/issues/1728)) ([3c29ce0](https://github.com/PicPeak/picpeak/commit/3c29ce086373a82e73638077ac86f492823a34c4))
+
+## [3.151.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.151.0-beta.0...v3.151.1-beta.0) (2026-09-29)
+
+
+### Bug Fixes
+
+* **admin:** keep the sidebar brand row while a section is open ([#1722](https://github.com/PicPeak/picpeak/issues/1722)) ([b692a53](https://github.com/PicPeak/picpeak/commit/b692a5391d3bef6172b249870c7a2376ae330545))
+
+## [3.151.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.150.0-beta.0...v3.151.0-beta.0) (2026-09-29)
+
+
+### Features
+
+* **admin:** eight sidebar entries, language in Settings, search across the admin ([#1718](https://github.com/PicPeak/picpeak/issues/1718)) ([7606b0a](https://github.com/PicPeak/picpeak/commit/7606b0a80187d5dc269849b0a839b470f86e6e8e))
+
+## [3.150.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.149.0-beta.0...v3.150.0-beta.0) (2026-09-29)
+
+
+### Features
+
+* **events:** sort the events list by any column it shows, filter by type ([#1717](https://github.com/PicPeak/picpeak/issues/1717)) ([01094d9](https://github.com/PicPeak/picpeak/commit/01094d94930127feed7098c45de88e6f39c892dd))
+
+## [3.149.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.148.2-beta.0...v3.149.0-beta.0) (2026-09-28)
+
+
+### Features
+
+* **gallery-story:** selection mode with download selected and favourite selected ([#1719](https://github.com/PicPeak/picpeak/issues/1719)) ([0275048](https://github.com/PicPeak/picpeak/commit/0275048b6ce0614ab6fcbe6845dd7fefcc5de909))
+
+## [3.148.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.148.1-beta.0...v3.148.2-beta.0) (2026-09-28)
+
+
+### Bug Fixes
+
+* **backup:** individual backup run delete route the History table already called ([#1714](https://github.com/PicPeak/picpeak/issues/1714)) ([c294880](https://github.com/PicPeak/picpeak/commit/c294880216200ed5f3eb53584ef461bb5e4c3589))
+* **gallery-story:** legible hero title, natural aspect grid option, Download All in the nav ([#1713](https://github.com/PicPeak/picpeak/issues/1713)) ([d1bffd3](https://github.com/PicPeak/picpeak/commit/d1bffd3de56acf8ac799607a5f9f7ea356f11a0e))
+
+## [3.148.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.148.0-beta.0...v3.148.1-beta.0) (2026-09-28)
+
+
+### Bug Fixes
+
+* **documents:** two follow-ups to [#1658](https://github.com/PicPeak/picpeak/issues/1658) — the VAT note is an invoice statement, and a reference stays in the meta block ([#1690](https://github.com/PicPeak/picpeak/issues/1690)) ([7766804](https://github.com/PicPeak/picpeak/commit/7766804899768341b78a65d5d795cef4283407b6))
+
+## [3.148.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.147.0-beta.0...v3.148.0-beta.0) (2026-09-28)
+
+
+### Features
+
+* **styling:** UI tokens as the single source, STYLING.md, lint rule and codemod ([#1692](https://github.com/PicPeak/picpeak/issues/1692)) ([f7fe33f](https://github.com/PicPeak/picpeak/commit/f7fe33f4acecf802db1de41446eacd06d79b2086))
+
+## [3.147.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.146.0-beta.0...v3.147.0-beta.0) (2026-09-28)
+
+
+### Features
+
+* **admin:** upload progress bar replaces the blocking modal, cards lose their shadow ([#1691](https://github.com/PicPeak/picpeak/issues/1691)) ([27bc170](https://github.com/PicPeak/picpeak/commit/27bc170f6bd33e75268acf20b7463a34c34bc6dc))
+
+## [3.146.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.145.1-beta.0...v3.146.0-beta.0) (2026-09-28)
+
+
+### Features
+
+* **admin:** one sidebar, sections take over the menu, one page header ([#1689](https://github.com/PicPeak/picpeak/issues/1689)) ([fcca6d0](https://github.com/PicPeak/picpeak/commit/fcca6d02e5b18a8b306b7f3c9c36350699684e4a))
+* **settings:** one sticky save bar with dirty state and a leave guard on every settings tab ([#1693](https://github.com/PicPeak/picpeak/issues/1693)) ([2cb6152](https://github.com/PicPeak/picpeak/commit/2cb6152c137606f20c8f45de4bf16b8c5225a6a3))
+
+## [3.145.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.145.0-beta.0...v3.145.1-beta.0) (2026-09-27)
+
+
+### Bug Fixes
+
+* **events:** move the objects through the storage backend when an event is renamed ([#1696](https://github.com/PicPeak/picpeak/issues/1696)) ([9bbe784](https://github.com/PicPeak/picpeak/commit/9bbe7848c7365ff977008c447b63c27153b6e653))
+* **gallery:** fetch the hero ahead of Mosaic's tiles, and lazy-load Mosaic ([#1697](https://github.com/PicPeak/picpeak/issues/1697)) ([74216de](https://github.com/PicPeak/picpeak/commit/74216de62d0ad75c68949fe5e0fc529d2899e736))
+
+## [3.145.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.144.2-beta.0...v3.145.0-beta.0) (2026-09-25)
+
+
+### Features
+
+* **admin:** make Client Access findable when creating an event ([#1686](https://github.com/PicPeak/picpeak/issues/1686)) ([421584d](https://github.com/PicPeak/picpeak/commit/421584d0827efbef9f0430a80728b1ab9e03de0d))
+* **gallery:** a camera button on the guest upload for phones whose picker hides the camera ([#1687](https://github.com/PicPeak/picpeak/issues/1687)) ([e8516d3](https://github.com/PicPeak/picpeak/commit/e8516d36ff369a40e7811aa9916b0d038ee280cf))
+
+## [3.144.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.144.1-beta.0...v3.144.2-beta.0) (2026-09-25)
+
+
+### Bug Fixes
+
+* **documents:** compact, consistent quote and invoice PDFs ([#1658](https://github.com/PicPeak/picpeak/issues/1658)) ([df83400](https://github.com/PicPeak/picpeak/commit/df834007443ea6c15e9b2b78e98cde0ca1fb8489))
+
+## [3.144.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.144.0-beta.0...v3.144.1-beta.0) (2026-09-25)
+
+
+### Bug Fixes
+
+* **downloads:** keep EXIF, XMP and IPTC on resized and watermarked downloads ([#1678](https://github.com/PicPeak/picpeak/issues/1678)) ([d416c04](https://github.com/PicPeak/picpeak/commit/d416c049f8297c2c7358dfa6c924b2dc1ad709ad))
+* **email:** queued mail left to the column default never came due on SQLite ([#1681](https://github.com/PicPeak/picpeak/issues/1681)) ([ec1dbac](https://github.com/PicPeak/picpeak/commit/ec1dbac6b3ce2ed13c607a2cc9f78e64b07e8b55))
+
+## [3.144.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.143.0-beta.0...v3.144.0-beta.0) (2026-09-25)
+
+
+### Features
+
+* **i18n:** complete the Slovenian locale ([#1676](https://github.com/PicPeak/picpeak/issues/1676)) ([d773c76](https://github.com/PicPeak/picpeak/commit/d773c76bea88bfbf5077372730d48871a7e7cedd))
+
+## [3.143.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.142.2-beta.0...v3.143.0-beta.0) (2026-09-25)
+
+
+### Features
+
+* **i18n:** complete Brazilian Portuguese for guest-facing screens ([#1657](https://github.com/PicPeak/picpeak/issues/1657)) ([8fafcca](https://github.com/PicPeak/picpeak/commit/8fafcca27815e3a4c66c5c8fa445dbdd667642ae))
+
+## [3.142.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.142.1-beta.0...v3.142.2-beta.0) (2026-09-25)
+
+
+### Bug Fixes
+
+* **audit:** ISO processing claim, tunable watcher window, issuer on every auxiliary jwt.verify ([#1673](https://github.com/PicPeak/picpeak/issues/1673)) ([e507c17](https://github.com/PicPeak/picpeak/commit/e507c17e6511177f7c96e5169516c7f327d3151d))
+* **security:** generic admin 500 bodies, no swallowed stats writes, tighter preview and analytics sandboxes ([#1672](https://github.com/PicPeak/picpeak/issues/1672)) ([652e5ba](https://github.com/PicPeak/picpeak/commit/652e5ba826a1ee54adec4606dccd82ccf210b159))
+* **setup:** super_admin-only wizard completion, documented photos mounts, typed customer admin envelopes ([#1671](https://github.com/PicPeak/picpeak/issues/1671)) ([bbbc0ff](https://github.com/PicPeak/picpeak/commit/bbbc0ffbc1002906e60d51b81573651be939dbc6))
+
+## [3.142.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.142.0-beta.0...v3.142.1-beta.0) (2026-09-24)
+
+
+### Bug Fixes
+
+* **archives:** read, restore and download event archives through the storage backend ([#1659](https://github.com/PicPeak/picpeak/issues/1659)) ([c606de3](https://github.com/PicPeak/picpeak/commit/c606de332847a1b8e6fc0c5194713bac01198668))
+* **auth:** audit cleanup bundle: dead change-password route, single backup mount, stricter roles fallback, one replica ([#1661](https://github.com/PicPeak/picpeak/issues/1661)) ([4dfd463](https://github.com/PicPeak/picpeak/commit/4dfd463205b60d86080e2508323bf4b1fd3be0d7))
+* **backup:** approvable internal S3 endpoints, a real connection test and honest backup status ([#1642](https://github.com/PicPeak/picpeak/issues/1642)) ([4634f09](https://github.com/PicPeak/picpeak/commit/4634f09379ba6b0cbe3b04acb3dbde82b0a28e3e))
+* **backup:** ask for the rsync SSH key file path, not the key ([#1644](https://github.com/PicPeak/picpeak/issues/1644)) ([dc7d5e6](https://github.com/PicPeak/picpeak/commit/dc7d5e616e77de17071eea0ebaf3a93d82c06db8))
+* **backup:** stop the form from moving a cron schedule, and mark the selected destination ([#1643](https://github.com/PicPeak/picpeak/issues/1643)) ([d2efcd1](https://github.com/PicPeak/picpeak/commit/d2efcd150106e7b051dbb8eb3e2b9938e0e85006))
+* **docker:** mount /backup in the production compose and let the entrypoint own it ([#1664](https://github.com/PicPeak/picpeak/issues/1664)) ([14c94cd](https://github.com/PicPeak/picpeak/commit/14c94cd4c057c7bd88488930edf136d28e3805a5))
+* **events:** require at least six characters for a client password ([#1666](https://github.com/PicPeak/picpeak/issues/1666)) ([82ae07a](https://github.com/PicPeak/picpeak/commit/82ae07af87f860b065243282b8ddc19c4e91fd23))
+* **gallery:** serve still images at enhanced and maximum protection instead of a dead token bounce ([#1667](https://github.com/PicPeak/picpeak/issues/1667)) ([87b4ef3](https://github.com/PicPeak/picpeak/commit/87b4ef3ada16b13426148b6e406acf031e5642ed))
+* **images:** decide a resize is unneeded from the delivered orientation ([#1645](https://github.com/PicPeak/picpeak/issues/1645)) ([2c3f1b5](https://github.com/PicPeak/picpeak/commit/2c3f1b5c57d00c5283ccbad5bd3118274e14bb8a))
+* **security:** contain watermark and archive paths on read and on .picpeak import ([#1660](https://github.com/PicPeak/picpeak/issues/1660)) ([89b579f](https://github.com/PicPeak/picpeak/commit/89b579f8fee9b8b2226472e0b39bf7fddabd44ce))
+* **security:** pin rsync host keys, longer upload codes with a per-network lockout, constant-time image token compare ([#1662](https://github.com/PicPeak/picpeak/issues/1662)) ([599bf03](https://github.com/PicPeak/picpeak/commit/599bf034645d6b52cbfbb644e0b231acfb5771d5))
+* **transfers:** stream downloads through the error-handling helper ([#1663](https://github.com/PicPeak/picpeak/issues/1663)) ([e933fb3](https://github.com/PicPeak/picpeak/commit/e933fb36fae021c2770d6c047f31ec09dcb8cbe9))
+
+## [3.142.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.141.2-beta.0...v3.142.0-beta.0) (2026-09-24)
+
+
+### Features
+
+* **api:** resized renditions and preview images on the v1 photo routes ([#1628](https://github.com/PicPeak/picpeak/issues/1628)) ([16e7fdf](https://github.com/PicPeak/picpeak/commit/16e7fdf292542945d2287ed4bcf0c377d3092260))
+
+## [3.141.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.141.1-beta.0...v3.141.2-beta.0) (2026-09-23)
+
+
+### Documentation
+
+* **contributing:** host PR screenshots on the pr-assets branch ([#1637](https://github.com/PicPeak/picpeak/issues/1637)) ([cfa6b24](https://github.com/PicPeak/picpeak/commit/cfa6b24f4f0f677e8baa920542ca5a1d6c83931c))
+
+## [3.141.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.141.0-beta.0...v3.141.1-beta.0) (2026-09-23)
+
+
+### Bug Fixes
+
+* **backup:** store document paths relative to the storage root ([#1580](https://github.com/PicPeak/picpeak/issues/1580)) ([951f8f2](https://github.com/PicPeak/picpeak/commit/951f8f20b3d0280f90bca42c47033168b4b0dd77))
+
+## [3.141.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.140.0-beta.0...v3.141.0-beta.0) (2026-09-23)
+
+
+### Features
+
+* **contracts:** signing lifecycle, declarations, reminders, integrity report and key rotation ([#1577](https://github.com/PicPeak/picpeak/issues/1577)) ([68d9cbd](https://github.com/PicPeak/picpeak/commit/68d9cbde9621fbf934bb48d66f99ae857c75853c))
+
+## [3.140.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.139.0-beta.0...v3.140.0-beta.0) (2026-09-23)
+
+
+### Features
+
+* **contracts:** render worker, publish check, placeholder picker, editor UX, pre-send review, PDF layout and uploaded fonts ([#1579](https://github.com/PicPeak/picpeak/issues/1579)) ([5cc734f](https://github.com/PicPeak/picpeak/commit/5cc734f7ab438e9df856a66d1ca470fe1daa0664))
+
+## [3.139.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.138.0-beta.0...v3.139.0-beta.0) (2026-09-23)
+
+
+### Features
+
+* **documents:** document pages, requests, notifications, formats, scanner and abuse signals ([#1578](https://github.com/PicPeak/picpeak/issues/1578)) ([44f39d2](https://github.com/PicPeak/picpeak/commit/44f39d226995df112845f5d455f8b7278f79c122))
+
+## [3.138.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.137.0-beta.0...v3.138.0-beta.0) (2026-09-23)
+
+
+### Features
+
+* **crm:** customer group filters, bulk assignment, create flow and segments ([#1576](https://github.com/PicPeak/picpeak/issues/1576)) ([6b03e73](https://github.com/PicPeak/picpeak/commit/6b03e737859e113c708e7f22d8ad4dc10ca35ce2))
+* **gallery:** uploader names and photo credits ([#1569](https://github.com/PicPeak/picpeak/issues/1569)) ([d1989ef](https://github.com/PicPeak/picpeak/commit/d1989ef6eea762059eb0ceebb94c71cb7aa3d686))
+
+## [3.137.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.136.0-beta.0...v3.137.0-beta.0) (2026-09-23)
+
+
+### Features
+
+* **downloads:** per-event download limit ([#1568](https://github.com/PicPeak/picpeak/issues/1568)) ([f131c8b](https://github.com/PicPeak/picpeak/commit/f131c8b254e9df5aac01867624ad03e9c2002bd1))
+
+
+### Bug Fixes
+
+* **db:** scope pg_indexes lookups to the current schema ([#1629](https://github.com/PicPeak/picpeak/issues/1629)) ([95ecfc6](https://github.com/PicPeak/picpeak/commit/95ecfc6f40d886c36bee92a4f714fb216bc73b32))
+* **security:** cap feedback and protected-image requests per network ([#1575](https://github.com/PicPeak/picpeak/issues/1575)) ([06dcd5e](https://github.com/PicPeak/picpeak/commit/06dcd5ea859ed199560aa1f2afeec6cf593b3445))
+
+## [3.136.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.135.3-beta.0...v3.136.0-beta.0) (2026-09-23)
+
+
+### Features
+
+* **api:** download original photos and videos with an API token ([#1582](https://github.com/PicPeak/picpeak/issues/1582)) ([1b505c1](https://github.com/PicPeak/picpeak/commit/1b505c1f244835de9f0fa2d27e9713af6af9c142))
+
+
+### Bug Fixes
+
+* bump nodemon for minimatch and split restore roots on path.delimiter ([#1613](https://github.com/PicPeak/picpeak/issues/1613)) ([525e11b](https://github.com/PicPeak/picpeak/commit/525e11b61efa16ff4f2edaa9f9e38b85b06de1d0))
+* **contracts:** claim a contract before converting it to an invoice ([#1608](https://github.com/PicPeak/picpeak/issues/1608)) ([e4209f5](https://github.com/PicPeak/picpeak/commit/e4209f55c0499ac77c20d398b2c40de10675e0c0))
+* **contracts:** release a quote's converted_contract_id when its contract dies unsigned ([#1601](https://github.com/PicPeak/picpeak/issues/1601)) ([fd49cad](https://github.com/PicPeak/picpeak/commit/fd49cad2c6032be77b2f58b946444a23aa903be2))
+* **crm:** cancel and redact queued email on customer erasure ([#1598](https://github.com/PicPeak/picpeak/issues/1598)) ([fcfcbe3](https://github.com/PicPeak/picpeak/commit/fcfcbe30a1cf661ad057c8a4c3d698b36ba477b3))
+* **customer-portal:** clear the query cache on logout and session loss ([#1604](https://github.com/PicPeak/picpeak/issues/1604)) ([aedb773](https://github.com/PicPeak/picpeak/commit/aedb7732518414f953f834e685f9a599d7143d2a))
+* **documents:** bound the PDF check queue and refuse without a worker ([#1619](https://github.com/PicPeak/picpeak/issues/1619)) ([105f6be](https://github.com/PicPeak/picpeak/commit/105f6be4d0eb35325a34e933839710c4c23c016d))
+* **documents:** make the purge claim survive a crash mid-delete ([#1599](https://github.com/PicPeak/picpeak/issues/1599)) ([cc1a57b](https://github.com/PicPeak/picpeak/commit/cc1a57bf265bd063f901be83c621bb33005f138a))
+* **feedback:** sweep stale feedback_rate_limits rows ([#1597](https://github.com/PicPeak/picpeak/issues/1597)) ([b9bb5ad](https://github.com/PicPeak/picpeak/commit/b9bb5adc287c97dc9eb9b356bb7cb0b06e0ca062))
+* gallery auto-login race, download fallback, jest env, create-event toast ([#1611](https://github.com/PicPeak/picpeak/issues/1611)) ([a58af39](https://github.com/PicPeak/picpeak/commit/a58af39e29866f73879838144e1e2164c70c83fd))
+* **gallery:** re-key legacy feedback identities on first contact ([#1606](https://github.com/PicPeak/picpeak/issues/1606)) ([73f305d](https://github.com/PicPeak/picpeak/commit/73f305d556dc73090e1acf4e8c42e4fffe6f8dc9))
+* **nginx:** forward Host with port via $http_host ([#1612](https://github.com/PicPeak/picpeak/issues/1612)) ([d7612cc](https://github.com/PicPeak/picpeak/commit/d7612cc6141e537a06932231e9644786f16ee652))
+* **restore:** clear tables the archive's manifest doesn't list ([#1600](https://github.com/PicPeak/picpeak/issues/1600)) ([0e30965](https://github.com/PicPeak/picpeak/commit/0e30965f39380982dd701d03dfd23fc334d4901b))
+* **security:** count an IPv6 /64 as one client in the feedback and secure-image limiters ([#1570](https://github.com/PicPeak/picpeak/issues/1570)) ([10086f3](https://github.com/PicPeak/picpeak/commit/10086f304ea502f86052c2c8636f8b9a6d68ca2b))
+
+## [3.135.3-beta.0](https://github.com/PicPeak/picpeak/compare/v3.135.2-beta.0...v3.135.3-beta.0) (2026-09-23)
+
+
+### Bug Fixes
+
+* tighten admin permission boundaries (backup manifest, settings writers, SSO email linking, Super Admin accounts, workflow emails) ([#1540](https://github.com/PicPeak/picpeak/issues/1540)) ([5e705db](https://github.com/PicPeak/picpeak/commit/5e705dbb0d84ecb11bfa1397b0d8b8820632c441))
+
+## [3.135.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.135.1-beta.0...v3.135.2-beta.0) (2026-09-22)
+
+
+### Bug Fixes
+
+* **security:** enforce account, gallery and integration safeguards ([#1571](https://github.com/PicPeak/picpeak/issues/1571)) ([74bd6c8](https://github.com/PicPeak/picpeak/commit/74bd6c8844a9eaea2dbfd76ff7f365b84a2d1506))
+
+## [3.135.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.135.0-beta.0...v3.135.1-beta.0) (2026-09-21)
+
+
+### Bug Fixes
+
+* **portal:** colour every customer-surface status through the theme tokens ([#1552](https://github.com/PicPeak/picpeak/issues/1552)) ([1f2b306](https://github.com/PicPeak/picpeak/commit/1f2b3066edcb9e3abc10afc7b93a160e945bd3f3))
+
+## [3.135.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.134.1-beta.0...v3.135.0-beta.0) (2026-09-21)
+
+
+### Features
+
+* **contracts:** freeze what a contract costs, not only what it says ([#1548](https://github.com/PicPeak/picpeak/issues/1548)) ([e87e979](https://github.com/PicPeak/picpeak/commit/e87e97910da29a169c631a86348d443574862157))
+* **crm:** customer groups with colour chips, filtering and archiving ([#1539](https://github.com/PicPeak/picpeak/issues/1539)) ([760e62d](https://github.com/PicPeak/picpeak/commit/760e62decbdaeca47231911e805f56daab3325dc))
+
+
+### Bug Fixes
+
+* **branding:** name the second save button on the Branding page ([#1551](https://github.com/PicPeak/picpeak/issues/1551)) ([941542b](https://github.com/PicPeak/picpeak/commit/941542b9b4321bd434f5976395bf92eabcd987ac))
+* **contracts:** close the signing gaps found auditing issue 1446 ([#1545](https://github.com/PicPeak/picpeak/issues/1545)) ([559fdc4](https://github.com/PicPeak/picpeak/commit/559fdc4c7b929523d5e9d3b2d19901d6eed74db0))
+* **documents:** close the gaps the issue 1444 audit found in what shipped ([#1549](https://github.com/PicPeak/picpeak/issues/1549)) ([5048813](https://github.com/PicPeak/picpeak/commit/5048813512d6c754415dd78f13b1b034f51865cf))
+* **gallery:** stop lightbox pinch-zoom flickering in touchscreen Safari ([#1542](https://github.com/PicPeak/picpeak/issues/1542)) ([6d2e842](https://github.com/PicPeak/picpeak/commit/6d2e842274cddc87a2986098284d51867e9a0b49))
+* **security:** close the IPv6 rate-limit bypass and stop answering scanner probes with the SPA shell ([#1554](https://github.com/PicPeak/picpeak/issues/1554)) ([2dbc2b6](https://github.com/PicPeak/picpeak/commit/2dbc2b69206cd701ab669ffcba0f56791d6ef4af))
+* **transfers:** keep files picked in the create dialog ([#1543](https://github.com/PicPeak/picpeak/issues/1543)) ([1e276fe](https://github.com/PicPeak/picpeak/commit/1e276fe6324baaf0a1c6449496447ea671043055))
+* **video:** let the admin regenerate button repair video thumbnails ([#1557](https://github.com/PicPeak/picpeak/issues/1557)) ([2260e55](https://github.com/PicPeak/picpeak/commit/2260e55d36ce782eac362a1d81c5a53a127d5660))
+
+## [3.134.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.134.0-beta.0...v3.134.1-beta.0) (2026-09-20)
+
+
+### Bug Fixes
+
+* **video:** regenerate missing thumbnails for already-uploaded videos ([#1417](https://github.com/PicPeak/picpeak/issues/1417)) ([5f387ee](https://github.com/PicPeak/picpeak/commit/5f387eec1c9c19a6231e2fb276afd5bd879a5b46))
+
+## [3.134.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.133.1-beta.0...v3.134.0-beta.0) (2026-09-18)
+
+
+### Features
+
+* **crm:** quote templates, service catalogue, contract designer, signatures v2 and the customer portal ([#1464](https://github.com/PicPeak/picpeak/issues/1464)) ([32fe2ba](https://github.com/PicPeak/picpeak/commit/32fe2ba02af9e54f5049825f96bedd9652d81608))
+
+## [3.133.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.133.0-beta.0...v3.133.1-beta.0) (2026-09-17)
+
+
+### Bug Fixes
+
+* **invoices:** refuse a payment-check link whose expiry can't be read ([#1535](https://github.com/PicPeak/picpeak/issues/1535)) ([d7f9633](https://github.com/PicPeak/picpeak/commit/d7f96333686216f5aa5fc6b919182aed663b9a60))
+
+## [3.133.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.10-beta.0...v3.133.0-beta.0) (2026-09-17)
+
+
+### Features
+
+* **accounting:** record an append-only change history for accounting records ([#1529](https://github.com/PicPeak/picpeak/issues/1529)) ([54f7f3d](https://github.com/PicPeak/picpeak/commit/54f7f3d8d78167f16027dfe5a7a197c4cf2f4adf))
+* **accounting:** record changes to accounting configuration and customer billing data ([#1531](https://github.com/PicPeak/picpeak/issues/1531)) ([9505e66](https://github.com/PicPeak/picpeak/commit/9505e66cf70e07c419c379c7916399a32a9de9d9))
+
+
+### Bug Fixes
+
+* **deps:** update vulnerable test tooling dependencies ([#1522](https://github.com/PicPeak/picpeak/issues/1522)) ([7b11ce7](https://github.com/PicPeak/picpeak/commit/7b11ce75ba879db11f39bd3764243a19a60643a9))
+* **gallery:** stop returning personal feedback columns from my-feedback ([#1526](https://github.com/PicPeak/picpeak/issues/1526)) ([e6279ab](https://github.com/PicPeak/picpeak/commit/e6279ab43b250f71c88f7abe9e8fd18772281da0))
+* **guests:** harden guest merge validation, auditing and concurrent likes ([#1527](https://github.com/PicPeak/picpeak/issues/1527)) ([045e667](https://github.com/PicPeak/picpeak/commit/045e667d0aa23913d2cfd656ab640a610ef65c9e))
+* **invoices:** allocate standalone contract invoice numbers atomically ([#1520](https://github.com/PicPeak/picpeak/issues/1520)) ([8b8da87](https://github.com/PicPeak/picpeak/commit/8b8da87f80de6f5199b01f01bc04c5310b891ea6))
+
+## [3.132.10-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.9-beta.0...v3.132.10-beta.0) (2026-09-16)
+
+
+### Bug Fixes
+
+* **guests:** preserve feedback ownership when merging identities ([#1517](https://github.com/PicPeak/picpeak/issues/1517)) ([65047a7](https://github.com/PicPeak/picpeak/commit/65047a7448bbed5e11ca19e026aa09c606f9f4f3))
+
+## [3.132.9-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.8-beta.0...v3.132.9-beta.0) (2026-09-16)
+
+
+### Bug Fixes
+
+* **crm:** preserve saved line-item order and validate parent references ([#1510](https://github.com/PicPeak/picpeak/issues/1510)) ([bfec89a](https://github.com/PicPeak/picpeak/commit/bfec89a232ec3ac7d73ea0980ea5179867123c4b))
+* **crm:** return the draft id when invoicing a monthly or manual customer ([#1512](https://github.com/PicPeak/picpeak/issues/1512)) ([9dc050e](https://github.com/PicPeak/picpeak/commit/9dc050e80ef8b1796adb1fe4eeb6e44c2de610b5))
+
+## [3.132.8-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.7-beta.0...v3.132.8-beta.0) (2026-09-15)
+
+
+### Bug Fixes
+
+* **gallery:** store in-app browser user agents longer than 255 characters ([#1507](https://github.com/PicPeak/picpeak/issues/1507)) ([b5a858f](https://github.com/PicPeak/picpeak/commit/b5a858f06dccdc9cec3170300a6b229bba403237))
+
+## [3.132.7-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.6-beta.0...v3.132.7-beta.0) (2026-09-15)
+
+
+### Bug Fixes
+
+* **backup:** test the database backup directory a real backup writes to ([#1504](https://github.com/PicPeak/picpeak/issues/1504)) ([fe3de96](https://github.com/PicPeak/picpeak/commit/fe3de968d4709c629d5322ab13e14e4d52e3aac6))
+
+## [3.132.6-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.5-beta.0...v3.132.6-beta.0) (2026-09-15)
+
+
+### Bug Fixes
+
+* **admin:** limit events, archives and event records to what each role may act on ([#1483](https://github.com/PicPeak/picpeak/issues/1483)) ([e5157ba](https://github.com/PicPeak/picpeak/commit/e5157baeb0ad28bff61731eaefd0aa145d6fb3f9))
+* **backend:** enforce single-use and cap limits under concurrent requests ([#1486](https://github.com/PicPeak/picpeak/issues/1486)) ([8db8b8e](https://github.com/PicPeak/picpeak/commit/8db8b8e203d6def6e1d84e60e85538dbf4d2ac99))
+* **backup:** pin every restore download from S3 to the validated endpoint address ([#1477](https://github.com/PicPeak/picpeak/issues/1477)) ([8ec559f](https://github.com/PicPeak/picpeak/commit/8ec559fbf762921d4efe70e3d23087ab7d647af7))
+* **backup:** verify restore dumps, bound imports and keep secrets apart ([#1491](https://github.com/PicPeak/picpeak/issues/1491)) ([9f0e815](https://github.com/PicPeak/picpeak/commit/9f0e81503e8d3091c5d6bcae9b3efdb6a93f32eb))
+* **backup:** write the database dump where the backend can reach it ([#1502](https://github.com/PicPeak/picpeak/issues/1502)) ([acdced6](https://github.com/PicPeak/picpeak/commit/acdced685840caceb902cfef0886e943506d398e))
+* **email:** keep mail passwords and account links out of reach of other servers and readers ([#1485](https://github.com/PicPeak/picpeak/issues/1485)) ([89beb01](https://github.com/PicPeak/picpeak/commit/89beb01f969b80dbc00b55e20ff79086dc0e618d))
+* **frontend:** keep custom head HTML out of the admin UI, drop dead feedback limits ([#1489](https://github.com/PicPeak/picpeak/issues/1489)) ([c95d207](https://github.com/PicPeak/picpeak/commit/c95d2070979d5a7f17a8d9ae57f2932e4a3831c9))
+* **gallery:** end gallery sessions when their password, portal session or admin idle time ends ([#1497](https://github.com/PicPeak/picpeak/issues/1497)) ([4791c88](https://github.com/PicPeak/picpeak/commit/4791c886cae424cd080e7cb87c6c44ccc12f2701))
+* **gallery:** enforce category downloads, hidden-photo feedback and photo caps for guests ([#1495](https://github.com/PicPeak/picpeak/issues/1495)) ([dfc8ade](https://github.com/PicPeak/picpeak/commit/dfc8ade545d2c5a0081346cb226a4b9f149e36d2))
+* **permissions:** keep SSO role mappings, backup destinations and restores within the actor's own power ([#1493](https://github.com/PicPeak/picpeak/issues/1493)) ([8c9d933](https://github.com/PicPeak/picpeak/commit/8c9d933e1db25ff5fc20b9329fda9cf71c015c27))
+* **uploads:** serve and accept only image files from the public logo trees ([#1478](https://github.com/PicPeak/picpeak/issues/1478)) ([3a7a85c](https://github.com/PicPeak/picpeak/commit/3a7a85c2808eaaacda077d728d2b590b32a878bd))
+
+
+### Documentation
+
+* **security:** mark the 3.46.x stable line as end of life ([#1481](https://github.com/PicPeak/picpeak/issues/1481)) ([34cc9e3](https://github.com/PicPeak/picpeak/commit/34cc9e3503ab9267edae944f25cbdbd633a48bc7))
+
+## [3.132.5-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.4-beta.0...v3.132.5-beta.0) (2026-09-15)
+
+
+### Bug Fixes
+
+* **contracts:** accept PDF files in the signed-contract uploads ([#1471](https://github.com/PicPeak/picpeak/issues/1471)) ([d8fec13](https://github.com/PicPeak/picpeak/commit/d8fec139db2bac1dd480ec20c6524319a0b1bd8f))
+
+## [3.132.4-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.3-beta.0...v3.132.4-beta.0) (2026-09-15)
+
+
+### Bug Fixes
+
+* **contracts:** keep signing tokens out of admin views and make signature writes atomic ([#1469](https://github.com/PicPeak/picpeak/issues/1469)) ([72367ff](https://github.com/PicPeak/picpeak/commit/72367ffa6ed3cc5570bc2ad32288237a6c0ab173))
+* **contracts:** make saving a contract draft work and fail safely ([#1460](https://github.com/PicPeak/picpeak/issues/1460)) ([16c15ca](https://github.com/PicPeak/picpeak/commit/16c15cacc3dcdd097c434ac558763cbd95d515f1))
+* **crm:** stop quote saves, hour entries and payments stalling on SQLite ([#1462](https://github.com/PicPeak/picpeak/issues/1462)) ([82bea56](https://github.com/PicPeak/picpeak/commit/82bea560d2f998bd9f608ff452159a342a5f639d))
+* **crm:** verify the customer before a contract or quote link shows or acts on their data ([#1465](https://github.com/PicPeak/picpeak/issues/1465)) ([5c1f0da](https://github.com/PicPeak/picpeak/commit/5c1f0da51ed37594dba93d6c09a3788859a39d45))
+* **gallery:** tell an admin preview blocked on a password change what to do ([#1454](https://github.com/PicPeak/picpeak/issues/1454)) ([d7c2c58](https://github.com/PicPeak/picpeak/commit/d7c2c5814a46ef3243f55413bca67cad87f0b4fe))
+* **images:** resolve the protected-image client address through trust proxy ([#1467](https://github.com/PicPeak/picpeak/issues/1467)) ([6159fc2](https://github.com/PicPeak/picpeak/commit/6159fc2aa92aa715896d58bcd424ac39e9c06dc2))
+* **uploads:** accept iPhone DNGs in both byte orders and under any reported type ([#1458](https://github.com/PicPeak/picpeak/issues/1458)) ([3c59c84](https://github.com/PicPeak/picpeak/commit/3c59c84dd68b0752b0ef4499b1c07e4555b4ae43))
+
+## [3.132.3-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.2-beta.0...v3.132.3-beta.0) (2026-09-14)
+
+
+### Bug Fixes
+
+* **gallery:** honour must_change_password on the admin preview ([#1439](https://github.com/PicPeak/picpeak/issues/1439)) ([d64728e](https://github.com/PicPeak/picpeak/commit/d64728ed8299ad4492a115775a8a888cd257e4b7))
+
+## [3.132.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.1-beta.0...v3.132.2-beta.0) (2026-09-14)
+
+
+### Bug Fixes
+
+* **api:** stop the roles fallback selecting the column that triggered it ([#1436](https://github.com/PicPeak/picpeak/issues/1436)) ([e861306](https://github.com/PicPeak/picpeak/commit/e861306e47abfe86ea2b8c64cefcae08364d091d))
+* **auth:** keep must_change_password in the roles-join fallback ([#1434](https://github.com/PicPeak/picpeak/issues/1434)) ([ced21fb](https://github.com/PicPeak/picpeak/commit/ced21fb13e8a3b81b22436b92dc4dab793d033be))
+
+## [3.132.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.132.0-beta.0...v3.132.1-beta.0) (2026-09-14)
+
+
+### Bug Fixes
+
+* **archives:** stop restore from dropping videos and rewriting the row ([#1425](https://github.com/PicPeak/picpeak/issues/1425)) ([d37c0c8](https://github.com/PicPeak/picpeak/commit/d37c0c8eadc4cd15e587b228df79fb3d862a08b2))
+
 ## [3.132.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.131.8-beta.0...v3.132.0-beta.0) (2026-09-13)
 
 

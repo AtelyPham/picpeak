@@ -1,3 +1,12 @@
+// Set the test environment at module scope so it lands before any test file
+// requires knexfile (which calls dotenv.config() at load). A local .env with
+// DATABASE_CLIENT=pg would otherwise point the suite at the developer's real
+// Postgres — dotenv does not override vars already set here (fork survey A5).
+// Only a default: an explicit `DATABASE_CLIENT=pg npx jest …` from the shell
+// is how engine-sensitive changes are checked on Postgres, and must win.
+process.env.NODE_ENV = 'test';
+if (!process.env.DATABASE_CLIENT) process.env.DATABASE_CLIENT = 'sqlite3';
+
 // Supertest 6 binds an IPv6 wildcard listener but hardcodes an IPv4 URL.
 // macOS can allocate that IPv6 port while a different IPv4 service owns it.
 // Address the listener's actual family so a test cannot reach that service.
@@ -12,6 +21,11 @@ jest.mock('supertest/lib/test', () => {
   };
   return Test;
 });
+
+// PDFs render in this process under test, so spies on the renderers (and on
+// PDFKit) see the calls; the render worker has its own suite
+// (__tests__/services/pdfRenderIsolation.test.js).
+if (!process.env.PDF_RENDER_ISOLATION) process.env.PDF_RENDER_ISOLATION = 'off';
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test';

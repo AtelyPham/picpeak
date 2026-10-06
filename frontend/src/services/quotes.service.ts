@@ -3,6 +3,10 @@
  * /api/public/quotes/:token for the customer-facing accept/decline page.
  */
 import { api } from '../config/api';
+import type {
+  BoundTo, LineKind, LineUnit, PriceMode, PromotionSnapshot, RateSource,
+} from '../utils/lineItemTotals';
+import { documentAccessHeaders, type DocumentAccessGrant, type DocumentVerificationSent } from '../utils/documentAccess';
 
 export type QuoteStatus = 'draft' | 'sent' | 'accepted' | 'declined' | 'expired' | 'converted';
 export type QuoteSort =
@@ -33,6 +37,20 @@ export interface QuoteLineItem {
    * PDF and customer view. Smaller, italic. Max 2000 chars.
    */
   detailsText?: string | null;
+  // Migration 220 (#1451).
+  lineKind?: LineKind;
+  unit?: LineUnit | null;
+  /** Optional add-on; unselected ones stay out of totals, PDF and conversion. */
+  isOptional?: boolean;
+  selected?: boolean;
+  /** 'hour' | 'day' when the price comes from a rate. */
+  priceMode?: PriceMode | null;
+  rateSource?: RateSource | null;
+  /** Quantity follows the quote-wide hours / days. */
+  boundTo?: BoundTo | null;
+  promotionSnapshot?: PromotionSnapshot | null;
+  /** Wire-only: a promotion ticked in the editor; the server resolves it. */
+  promotionId?: number | null;
 }
 
 export interface QuoteSummary {
@@ -45,6 +63,15 @@ export interface QuoteSummary {
   customerAccountId: number;
   /** Migration 121 — Project Overview link (null when unlinked). */
   projectId: number | null;
+  /** Migration 220 — quote-wide hours / days that bound lines follow. */
+  hours?: number | null;
+  days?: number | null;
+  /** The template (and version) this quote was created from, if any. */
+  sourceTemplateId?: number | null;
+  sourceTemplateVersion?: number | null;
+  /** #1451 phase 2 — the add-on choice fixed at acceptance. */
+  selectionAcceptedAt?: string | null;
+  optionalSelection?: QuoteOptionalSelection | null;
   customer: {
     email: string | null;
     displayName: string | null;
@@ -108,6 +135,34 @@ export interface QuoteDetail extends QuoteSummary {
   declineReason: string | null;
   pdfPath: string | null;
   businessBankAccountId: number | null;
+  /** #1451 — what the customer wrote with their acceptance. */
+  customerMessage?: string | null;
+  /** #1451 — every add-on change after the first acceptance, oldest first. */
+  selectionChanges?: QuoteSelectionChange[];
+  /** #1451 — accepted and no contract / event yet: the add-ons can still be changed here. */
+  addOnsEditable?: boolean;
+  /** #1451 — a reissued quote names the quote it replaces, and the other way round. */
+  replacesQuoteId?: number | null;
+  replacesQuoteNumber?: string | null;
+  replacedByQuoteId?: number | null;
+  replacedByQuoteNumber?: string | null;
+}
+
+/** One change of an accepted quote's add-ons (#1451). */
+export interface QuoteSelectionChange {
+  at: string;
+  by: 'customer' | 'admin';
+  adminId: number | null;
+  /** Descriptions of the add-ons booked / removed by this change. */
+  booked: string[];
+  removed: string[];
+  totalBeforeMinor: number;
+  totalAfterMinor: number;
+}
+
+export interface QuoteAddOnsChangeResult extends QuoteWithLineItems {
+  changed: boolean;
+  totalAmountMinor: number;
 }
 
 export interface QuoteWithLineItems {
@@ -170,6 +225,14 @@ export interface LineItemPreset {
   quantityDefault: number;
   displayOrder: number;
   isActive: boolean;
+  // Migration 220 — the presets are the service catalogue.
+  unit?: LineUnit | null;
+  detailsText?: string | null;
+  category?: string | null;
+  vatCode?: string | null;
+  priceMode?: PriceMode;
+  /** Own rate for per-hour / per-day items; null = customer / default rate. */
+  pinnedRateMinor?: number | null;
 }
 
 export interface QuoteCreatePayload {
@@ -178,13 +241,14 @@ export interface QuoteCreatePayload {
   currency?: string;
   issueDate?: string;
   validUntil?: string;
-  eventName?: string;
-  eventDate?: string;
+  // null clears the field on save (the editor sends a cleared field as null).
+  eventName?: string | null;
+  eventDate?: string | null;
   eventType?: string | null;
   bookingWorkflowId?: number | null;
-  eventTimeStart?: string;
-  eventTimeEnd?: string;
-  expectedDurationHours?: number;
+  eventTimeStart?: string | null;
+  eventTimeEnd?: string | null;
+  expectedDurationHours?: number | null;
   paymentTermTemplateId?: number;
   /** Migration 124 — split payment-term picker. Both must be set
    *  together for the new path to engage on the backend. */
@@ -198,14 +262,17 @@ export interface QuoteCreatePayload {
   /** Migration 130 — snapshot of the chosen output VAT code (null = custom rate). */
   vatCode?: string | null;
   shippingAmountMinor?: number;
-  introText?: string;
-  outroText?: string;
-  internalNotes?: string;
-  ccPdfEmail?: string;
+  introText?: string | null;
+  outroText?: string | null;
+  internalNotes?: string | null;
+  ccPdfEmail?: string | null;
   businessBankAccountId?: number;
   /** Migration 121 — optional link to a Project Overview project.
    *  null clears the link; undefined leaves it unchanged. */
   projectId?: number | null;
+  /** Migration 220 — quote-wide hours / days that bound lines follow. */
+  hours?: number | null;
+  days?: number | null;
   lineItems: QuoteLineItem[];
 }
 
@@ -275,6 +342,20 @@ export const quotesService = {
     return data.data || data;
   },
 
+  /** Reissue an accepted quote (#1451): the server declines it (the customer's
+   *  link stops working) and returns the draft copy that replaces it. */
+  async reissue(id: number, reason?: string): Promise<{ quoteId: number }> {
+    const { data } = await api.post(`/admin/quotes/${id}/reissue`, reason ? { reason } : {});
+    return data.data || data;
+  },
+
+  /** Change the add-ons of an accepted quote (#1451): the top-level positions
+   *  to have booked. The server stores a new PDF and emails the customer. */
+  async changeAddOns(id: number, selectedOptional: number[]): Promise<QuoteAddOnsChangeResult> {
+    const { data } = await api.post(`/admin/quotes/${id}/add-ons`, { selectedOptional });
+    return data.data || data;
+  },
+
   async convert(id: number): Promise<{ eventId: number; alreadyConverted: boolean }> {
     const { data } = await api.post(`/admin/quotes/${id}/convert`);
     return data.data || data;
@@ -292,8 +373,8 @@ export const quotesService = {
    *  contract detail page exposes its own convert-to-event /
    *  convert-to-invoice buttons that re-enter the quote conversion
    *  path via the contract's source_quote_id. */
-  async convertToContract(id: number): Promise<{ contractId: number; alreadyConverted: boolean }> {
-    const { data } = await api.post(`/admin/quotes/${id}/convert-to-contract`);
+  async convertToContract(id: number, contractTemplateId?: number | null): Promise<{ contractId: number; alreadyConverted: boolean }> {
+    const { data } = await api.post(`/admin/quotes/${id}/convert-to-contract`, contractTemplateId ? { contractTemplateId } : {});
     return data.data || data;
   },
 
@@ -308,13 +389,32 @@ export const quotesService = {
     return URL.createObjectURL(res.data);
   },
 
-  async listLineItemPresets(): Promise<{ presets: LineItemPreset[] }> {
-    const { data } = await api.get('/admin/quotes/presets/line-items');
+  /** The editor's picker wants active items; the catalogue page lists archived ones too. */
+  async listLineItemPresets(opts: { includeInactive?: boolean } = {}): Promise<{ presets: LineItemPreset[] }> {
+    const { data } = await api.get('/admin/quotes/presets/line-items', {
+      params: opts.includeInactive ? { includeInactive: 'true' } : undefined,
+    });
     return data.data || data;
   },
 
   async createLineItemPreset(payload: Partial<LineItemPreset> & { name: string }): Promise<{ preset: LineItemPreset }> {
     const { data } = await api.post('/admin/quotes/presets/line-items', payload);
+    return data.data || data;
+  },
+
+  async updateLineItemPreset(id: number, payload: Partial<LineItemPreset>): Promise<{ preset: LineItemPreset }> {
+    const { data } = await api.put(`/admin/quotes/presets/line-items/${id}`, payload);
+    return data.data || data;
+  },
+
+  /** Archives the item (it stays on quotes and templates that use it). */
+  async archiveLineItemPreset(id: number): Promise<void> {
+    await api.delete(`/admin/quotes/presets/line-items/${id}`);
+  },
+
+  /** Re-apply today's customer / default rates to a draft's rate-priced lines. */
+  async recalculateRates(id: number): Promise<{ quote: QuoteDetail; lineItems: QuoteLineItem[] }> {
+    const { data } = await api.post(`/admin/quotes/${id}/recalculate-rates`);
     return data.data || data;
   },
 
@@ -355,6 +455,8 @@ export const quotesService = {
 // -------------------------------------------------------------------
 
 export interface PublicQuoteView {
+  /** The full view is only served to a verified visitor (or the portal). */
+  verificationRequired?: false;
   quoteNumber: string;
   status: QuoteStatus;
   language: string;
@@ -386,7 +488,18 @@ export interface PublicQuoteView {
     parentLineItemId: number | null;
     parentPosition: number | null;
     detailsText: string | null;
+    /** Migration 220 — discount lines and units, as on the PDF. */
+    lineKind?: LineKind;
+    unit?: LineUnit | null;
+    promotionName?: string | null;
+    /** #1451 phase 2 — an optional add-on and whether it's selected. */
+    isOptional?: boolean;
+    selected?: boolean;
   }>;
+  /** The add-ons can no longer be changed: accepted and the response window has closed. */
+  selectionLocked?: boolean;
+  /** #1451 — the message the customer sent with their acceptance. */
+  customerMessage?: string | null;
   /** Terms of Service block driven by the global `crm_quotes_tos_*`
    *  settings. When `required` is true, the public page must show a
    *  checkbox the customer ticks before Accept can fire. The text +
@@ -410,20 +523,88 @@ export interface PublicQuoteView {
   } | null;
 }
 
+/**
+ * What the emailed link returns before the visitor has confirmed the one-time
+ * code: the issuer's branding and a masked recipient address, nothing about
+ * the customer or the quote.
+ */
+export interface PublicQuoteShell {
+  verificationRequired: true;
+  language: string;
+  emailHint: string | null;
+  issuer: {
+    companyName: string | null;
+    logoUrl?: string | null;
+    logoUrlDark?: string | null;
+  } | null;
+}
+
+/**
+ * Public response link. Every request after verification carries the access
+ * grant from confirmVerification as the X-Document-Access header.
+ */
 export const publicQuotesService = {
-  async get(token: string): Promise<{ quote: PublicQuoteView }> {
-    const { data } = await api.get(`/public/quotes/${token}`);
+  async get(token: string, grant?: string | null): Promise<{ quote: PublicQuoteView | PublicQuoteShell }> {
+    const { data } = await api.get(`/public/quotes/${token}`, { headers: documentAccessHeaders(grant) });
+    return data.data || data;
+  },
+  /** Email a one-time code to the customer's address on file. */
+  async requestVerification(token: string): Promise<DocumentVerificationSent> {
+    const { data } = await api.post(`/public/quotes/${token}/verification`);
+    return data.data || data;
+  },
+  /** Exchange the emailed code for a short-lived access grant. */
+  async confirmVerification(token: string, code: string): Promise<DocumentAccessGrant> {
+    const { data } = await api.post(`/public/quotes/${token}/verification/confirm`, { code });
+    return data.data || data;
+  },
+  /** Totals for a choice of optional add-ons (positions), computed server-side. */
+  async totals(token: string, selected: number[], grant?: string | null): Promise<PublicSelectionTotals> {
+    const { data } = await api.get(`/public/quotes/${token}/totals`, {
+      params: selected.length ? { selected: selected.join(',') } : {},
+      headers: documentAccessHeaders(grant),
+    });
     return data.data || data;
   },
   async respond(
     token: string,
     action: 'accept' | 'decline',
-    options: { tosAccepted?: boolean } = {},
+    options: {
+      tosAccepted?: boolean;
+      selectedOptional?: number[];
+      expectedTotalMinor?: number;
+      /** A message to the business with the acceptance (max 2000 chars). */
+      customerMessage?: string;
+    } = {},
+    grant?: string | null,
   ): Promise<{ status: QuoteStatus; lockedAt: string }> {
     const { data } = await api.post(`/public/quotes/${token}/respond`, {
       action,
       tosAccepted: options.tosAccepted,
-    });
+      selectedOptional: options.selectedOptional,
+      expectedTotalMinor: options.expectedTotalMinor,
+      customerMessage: options.customerMessage,
+    }, { headers: documentAccessHeaders(grant) });
     return data.data || data;
   },
 };
+
+/** Server totals for an add-on choice on the public quote page (#1451 phase 2). */
+export interface PublicSelectionTotals {
+  selectedOptional: number[];
+  netAmountMinor: number;
+  vatAmountMinor: number;
+  shippingAmountMinor: number;
+  totalAmountMinor: number;
+  lines: Array<{ position: number; lineTotalMinor: number }>;
+}
+
+/** What was chosen when a quote with add-ons was accepted. */
+export interface QuoteOptionalSelection {
+  by: 'customer' | 'admin';
+  selectedOptional: number[];
+  addOns: Array<{ position: number; description: string; selected: boolean }>;
+  netAmountMinor: number;
+  vatAmountMinor: number;
+  totalAmountMinor: number;
+}

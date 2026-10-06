@@ -9,6 +9,7 @@ const { db } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
 const { hasColumnCached } = require('../utils/schemaCache');
 const logger = require('../utils/logger');
+const { auditedUpdate } = require('./accountingHistory');
 
 /**
  * Get all event types
@@ -155,7 +156,9 @@ const createEventType = async (eventTypeData) => {
  * @param {Object} updates - Fields to update
  * @returns {Promise<Object>} - Updated event type
  */
-const updateEventType = async (id, updates) => {
+// `actor` is the admin, recorded in the accounting change history when a slug
+// rename carries over to quotes.
+const updateEventType = async (id, updates, actor = null) => {
   const eventType = await getEventTypeById(id);
   if (!eventType) {
     const error = new Error('Event type not found');
@@ -247,7 +250,8 @@ const updateEventType = async (id, updates) => {
     const evCount = await trx('events').where('event_type', oldSlug).update({ event_type: newSlug });
     let qCount = 0;
     if (quotesHasEventType) {
-      qCount = await trx('quotes').where('event_type', oldSlug).update({ event_type: newSlug });
+      qCount = await auditedUpdate(trx, 'quotes', { event_type: oldSlug }, { event_type: newSlug },
+        { actor, source: 'event_type.rename' });
     }
     // Carry the authored per-type reminder template along (subject/body follow the
     // rename). Guard: never clobber an existing target template for the new slug.

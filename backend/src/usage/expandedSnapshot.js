@@ -1,6 +1,7 @@
 'use strict';
 const { CATALOGS, emptyFeatures } = require('./schema.cjs');
 const { formatBoolean } = require('../utils/dbCompat');
+const { RAW_UPLOAD_EXTENSIONS } = require('../utils/fileSecurityUtils');
 
 const truth = (value) => value === true || value === 1 || value === '1';
 const parse = (value) => {
@@ -62,7 +63,7 @@ async function expandSnapshot(db, { features, flags, used, now, version = 'usage
   const extensions = new Set(String(settings.general_allowed_file_types || 'jpg,jpeg,png,webp')
     .toLowerCase().split(',').map((s) => s.trim().replace(/^\./, '')));
   result.video_uploads.configured = ['mp4', 'm4v', 'webm', 'mov', 'avi'].some((extension) => extensions.has(extension));
-  result.camera_raw_uploads.configured = extensions.has('dng');
+  result.camera_raw_uploads.configured = [...RAW_UPLOAD_EXTENSIONS].some((extension) => extensions.has(extension));
   result.public_site.configured = truth(settings.general_public_site_enabled);
   result.database_backup.configured = truth(settings.database_backup_enabled);
   result.email_webhook.configured = Boolean((process.env.EMAIL_WEBHOOK_URL || '').trim() && (process.env.EMAIL_WEBHOOK_SECRET || '').trim());
@@ -85,7 +86,7 @@ async function expandSnapshot(db, { features, flags, used, now, version = 'usage
     gallery_guest_uploads: 'allow_user_uploads',
     gallery_client_access: 'client_access_enabled', gallery_watermarks: 'watermark_downloads'
   })) result[key].configured = await enabled('events', column);
-  if (['usage.v4', 'usage.v5'].includes(version)) {
+  if (['usage.v4', 'usage.v5', 'usage.v6'].includes(version)) {
     result.gallery_downloads_restricted.configured = await exists('events', ['allow_downloads'], (query) =>
       query.where('allow_downloads', formatBoolean(false)));
   } else {
@@ -122,7 +123,7 @@ async function expandSnapshot(db, { features, flags, used, now, version = 'usage
     query.where({ feedback_enabled: formatBoolean(true), [column]: formatBoolean(true) }));
   result.gallery_guest_accounts.configured = await exists('event_feedback_settings', ['feedback_enabled', 'identity_mode'], (query) =>
     query.where('feedback_enabled', formatBoolean(true)).whereIn('identity_mode', ['guest', 'shared']));
-  if (['usage.v3', 'usage.v4', 'usage.v5'].includes(version)) {
+  if (['usage.v3', 'usage.v4', 'usage.v5', 'usage.v6'].includes(version)) {
     result.gallery_folders.configured = await exists('photo_categories', ['is_folder', 'event_id'], (query) =>
       query.where('is_folder', formatBoolean(true)).where((q) => q.whereNull('event_id').orWhereIn('event_id', db('events').select('id'))));
     result.transfer_upload_links.configured = Boolean(effective.transfers) && await exists('transfers',

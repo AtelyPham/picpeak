@@ -12,6 +12,7 @@ const { ensureSystemBlocksSeeded } = require('../contractBlocksService');
 const { ensureInt } = require('../../utils/numericHelpers');
 const { adminActor, ensureCustomerActive, nextContractNumber } = require('./helpers');
 const { resolveDefaultEventType } = require('../eventTypeService');
+const { auditedInsert, auditedUpdate } = require('../accountingHistory');
 
 
 /**
@@ -26,7 +27,7 @@ const { resolveDefaultEventType } = require('../eventTypeService');
  * paths are gated against the converted_contract_id back-pointer so an
  * admin can't accidentally double-spend the quote.
  */
-async function createFromQuote(quoteId, adminId) {
+async function createFromQuote(quoteId, adminId, { contractTemplateId = null } = {}) {
   // Same self-heal as createContract — the quote-conversion path seeds
   // the contract with every active system block, and the new
   // quote_line_items_table block needs to be present for it to land
@@ -35,6 +36,7 @@ async function createFromQuote(quoteId, adminId) {
 
   const quote = await db('quotes').where({ id: quoteId }).first();
   if (!quote) throw new AppError('Quote not found', 404);
+
   if (quote.status !== 'accepted') {
     throw new AppError(`Cannot convert a quote with status '${quote.status}'`, 409, 'QUOTE_NOT_ACCEPTED');
   }
@@ -47,6 +49,24 @@ async function createFromQuote(quoteId, adminId) {
       409, 'ALREADY_CONVERTED_TO_EVENT',
     );
   }
+
+  // The contract template (#1445), resolved before the transaction — and
+  // after the checks above, so a retry of a finished conversion gets its
+  // contract back even if the template has been archived since: the one
+  // asked for, else the one the quote's template names, else the default.
+  // One asked for must be usable; the quote template's may have been
+  // archived since, which quietly falls back to the default.
+  const templates = require('./templates');
+  let versionId = null;
+  if (contractTemplateId) {
+    versionId = await templates.usablePublishedVersionId(contractTemplateId);
+    if (!versionId) throw new AppError('Pick a published contract template', 400, 'TEMPLATE_VERSION_INVALID');
+  } else if (quote.source_template_id && await hasColumnCached('quote_templates', 'default_contract_template_id')) {
+    const quoteTemplate = await db('quote_templates').where({ id: quote.source_template_id })
+      .select('default_contract_template_id').first();
+    versionId = await templates.usablePublishedVersionId(quoteTemplate && quoteTemplate.default_contract_template_id);
+  }
+  const version = await templates.resolveVersionForNewContract(versionId);
 
   const customer = await db('customer_accounts').where({ id: quote.customer_account_id }).first();
   ensureCustomerActive(customer);
@@ -88,6 +108,8 @@ async function createFromQuote(quoteId, adminId) {
       title,
       intro_text: quote.intro_text || null,
       outro_text: quote.outro_text || null,
+      template_id: version ? version.template_id : null,
+      template_version_id: version ? version.id : null,
       created_by_admin_id: adminId,
       created_at: new Date(),
       updated_at: new Date(),
@@ -109,42 +131,23 @@ async function createFromQuote(quoteId, adminId) {
       contractRow.event_time_start = quote.event_time_start || null;
       contractRow.event_time_end = quote.event_time_end || null;
     }
-    const inserted = await trx('contracts').insert(contractRow).returning('id');
+    const history = { actor: adminId, source: 'quote.convert.contract' };
+    const inserted = await auditedInsert(trx, 'contracts', contractRow, history);
     const contractId = typeof inserted[0] === 'object' ? inserted[0].id : inserted[0];
 
-    // Seed every active system block. Same shape as createContract.
-    // D.3 — batched insert (one DB round-trip vs N).
-    const systemBlocks = await trx('contract_blocks')
-      .where({ is_system: true, is_active: true })
-      .orderBy(['section', 'display_order']);
-    const sectionCounters = {};
-    const inclusionRows = systemBlocks.map((block) => {
-      sectionCounters[block.section] = (sectionCounters[block.section] || 0) + 1;
-      return {
-        contract_id: contractId,
-        block_id: block.id,
-        section: block.section,
-        position: sectionCounters[block.section],
-        body_text_snapshot: null,
-        body_text_de_snapshot: null,
-        included: true,
-        created_at: new Date(),
-        updated_at: new Date(),
-      };
-    });
-    if (inclusionRows.length > 0) {
-      await trx('contract_block_inclusions').insert(inclusionRows);
-    }
+    // The template version's clauses — the same seeding createContract
+    // uses (#1445; this used to be a second copy of the system-block loop).
+    if (version) await templates.seedContractFromVersion(trx, contractId, version);
 
     // Back-pointer so the quote detail page can deep-link to its
     // resulting contract and the convert-to-event/invoice paths know
     // to refuse double conversion. Skipped silently when the column
     // hasn't migrated — the contract is still created cleanly.
     if (hasQuoteContractBackPointer) {
-      await trx('quotes').where({ id: quote.id }).update({
+      await auditedUpdate(trx, 'quotes', { id: quote.id }, {
         converted_contract_id: contractId,
         updated_at: new Date(),
-      });
+      }, history);
     }
 
     try {
@@ -191,10 +194,10 @@ async function convertToEvent(contractId, adminId) {
     const quoteService = require('../quoteService');
     const result = await quoteService.convertToEvent(contract.source_quote_id, adminId, { fromContract: true });
     if (hasContractConvertedEvent) {
-      await db('contracts').where({ id: contractId }).update({
+      await auditedUpdate(db, 'contracts', { id: contractId }, {
         converted_event_id: result.eventId,
         updated_at: new Date(),
-      });
+      }, { actor: adminId, source: 'contract.convert.event' });
     }
     try {
       await logActivity('contract_converted_to_event',
@@ -285,10 +288,10 @@ async function convertToEvent(contractId, adminId) {
   } catch (_) { /* best-effort */ }
 
   if (hasContractConvertedEvent) {
-    await db('contracts').where({ id: contractId }).update({
+    await auditedUpdate(db, 'contracts', { id: contractId }, {
       converted_event_id: eventId,
       updated_at: new Date(),
-    });
+    }, { actor: adminId, source: 'contract.convert.event' });
   }
 
   try {
@@ -299,11 +302,73 @@ async function convertToEvent(contractId, adminId) {
   return { eventId, alreadyConverted: false };
 }
 
+// A claim older than this without a matching invoice is assumed to belong
+// to a request that crashed between winning the claim and finishing the
+// insert (process killed, connection dropped, etc) rather than one still
+// genuinely in flight — five minutes is comfortably longer than the
+// invoice-numbering + insert path ever takes, short enough that a real
+// crash doesn't wedge the contract for long. A clean throw releases the
+// claim immediately (see the try/catch below) so this cutoff only matters
+// for crashes the catch never ran for.
+const INVOICE_CLAIM_STALE_MS = 5 * 60 * 1000;
+
+/**
+ * Compare-and-set claim on a contract before converting it to an invoice —
+ * closes the race where two concurrent "Convert to invoice" requests (two
+ * replicas, or a double click) both pass the status check and both insert
+ * an invoice (#1589). Only one caller's UPDATE affects a row; that caller
+ * proceeds, everyone else backs off. Returns the claim timestamp string if
+ * this call won it, otherwise null.
+ */
+async function claimContractForInvoiceConversion(contractId, adminId) {
+  const claimedAt = new Date().toISOString();
+  const staleCutoff = new Date(Date.now() - INVOICE_CLAIM_STALE_MS).toISOString();
+  const count = await auditedUpdate(db, 'contracts',
+    (q) => q.where({ id: contractId, status: 'fully_signed' })
+      .andWhere((w) => w.whereNull('invoice_prepared_at').orWhere('invoice_prepared_at', '<', staleCutoff)),
+    { invoice_prepared_at: claimedAt },
+    { actor: adminId, source: 'contract.convert.invoices' });
+  return count === 1 ? claimedAt : null;
+}
+
+/** Best-effort release of a claim this call took but didn't use (the
+ * conversion itself threw). Only clears the claim if it's still exactly
+ * the one this call set, so it never clobbers a claim someone else took
+ * over via the staleness window. Never throws — a failed release just
+ * leaves the claim to expire on its own staleness cutoff. */
+async function releaseContractInvoiceClaim(contractId, adminId, claimedAt) {
+  try {
+    await auditedUpdate(db, 'contracts', { id: contractId, invoice_prepared_at: claimedAt },
+      { invoice_prepared_at: null },
+      { actor: adminId, source: 'contract.convert.invoices' });
+  } catch (releaseErr) {
+    logger.warn('Failed to release invoice conversion claim', { contractId, error: releaseErr.message });
+  }
+}
+
+/** The alreadyConverted result for a contract whose invoice(s) exist —
+ * looked up by the source_contract_id lineage — or null if none do. */
+async function existingContractInvoiceResult(contract, contractId, hasInvoiceContractBackPointer) {
+  if (!hasInvoiceContractBackPointer) return null;
+  const existing = await db('invoices').where({ source_contract_id: contractId }).orderBy('id').select('id');
+  if (!existing.length) return null;
+  if (contract.source_quote_id) {
+    return { installmentsCreated: existing.length, invoiceIds: existing.map((r) => r.id), alreadyConverted: true };
+  }
+  return { installmentsCreated: 1, invoiceId: existing[0].id, alreadyConverted: true };
+}
+
 /**
  * Convert a fully-signed contract directly into invoice(s) without
  * creating an event row. Same delegation pattern as convertToEvent.
  */
-async function convertToInvoiceOnly(contractId, adminId) {
+/**
+ * `options.draft` (#1446, the workflow action `prepare_contract_invoice`):
+ * the invoices are created on hold — no send is scheduled — so nothing goes
+ * to the customer until an admin sends it. The standalone path's empty
+ * invoice has no send date either way.
+ */
+async function convertToInvoiceOnly(contractId, adminId, options = {}) {
   const contract = await db('contracts').where({ id: contractId }).first();
   if (!contract) throw new AppError('Contract not found', 404);
   if (contract.status !== 'fully_signed') {
@@ -317,18 +382,62 @@ async function convertToInvoiceOnly(contractId, adminId) {
   // migration 130. Skip the back-pointer update silently when the
   // column hasn't migrated yet.
   const hasInvoiceContractBackPointer = await hasColumnCached('invoices', 'source_contract_id');
+  // Migration 231 — skip the claim entirely on installs that haven't
+  // migrated yet (same schema-drift pattern as the back-pointer above).
+  const hasInvoicePreparedAt = await hasColumnCached('contracts', 'invoice_prepared_at');
 
+  // Taken before branching so it covers both Path A and Path B below —
+  // they're reached through the same contractId and the same
+  // check-then-act shape, so one per-contract claim protects both.
+  let claimedAt = null;
+  if (hasInvoicePreparedAt) {
+    // A claim is never cleared after a successful conversion, so once it
+    // goes stale a later call would re-claim it. Hand back the invoice a
+    // finished conversion produced before claiming, so that call (or a
+    // retry after a crash past the commit) adopts it instead of
+    // double-billing (Path B) or erroring on the converted quote (Path A).
+    const finished = await existingContractInvoiceResult(contract, contractId, hasInvoiceContractBackPointer);
+    if (finished) return finished;
+    claimedAt = await claimContractForInvoiceConversion(contractId, adminId);
+    if (!claimedAt) {
+      // Someone else already claimed this contract — a concurrent request
+      // that's still running, or one that already finished. Either way,
+      // hand back the invoice it produced instead of erroring, matching
+      // the alreadyConverted pattern used elsewhere in this file.
+      const existing = await existingContractInvoiceResult(contract, contractId, hasInvoiceContractBackPointer);
+      if (existing) return existing;
+      // Claimed but no invoice yet, and not stale enough to re-claim —
+      // a conversion is genuinely in progress right now.
+      throw new AppError(
+        'This contract is already being converted to an invoice. Try again shortly.',
+        409, 'INVOICE_CONVERSION_IN_PROGRESS',
+      );
+    }
+  }
+
+  try {
+    return await convertClaimedContractToInvoice(contract, contractId, adminId, hasInvoiceContractBackPointer, options);
+  } catch (err) {
+    if (claimedAt) await releaseContractInvoiceClaim(contractId, adminId, claimedAt);
+    throw err;
+  }
+}
+
+/** The actual conversion, run only once a claim (if the schema has the
+ * column) has been won. Split out of convertToInvoiceOnly so the claim
+ * can wrap it in a try/catch without re-indenting both branches. */
+async function convertClaimedContractToInvoice(contract, contractId, adminId, hasInvoiceContractBackPointer, options = {}) {
   // Path A: contract has a source quote → replay its line items +
   // payment plan via quoteService (full installment schedule).
   if (contract.source_quote_id) {
     const quoteService = require('../quoteService');
-    const result = await quoteService.convertToInvoiceOnly(contract.source_quote_id, adminId, { fromContract: true });
-    if (hasInvoiceContractBackPointer) {
-      await db('invoices')
-        .where({ source_quote_id: contract.source_quote_id })
-        .whereNull('source_contract_id')
-        .update({ source_contract_id: contractId });
-    }
+    // The lineage backfill rides the quote conversion's transaction — see
+    // sourceContractId in quoteService.convertToInvoiceOnly.
+    const result = await quoteService.convertToInvoiceOnly(contract.source_quote_id, adminId, {
+      fromContract: true,
+      ...(options.draft === true ? { draft: true } : {}),
+      sourceContractId: hasInvoiceContractBackPointer ? contractId : undefined,
+    });
     try {
       await logActivity('contract_converted_to_invoices',
         { contractId, quoteId: contract.source_quote_id, installments: result.installmentsCreated },
@@ -363,9 +472,7 @@ async function convertToInvoiceOnly(contractId, adminId) {
   const invoiceHasEventName = await hasColumnCached('invoices', 'event_name');
   const eventNameSnapshot = (contract.event_name || contract.title || null);
 
-  const invoiceNumber = await invoiceService.nextInvoiceNumber();
   const invoiceRow = {
-    invoice_number: invoiceNumber,
     customer_account_id: contract.customer_account_id,
     source_quote_id: null,
     event_id: null,
@@ -403,8 +510,15 @@ async function convertToInvoiceOnly(contractId, adminId) {
     invoiceRow.event_time_start = contract.event_time_start || null;
     invoiceRow.event_time_end = contract.event_time_end || null;
   }
-  const inserted = await db('invoices').insert(invoiceRow).returning('id');
-  const invoiceId = typeof inserted[0] === 'object' ? inserted[0].id : inserted[0];
+  // Claiming a number and persisting its invoice are one operation. If the
+  // INSERT or its history row fails, the sequence update must roll back on
+  // both databases.
+  const { invoiceId, invoiceNumber } = await db.transaction(async (trx) => {
+    const number = await invoiceService.nextInvoiceNumber(trx);
+    const inserted = await auditedInsert(trx, 'invoices', { ...invoiceRow, invoice_number: number },
+      { actor: adminId, source: 'contract.convert.invoices' });
+    return { invoiceId: inserted[0].id, invoiceNumber: number };
+  });
 
   try {
     await logActivity('contract_converted_to_empty_invoice',

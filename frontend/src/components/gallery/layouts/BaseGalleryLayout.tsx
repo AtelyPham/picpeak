@@ -1,8 +1,19 @@
 import React from 'react';
 import type { Photo, DownloadResolutionChoice, GalleryPerson } from '../../../types';
+import type { LightboxPhotoChangeHandler } from '../photoLink';
 
 export interface BaseGalleryLayoutProps {
   photos: Photo[];
+  /**
+   * Link to a single photo (issue 1733). `openPhotoId` is the photo the URL
+   * asks for (a deep link, or Back/Forward): a layout that mounts its own
+   * lightbox opens it on that photo once it is in `photos`, and closes it on
+   * null. `onLightboxPhotoChange` reports the lightbox's own moves back so
+   * the container can mirror them to `?photo=`. Layouts that use the shared
+   * lightbox in PhotoGridWithLayouts ignore both.
+   */
+  openPhotoId?: number | null;
+  onLightboxPhotoChange?: LightboxPhotoChangeHandler;
   // People in this gallery (#1074) — forwarded by PhotoGridWithLayouts so
   // full-page layouts, which render their OWN lightbox, can still show the
   // "In this photo" chips.
@@ -20,6 +31,16 @@ export interface BaseGalleryLayoutProps {
   onPhotoSelect?: (photoId: number) => void;
   onSelectAll?: () => void;
   onDeselectAll?: () => void;
+  /**
+   * Issue 1716: full-page layouts render their own selection chrome, so the
+   * container hands them its mode toggle, an additive "select these ids"
+   * (one state write, unlike calling onPhotoSelect in a loop, where every
+   * call would read the same stale set) and its selection download, which
+   * already routes through the resolution picker and the download limit.
+   */
+  onToggleSelectionMode?: () => void;
+  onSelectMany?: (photoIds: number[]) => void;
+  onDownloadSelected?: () => void | Promise<void>;
   eventName?: string;
   eventLogo?: string | null;
   eventDate?: string | null;
@@ -40,6 +61,17 @@ export interface BaseGalleryLayoutProps {
    * /download-all has no such cap.
    */
   onDownloadEverything?: () => void;
+  /**
+   * Rendered right after the photos and before a layout's own footer — the
+   * two-stage delivery banner (issue 1562), which has to follow the delivered
+   * photos but must not land below "Powered by". Only the full-page layouts
+   * read it; for the others PhotoGridWithLayouts renders it after the layout.
+   */
+  afterGrid?: React.ReactNode;
+  // Copyable filename list (issue 1733, A3d), for layouts that own their
+  // chrome: the selection, or the viewer's favourites. Hidden at zero.
+  onCopyFilenames?: () => void;
+  copyFilenamesCount?: number;
   // Resolution picker choices (#858). More than one entry means the gallery
   // offers a real choice, so bulk downloads must route through the modal
   // instead of calling downloadSelectedPhotos directly.

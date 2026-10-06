@@ -10,10 +10,10 @@ const express = require('express');
 const { capabilityEvidence } = require('../usage/capabilityEvidence');
 const { body, param, query } = require('express-validator');
 const { adminAuth } = require('../middleware/auth');
-const { requirePermission } = require('../middleware/permissions');
-const { requireFeatureFlag } = require('../middleware/requireFeatureFlag');
+const { requirePermission, userHasAnyPermission } = require('../middleware/permissions');
+const { requireFeatureFlag, isFeatureEnabled } = require('../middleware/requireFeatureFlag');
 const { filterOwnedEventIds } = require('../middleware/ownership');
-const { db } = require('../database/db');
+const { db, logActivity } = require('../database/db');
 
 // Hour-entry routes are gated by the hoursLogging master so a direct API hit
 // can't read/edit/delete/bill logged hours while the feature is off (the
@@ -25,10 +25,20 @@ const requireHoursLogging = requireFeatureFlag('hoursLogging', 'HOURS_LOGGING_DI
 const requireIncoming = requireFeatureFlag('incomingInvoices', 'INCOMING_INVOICES_DISABLED');
 const { handleAsync, validateRequest, successResponse } = require('../utils/routeHelpers');
 const customerAccountsService = require('../services/customerAccountsService');
+const accountingHistory = require('../services/accountingHistory');
 const customerHoursService = require('../services/customerHoursService');
 const combinedBillingService = require('../services/combinedBillingService');
 const invoiceService = require('../services/invoiceService');
 const { IDENTITY_PRESERVING_NORMALIZE_EMAIL } = require('../utils/emailNormalization');
+const { NotFoundError, AppError } = require('../utils/errors');
+const { getAppSetting } = require('../utils/appSettings');
+const customerDocumentsService = require('../services/customerDocumentsService');
+const customerDocumentNotifications = require('../services/customerDocumentNotifications');
+const customerActivityService = require('../services/customerActivityService');
+const customerDocumentRequestsService = require('../services/customerDocumentRequestsService');
+const customerGroupsService = require('../services/customerGroupsService');
+const { receiveDocumentUpload, discardTempFile, sendDocumentAttachment } = require('../middleware/customerDocumentUpload');
+const documentFormats = require('../services/documentFormats');
 
 const router = express.Router();
 
@@ -88,7 +98,11 @@ function transformCustomer(c) {
     // Contracts override (migration 131). Opt-out: absent column (older row /
     // un-selected) reads as ON so existing customers keep the Contracts tab.
     featureContracts: c.feature_contracts === undefined ? true : (c.feature_contracts === true || c.feature_contracts === 1),
+    // Documents override (migration 225). Same opt-out reading as contracts.
+    featureDocuments: c.feature_documents === undefined ? true : (c.feature_documents === true || c.feature_documents === 1),
     hourlyRateMinor: c.hourly_rate_minor != null ? Number(c.hourly_rate_minor) : null,
+    // Migration 220 — the customer's own day rate for per-day quote lines.
+    dayRateMinor: c.day_rate_minor != null ? Number(c.day_rate_minor) : null,
     // Per-customer Skonto opt-out (migration 112). When true, none of
     // this customer's invoices qualify for an early-payment discount,
     // regardless of template / global defaults.
@@ -101,6 +115,10 @@ function transformCustomer(c) {
     createdAt: c.created_at,
     updatedAt: c.updated_at,
     eventCount: c.event_count != null ? Number(c.event_count) : undefined,
+    // Customer groups (#1443, migration 226). Attached by the list and detail
+    // routes; `undefined` where a response was never meant to carry them, so
+    // an existing consumer sees no change.
+    groups: Array.isArray(c.groups) ? c.groups : undefined,
     events: Array.isArray(c.events)
       ? c.events.map((e) => ({
         id: e.id,
@@ -125,18 +143,165 @@ function transformInvitation(inv) {
   };
 }
 
+// Far more groups than a catalogue holds, and well under what an IN list or
+// a reorder loop should be handed from a request. The same number bounds how
+// many groups one customer carries, so the detail editor can always save.
+const MAX_GROUP_IDS = customerGroupsService.MAX_GROUPS_PER_CUSTOMER;
+const MAX_REORDER_IDS = 500;
+// One bulk change covers at most this many customers.
+const MAX_BULK_CUSTOMERS = 500;
+
+/**
+ * `?groupIds=1,2` or `?groupIds=1&groupIds=2` → [1, 2]. Anything that isn't a
+ * positive integer is dropped rather than refused, so a stale bookmark shows
+ * the unfiltered list instead of an error. More than MAX_GROUP_IDS groups is
+ * refused: cutting the list short would quietly answer a different filter
+ * ("all of them" over the first 100 is not "all of them").
+ */
+function parseGroupIds(value) {
+  if (value === undefined || value === null || value === '') return [];
+  const raw = Array.isArray(value) ? value : String(value).split(',');
+  const ids = [...new Set(raw
+    .map((id) => Number(String(id).trim()))
+    .filter((id) => Number.isInteger(id) && id > 0))];
+  if (ids.length > MAX_GROUP_IDS) {
+    const err = new AppError(`Filter by at most ${MAX_GROUP_IDS} groups at once`, 400, 'GROUP_FILTER_TOO_MANY');
+    err.details = { limit: MAX_GROUP_IDS };
+    throw err;
+  }
+  return ids;
+}
+
+// ---- customer groups (#1443) --------------------------------------------
+// Mounted before /:id so "groups" is never read as a customer id. Reading the
+// catalogue needs customers.view (it is part of the overview); changing it
+// needs customers.groups.manage (migration 226).
+
+const requireGroupManage = requirePermission('customers.groups.manage');
+
+router.get('/groups', [
+  adminAuth,
+  requirePermission('customers.view'),
+  query('includeArchived').optional().isBoolean(),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  const includeArchived = req.query.includeArchived === 'true' || req.query.includeArchived === '1';
+  return successResponse(res, {
+    groups: await customerGroupsService.list({ includeArchived }),
+    ungroupedCount: await customerGroupsService.countUngrouped(),
+  });
+}));
+
+router.post('/groups', [
+  adminAuth,
+  requireGroupManage,
+  body('name').isString().trim().isLength({ min: 1, max: 80 }),
+  body('description').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  body('color').optional({ nullable: true }).isString(),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  const group = await customerGroupsService.create(req.body, req.admin);
+  return successResponse(res, { group }, 201);
+}));
+
+// Before /groups/:groupId, or "reorder" is read as an id.
+router.post('/groups/reorder', [
+  adminAuth,
+  requireGroupManage,
+  body('orderedIds').isArray({ min: 1, max: MAX_REORDER_IDS }),
+  body('orderedIds.*').isInt({ min: 1 }).toInt(),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  const groups = await customerGroupsService.reorder(req.body.orderedIds, req.admin);
+  return successResponse(res, { groups });
+}));
+
+// All or nothing, before /groups/:groupId like reorder. `dryRun` answers the
+// same numbers without writing — the preview the admin confirms.
+router.post('/groups/bulk-assign', [
+  adminAuth,
+  requireGroupManage,
+  body('customerIds').isArray({ min: 1, max: MAX_BULK_CUSTOMERS }),
+  body('customerIds.*').isInt({ min: 1 }).toInt(),
+  body('addGroupIds').optional().isArray({ max: MAX_GROUP_IDS }),
+  body('addGroupIds.*').isInt({ min: 1 }).toInt(),
+  body('removeGroupIds').optional().isArray({ max: MAX_GROUP_IDS }),
+  body('removeGroupIds.*').isInt({ min: 1 }).toInt(),
+  body('dryRun').optional().isBoolean().toBoolean(),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  const result = await customerGroupsService.bulkAssign({
+    customerIds: req.body.customerIds,
+    addGroupIds: req.body.addGroupIds,
+    removeGroupIds: req.body.removeGroupIds,
+    dryRun: req.body.dryRun === true,
+  }, req.admin);
+  return successResponse(res, result);
+}));
+
+router.put('/groups/:groupId', [
+  adminAuth,
+  requireGroupManage,
+  param('groupId').isInt({ min: 1 }),
+  body('name').optional().isString().trim().isLength({ min: 1, max: 80 }),
+  body('description').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+  body('color').optional({ nullable: true }).isString(),
+  body('isArchived').optional().isBoolean(),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  const group = await customerGroupsService.update(parseInt(req.params.groupId, 10), req.body, req.admin);
+  return successResponse(res, { group });
+}));
+
+router.delete('/groups/:groupId', [
+  adminAuth,
+  requireGroupManage,
+  param('groupId').isInt({ min: 1 }),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  return successResponse(res, await customerGroupsService.remove(parseInt(req.params.groupId, 10), req.admin));
+}));
+
+router.put('/:id/groups', [
+  adminAuth,
+  requireGroupManage,
+  param('id').isInt({ min: 1 }),
+  body('groupIds').isArray({ max: MAX_GROUP_IDS }),
+  body('groupIds.*').isInt({ min: 1 }).toInt(),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  const groups = await customerGroupsService.setCustomerGroups(
+    parseInt(req.params.id, 10), req.body.groupIds, req.admin,
+  );
+  return successResponse(res, { groups });
+}));
+
 // ---- list / search ------------------------------------------------------
 
 router.get('/', [
   adminAuth,
   requirePermission('customers.view'),
   query('search').optional().isString(),
+  // Repeatable (?groupIds=1&groupIds=2) or comma-separated (?groupIds=1,2).
+  query('groupIds').optional(),
+  query('groupMatch').optional().isIn(['any', 'all']),
+  query('ungrouped').optional().isBoolean(),
+  query('status').optional().isIn(['active', 'inactive', 'all']),
 ], handleAsync(async (req, res) => {
   validateRequest(req);
+  // Ungrouped wins over any group ids, so they are not even read then.
+  const ungrouped = req.query.ungrouped === 'true' || req.query.ungrouped === '1';
   const customers = await customerAccountsService.listCustomers({
     search: req.query.search,
+    groupIds: ungrouped ? [] : parseGroupIds(req.query.groupIds),
+    groupMatch: req.query.groupMatch || 'any',
+    ungrouped,
+    status: req.query.status || 'all',
   });
-  res.json({ customers: customers.map(transformCustomer) });
+  const groupsByCustomer = await customerGroupsService.groupsForCustomers(customers.map((c) => c.id));
+  res.json({
+    customers: customers.map((c) => transformCustomer({ ...c, groups: groupsByCustomer.get(Number(c.id)) || [] })),
+  });
 }));
 
 /**
@@ -156,7 +321,11 @@ router.get('/search', [
   validateRequest(req);
   const term = req.query.email || req.query.q || '';
   const results = await customerAccountsService.searchCustomers(term);
-  res.json({ customers: results.map(transformCustomer) });
+  // Groups (#1443), so a picker shows the segment without opening the record.
+  const groupsByCustomer = await customerGroupsService.groupsForCustomers(results.map((c) => c.id));
+  res.json({
+    customers: results.map((c) => transformCustomer({ ...c, groups: groupsByCustomer.get(Number(c.id)) || [] })),
+  });
 }));
 
 // ---- invitations --------------------------------------------------------
@@ -286,15 +455,40 @@ router.post('/', [
     }
     return true;
   }),
+  // Groups for the new customer (#1443). Placing a customer in a group is
+  // customers.groups.manage, checked in the handler because the field is
+  // optional on a route guarded by customers.create.
+  body('groupIds').optional().isArray({ max: MAX_GROUP_IDS }),
+  body('groupIds.*').isInt({ min: 1 }).toInt(),
 ], handleAsync(async (req, res) => {
   validateRequest(req);
+  const groupIds = [...new Set(req.body.groupIds || [])];
+  // The permission is checked before anything is written. The friendly group
+  // check runs first too, but what holds is the transaction below: the
+  // customer and its memberships are inserted together, so a group archived
+  // or deleted in between refuses both and leaves no customer behind — a
+  // retry doesn't then trip over "email exists".
+  if (groupIds.length > 0) {
+    if (!await userHasAnyPermission(req.admin.id, ['customers.groups.manage'])) {
+      throw new AppError('Placing a customer in a group needs the customers.groups.manage permission', 403, 'GROUPS_PERMISSION_REQUIRED');
+    }
+    await customerGroupsService.assertAssignable(groupIds);
+  }
+  // createDirect emits customer.created after its transaction commits, with
+  // the memberships already in place.
+  let change = null;
   const { id } = await customerAccountsService.createDirect({
     email: req.body.email,
     prefill: req.body.prefill,
     createdByAdminId: req.admin.id,
+    withinTransaction: groupIds.length > 0
+      ? async (trx, customerId) => { change = await customerGroupsService.replaceCustomerGroups(trx, customerId, groupIds); }
+      : null,
   });
+  if (change) await customerGroupsService.logCustomerGroupsAssigned(id, change, req.admin);
+  const groups = groupIds.length > 0 ? await customerGroupsService.groupsForCustomer(id) : [];
   const customer = await customerAccountsService.getCustomerById(id);
-  successResponse(res, { customer: transformCustomer(customer) }, 201);
+  successResponse(res, { customer: transformCustomer({ ...customer, groups }) }, 201);
 }));
 
 // ---- promote a passive customer to active (send portal invitation) ------
@@ -366,16 +560,32 @@ router.post('/:id/send-invite', [
 
 // ---- customer record ----------------------------------------------------
 
+// Change history (migration 219) of the customer's billing fields and hour
+// entries, oldest first. Personal values are blanked once a customer is erased.
+router.get('/:id/history', [
+  adminAuth,
+  requirePermission('customers.view'),
+  param('id').isInt({ min: 1 }),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  let entries = await accountingHistory.listHistory('customer', parseInt(req.params.id, 10));
+  // Hour entries stay behind the same gate as /:id/hour-entries.
+  if (!(await isFeatureEnabled('hoursLogging'))) {
+    entries = entries.filter((entry) => entry.entity_type !== 'hour_entry');
+  }
+  return successResponse(res, { entries });
+}));
+
 router.get('/:id', [
   adminAuth,
   requirePermission('customers.view'),
   param('id').isInt({ min: 1 }),
 ], handleAsync(async (req, res) => {
   validateRequest(req);
-  const customer = await customerAccountsService.getCustomerById(
-    parseInt(req.params.id, 10)
-  );
-  res.json({ customer: transformCustomer(customer) });
+  const id = parseInt(req.params.id, 10);
+  const customer = await customerAccountsService.getCustomerById(id);
+  const groups = await customerGroupsService.groupsForCustomer(id);
+  res.json({ customer: transformCustomer({ ...customer, groups }) });
 }));
 
 router.put('/:id', [
@@ -416,9 +626,12 @@ router.put('/:id', [
   body('feature_quotes').optional().isBoolean(),
   body('feature_bills').optional().isBoolean(),
   body('feature_contracts').optional().isBoolean(),
+  // Customer documents (migration 225).
+  body('feature_documents').optional().isBoolean(),
   // Hours logging (migration 129).
   body('feature_hours_logging').optional().isBoolean(),
   body('hourly_rate_minor').optional({ nullable: true }).isInt({ min: 0 }),
+  body('day_rate_minor').optional({ nullable: true }).isInt({ min: 0 }),
   // CRM billing cadence — see migration 102. `per_event` keeps the
   // existing per-event payment plan; monthly/quarterly snap every
   // generated invoice to billing_cycle_day of the next period.
@@ -693,7 +906,9 @@ router.delete('/:id/hour-entries/:entryId', [
 router.post('/:id/hour-entries/bill', [
   adminAuth,
   requireHoursLogging,
-  requirePermission('customers.edit'),
+  // Billing hours creates invoices, so the billing permission is required
+  // alongside the customer one (Codex security audit 2026-09-30).
+  requirePermission(['customers.edit', 'bills.manage'], { requireAll: true }),
   param('id').isInt({ min: 1 }),
 ], handleAsync(async (req, res) => {
   validateRequest(req);
@@ -709,7 +924,7 @@ router.post('/:id/hour-entries/bill', [
 router.post('/:id/bill-combined', [
   adminAuth,
   requireIncoming,
-  requirePermission('customers.edit'),
+  requirePermission(['customers.edit', 'bills.manage'], { requireAll: true }),
   param('id').isInt({ min: 1 }),
   body('includeHours').optional().isBoolean(),
   body('includeRebills').optional().isBoolean(),
@@ -763,7 +978,8 @@ router.post('/:id/trigger-monthly-bill', [
   // Migration 134 — admin-override fire is a customer-scoped write,
   // not a create. Roles holding customers.create were granted
   // customers.edit on upgrade so this still works for existing admins.
-  requirePermission('customers.edit'),
+  // It schedules and sends an invoice, so bills.manage is required too.
+  requirePermission(['customers.edit', 'bills.manage'], { requireAll: true }),
   param('id').isInt({ min: 1 }),
 ], handleAsync(async (req, res) => {
   validateRequest(req);
@@ -790,6 +1006,238 @@ router.get('/:id/monthly-draft', [
   validateRequest(req);
   const draft = await invoiceService.getMonthlyDraft(parseInt(req.params.id, 10));
   successResponse(res, { draft });
+}));
+
+// Ids above PostgreSQL's integer range answer 400 here rather than a 500
+// from the database.
+const MAX_ID = 2147483647;
+
+// ---- customer activity (#1444) -------------------------------------------
+// The customer's timeline: document, account and group activity from
+// activity_logs, newest first. ?limit (1-200, default 50) and ?beforeId (the
+// previous page's nextBeforeId). Unknown customer → 404. Document rows are
+// left out unless the `documents` flag is on AND the admin holds
+// customers.documents.manage — the gate every other document route has.
+router.get('/:id/activity', [
+  adminAuth,
+  requirePermission('customers.view'),
+  param('id').isInt({ min: 1, max: MAX_ID }),
+  query('limit').optional().isInt({ min: 1, max: 200 }),
+  query('beforeId').optional().isInt({ min: 1, max: MAX_ID }),
+], handleAsync(async (req, res) => {
+  validateRequest(req);
+  const customerId = parseInt(req.params.id, 10);
+  const customer = await db('customer_accounts').where({ id: customerId }).first('id');
+  if (!customer) throw new NotFoundError('Customer', customerId);
+  const includeDocuments = await isFeatureEnabled('documents')
+    && await userHasAnyPermission(req.admin.id, ['customers.documents.manage']);
+  const result = await customerActivityService.listForCustomer(customerId, {
+    limit: req.query.limit ? parseInt(req.query.limit, 10) : 50,
+    beforeId: req.query.beforeId ? parseInt(req.query.beforeId, 10) : null,
+    includeDocuments,
+  });
+  successResponse(res, result);
+}));
+
+// ---- customer documents (#1444) ------------------------------------------
+// Every route — reads included — sits behind the `documents` flag and
+// `customers.documents.manage`: the list carries customer uploads nobody has
+// reviewed yet. The service scopes every lookup by the :id customer, so a
+// document id from another customer is a 404. Links to an event or project
+// are checked against what this admin may access (filterOwnedEventIds /
+// ownedProjectIds) inside the service.
+const requireDocuments = requireFeatureFlag('documents', 'DOCUMENTS_DISABLED');
+const documentGuards = [
+  adminAuth,
+  requireDocuments,
+  requirePermission('customers.documents.manage'),
+  param('id').isInt({ min: 1, max: MAX_ID }),
+];
+const documentItemGuards = [...documentGuards, param('docId').isInt({ min: 1, max: MAX_ID })];
+const adminActor = (admin) => ({ type: 'admin', id: admin.id, name: admin.username || 'admin' });
+
+/** Multipart sends strings; JSON sends booleans. Anything else: no choice made. */
+function parseNotify(value) {
+  if (value === true || value === 'true' || value === '1') return true;
+  if (value === false || value === 'false' || value === '0') return false;
+  return undefined;
+}
+
+async function loadDocumentCustomer(req) {
+  validateRequest(req);
+  const customerId = parseInt(req.params.id, 10);
+  const customer = await db('customer_accounts').where({ id: customerId }).first('id');
+  if (!customer) throw new NotFoundError('Customer', customerId);
+  return customerId;
+}
+
+router.get('/:id/documents', documentGuards, handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  const documents = await customerDocumentsService.listForAdmin(customerId);
+  const limits = await customerDocumentsService.getLimits();
+  const usedBytes = await customerDocumentsService.getUsageBytes(customerId);
+  // The default for the card's "Notify the customer" checkbox.
+  const notifyOnShare = (await getAppSetting('customer_documents_notify_on_share', true)) !== false;
+  const allowedFormats = await documentFormats.getAllowedFormats();
+  successResponse(res, { documents, limits: { ...limits, usedBytes }, settings: { notifyOnShare }, allowedFormats });
+}));
+
+// multipart: file (PDF), share?, notify?, eventId?, projectId?, contractId?
+// Admin uploads are recorded clean by the uploading admin and don't count
+// against the customer's quota; the per-file size cap applies.
+router.post('/:id/documents', documentGuards, handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  const limits = await customerDocumentsService.getLimits();
+  let file = null;
+  try {
+    file = await receiveDocumentUpload(req, res, {
+      maxBytes: limits.maxUploadBytes,
+      allowedFormats: await documentFormats.getAllowedFormats(),
+    });
+    if (!file) return res.status(400).json({ error: 'No file was uploaded', code: 'NO_FILE' });
+    const share = req.body.share === true || req.body.share === 'true' || req.body.share === '1';
+    const row = await customerDocumentsService.createDocument({
+      customerId,
+      uploaderType: 'admin',
+      uploaderId: req.admin.id,
+      file,
+      links: { eventId: req.body.eventId, projectId: req.body.projectId, contractId: req.body.contractId },
+      share,
+      admin: req.admin,
+      actor: adminActor(req.admin),
+      maxUploadBytes: limits.maxUploadBytes,
+    });
+    // Only a share that was recorded is announced: an upload the scanner
+    // left pending is shared (and announced) once it is clean.
+    let notification = 'skipped';
+    if (row.shared_at) {
+      notification = await customerDocumentNotifications.notifyShared(row, { notify: parseNotify(req.body.notify) });
+      await customerDocumentNotifications.emitDocumentWorkflow('document.shared', row, String(row.shared_at));
+    }
+    return successResponse(res, { document: { id: row.id, status: row.status }, notification }, 201);
+  } finally {
+    discardTempFile(file);
+  }
+}));
+
+// Replaces all three links; send null to clear one.
+router.patch('/:id/documents/:docId', [
+  ...documentItemGuards,
+  body('eventId').optional({ nullable: true }).isInt({ min: 1, max: MAX_ID }),
+  body('projectId').optional({ nullable: true }).isInt({ min: 1, max: MAX_ID }),
+  body('contractId').optional({ nullable: true }).isInt({ min: 1, max: MAX_ID }),
+], handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  await customerDocumentsService.updateLinks(customerId, parseInt(req.params.docId, 10), req.body, req.admin);
+  successResponse(res, { updated: true });
+}));
+
+// notify?: boolean — whether to email the customer; left out, the
+// customer_documents_notify_on_share setting decides. `notification` in the
+// answer says what happened: queued, skipped, or failed (shared anyway).
+router.post('/:id/documents/:docId/share', [
+  ...documentItemGuards,
+  body('notify').optional({ nullable: true }).isBoolean(),
+], handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  const { row, changed } = await customerDocumentsService.setShared(customerId, parseInt(req.params.docId, 10), true, req.admin);
+  // Already shared: nothing happened, so nothing is announced again.
+  let notification = 'skipped';
+  if (changed) {
+    notification = await customerDocumentNotifications.notifyShared(row, { notify: parseNotify(req.body.notify) });
+    await customerDocumentNotifications.emitDocumentWorkflow('document.shared', row, String(row.shared_at));
+  }
+  successResponse(res, { shared: true, notification });
+}));
+
+router.post('/:id/documents/:docId/unshare', documentItemGuards, handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  await customerDocumentsService.setShared(customerId, parseInt(req.params.docId, 10), false, req.admin);
+  successResponse(res, { shared: false });
+}));
+
+// Mark clean / reject. The note is shown to the customer on a rejected upload.
+router.post('/:id/documents/:docId/review', [
+  ...documentItemGuards,
+  body('status').isIn(['clean', 'rejected']),
+  body('note').optional({ nullable: true }).isString().isLength({ max: 500 }),
+], handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  const row = await customerDocumentsService.review(customerId, parseInt(req.params.docId, 10), {
+    status: req.body.status,
+    note: req.body.note,
+  }, req.admin);
+  // Only a rejection of the customer's own upload is mailed (and reopens a
+  // request it answered); an accepted upload needs no mail.
+  const notification = row.status === 'rejected'
+    ? await customerDocumentsService.afterRejection(row)
+    : 'skipped';
+  successResponse(res, { status: req.body.status, notification });
+}));
+
+// Admins can download any non-deleted document, pending ones included —
+// reviewing the file is how it gets marked clean. Always an attachment.
+router.get('/:id/documents/:docId/download', documentItemGuards, handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  const row = await customerDocumentsService.getForAdmin(customerId, parseInt(req.params.docId, 10));
+  const stream = await customerDocumentsService.openStream(row);
+  await customerDocumentsService.recordView(row.id, 'admin', req.admin.id);
+  await logActivity('customer_document_downloaded',
+    { documentId: row.id, customerId }, row.event_id || null, adminActor(req.admin));
+  sendDocumentAttachment(res, stream, row);
+}));
+
+// Soft delete: hidden from the customer and the list at once; the retention
+// sweep removes the bytes later.
+router.delete('/:id/documents/:docId', documentItemGuards, handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  await customerDocumentsService.softDelete(customerId, parseInt(req.params.docId, 10), req.admin);
+  successResponse(res, { deleted: true });
+}));
+
+// ---- document requests (#1444 slice 10) -----------------------------------
+// The studio asks the customer for a document. Same guards as the documents.
+// A request of another customer is the same 404 as an unknown one.
+const requestItemGuards = [...documentGuards, param('requestId').isInt({ min: 1, max: MAX_ID })];
+
+router.get('/:id/document-requests', documentGuards, handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  successResponse(res, { requests: await customerDocumentRequestsService.listForAdmin(customerId) });
+}));
+
+// body: title, note?, dueAt?, eventId?, contractId?, notify? (default true)
+router.post('/:id/document-requests', [
+  ...documentGuards,
+  body('title').isString().trim().isLength({ min: 1, max: 200 }),
+  body('note').optional({ nullable: true }).isString().isLength({ max: 1000 }),
+  body('dueAt').optional({ nullable: true }).isISO8601(),
+  body('eventId').optional({ nullable: true }).isInt({ min: 1, max: MAX_ID }),
+  body('contractId').optional({ nullable: true }).isInt({ min: 1, max: MAX_ID }),
+  body('notify').optional({ nullable: true }).isBoolean(),
+], handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  const row = await customerDocumentRequestsService.create(customerId, req.body, req.admin);
+  const notification = await customerDocumentNotifications.notifyRequest(row, { notify: parseNotify(req.body.notify) });
+  await customerDocumentNotifications.emitDocumentWorkflow('document.requested', row);
+  successResponse(res, { request: customerDocumentRequestsService.toAdminDto(row), notification }, 201);
+}));
+
+router.patch('/:id/document-requests/:requestId', [
+  ...requestItemGuards,
+  body('title').optional().isString().trim().isLength({ min: 1, max: 200 }),
+  body('note').optional({ nullable: true }).isString().isLength({ max: 1000 }),
+  body('dueAt').optional({ nullable: true }).isISO8601(),
+], handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  const row = await customerDocumentRequestsService.update(customerId, parseInt(req.params.requestId, 10), req.body);
+  successResponse(res, { request: customerDocumentRequestsService.toAdminDto(row) });
+}));
+
+// Cancel. The row stays, with status cancelled.
+router.delete('/:id/document-requests/:requestId', requestItemGuards, handleAsync(async (req, res) => {
+  const customerId = await loadDocumentCustomer(req);
+  await customerDocumentRequestsService.cancel(customerId, parseInt(req.params.requestId, 10), req.admin);
+  successResponse(res, { cancelled: true });
 }));
 
 module.exports = router;

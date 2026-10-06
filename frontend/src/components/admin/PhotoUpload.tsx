@@ -1,101 +1,119 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { Upload, X, Image, Loader2, Cog, AlertTriangle } from 'lucide-react';
+import { Upload, X, Image, Info, FolderUp, FilePlus } from 'lucide-react';
 import { Button } from '../common';
 import { clsx } from 'clsx';
-import { api } from '../../config/api';
 import { toast } from 'react-toastify';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { categoriesService } from '../../services/categories.service';
+import { folderQueryKey, foldersService, MAX_RESOLVE_PATHS } from '../../services/folders.service';
 import { settingsService } from '../../services/settings.service';
 import { useTranslation } from 'react-i18next';
-import { extensionsToMimeTypes, extensionsToAcceptString, extensionsToLabel } from '../../utils/fileTypes';
-import { useUploadProgress } from '../../hooks/useUploadProgress';
-import { photosService } from '../../services/photos.service';
+import { extensionsToMimeTypes, extensionsToAcceptString, extensionsToLabel, isAllowedUploadFile } from '../../utils/fileTypes';
+import { useUploadSession, type UploadBatch } from '../../contexts/UploadSessionContext';
+import { collectDroppedEntries, pickedFromInput, type PickedFile } from '../../utils/droppedFiles';
+import { buildUploadPreview, groupFilesByPlacement, hasDirectories, uniqueDirectories } from '../../utils/uploadStructure';
+import { childFolders, folderPathLabel } from '../../utils/folderTree';
+import { UploadStructurePreview } from './UploadStructurePreview';
 
 interface PhotoUploadProps {
   eventId: number;
-  /** Refresh the photo grid. Called early (as bytes land) and again when
-   *  processing finishes. Never closes the modal. */
-  onUploadComplete?: () => void;
-  /** Fired once the transfer stage is done, reporting whether any file
-   *  failed. The host (modal) uses this to decide whether to auto-close:
-   *  a clean upload closes as before; a partial failure keeps the modal
-   *  open so the failure report stays visible. */
-  onUploadSettled?: (result: { hasFailures: boolean }) => void;
+  /** Fired the moment the upload is handed to the session. The host (modal)
+   *  closes on it; progress and the failure report live in UploadProgressBar. */
+  onUploadStarted?: () => void;
+  /** The event's folder_structure setting: the default of "Keep folder structure" (issue 1786). */
+  folderStructureDefault?: boolean;
+  /** Folder loose files go to at first (the folder open on the Photos tab); null = root. */
+  defaultFolderId?: number | null;
 }
+
+// Wait this long after the last change before asking the server for the
+// structure preview, so a folder walk landing in pieces asks once.
+const PREVIEW_DEBOUNCE_MS = 300;
 
 const DEFAULT_MAX_FILES_PER_UPLOAD = 500;
+// Largest value general_max_files_per_upload can take; mirrors
+// MAX_ALLOWED_FILES_PER_UPLOAD in backend/src/services/uploadSettings.js.
 const MAX_FILES_PER_UPLOAD_LIMIT = 2000;
+// How many admissible files a folder walk collects at most. Fixed, not the
+// capacity at drop time: the cap can be raised and files can be removed
+// while a walk is pending, and addFiles applies the live cap when it lands.
+// One above the largest possible cap, so its "some files skipped" notice
+// still fires for a tree that exceeds even that.
+const FOLDER_WALK_CEILING = MAX_FILES_PER_UPLOAD_LIMIT + 1;
 
-// Upload phase machine. The user perceives "frozen" during 'processing'
-// because the bytes are already on the server and we're waiting for
-// thumbnail/EXIF/etc. work — the explicit phase + hint message kills
-// that perception (#352 / contributor analysis on issue 357 review).
-type UploadPhase =
-  | { kind: 'idle' }
-  | { kind: 'transferring'; chunkIndex: number; totalChunks: number; bytePct: number }
-  | { kind: 'processing'; chunkIndex: number; totalChunks: number; filesInChunk: number };
-
-// Why a file didn't make it into the gallery. Each maps to a distinct
-// stage so the user knows whether to re-pick the file (rejected), retry
-// the network (transfer), or check the source image (processing).
-//   - rejected:   validation/queueing refused it (bad type, too large,
-//                 corrupt) — returned per-file in the upload response.
-//   - transfer:   the whole chunk request failed (timeout, 5xx, network).
-//   - processing: stored fine, but the background worker couldn't process
-//                 it (from useUploadProgress's failedPhotos).
-type UploadFailureKind = 'rejected' | 'transfer' | 'processing';
-interface UploadFailure {
-  filename: string;
-  reason: string;
-  kind: UploadFailureKind;
-}
-
-export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadComplete, onUploadSettled }) => {
+export const PhotoUpload: React.FC<PhotoUploadProps> = ({
+  eventId,
+  onUploadStarted,
+  folderStructureDefault = false,
+  defaultFolderId = null,
+}) => {
   const { t } = useTranslation();
-  const [isUploading, setIsUploading] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [currentChunk, setCurrentChunk] = useState(0);
-  const [totalChunks, setTotalChunks] = useState(0);
-  const [phase, setPhase] = useState<UploadPhase>({ kind: 'idle' });
+  const { startUpload, isUploading } = useUploadSession();
+  // Each file with its directory relative to the drop or folder pick (issue
+  // 1786); '' for loose files.
+  const [selectedFiles, setSelectedFiles] = useState<PickedFile[]>([]);
+  // Folder walks still resolving. Upload stays disabled while any is pending:
+  // otherwise a click sends the current selection, clears it, and the walk's
+  // files arrive in a modal that has already unmounted.
+  const [pendingWalks, setPendingWalks] = useState(0);
+  // The selection as of the last add/remove, written synchronously. A folder
+  // walk resolves asynchronously, so `addFiles` may run from a render that
+  // predates another drop or pick; reading the cap against `selectedFiles`
+  // from that render let two concurrent additions exceed maxFilesPerUpload.
+  const selectedFilesRef = useRef<PickedFile[]>([]);
+  const commitSelection = (next: PickedFile[]) => {
+    selectedFilesRef.current = next;
+    setSelectedFiles(next);
+  };
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
   const [replaceByName, setReplaceByName] = useState(false);
-  // Upload IDs returned from each chunk POST. The processing tracker
-  // hook merges status across all of them so the user sees one unified
-  // progress count even when the upload spans multiple HTTP requests.
-  const [uploadIds, setUploadIds] = useState<string[]>([]);
-  // Per-file failures surfaced from the transfer stage (chunk POSTs):
-  // validation rejections (response.errors) and whole-chunk failures.
-  // Processing failures are merged in from the progress hook below.
-  const [transferFailures, setTransferFailures] = useState<UploadFailure[]>([]);
-  // Processing failures are captured into state (not read live) because the
-  // completion effect clears uploadIds, which empties the progress hook's
-  // failedPhotos — reading live would make the rows vanish the instant they
-  // appear.
-  const [processingFailures, setProcessingFailures] = useState<UploadFailure[]>([]);
-  const [failuresDismissed, setFailuresDismissed] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  // Folder uploads (issue 1786).
+  const [keepStructure, setKeepStructure] = useState(folderStructureDefault);
+  // Only applies when the dry run reports a single outer folder; checked by
+  // default there, as the mockup asks.
+  const [skipOuter, setSkipOuter] = useState(true);
+  const [looseFolderId, setLooseFolderId] = useState<number | null>(defaultFolderId);
+  // The real (not dry-run) resolve call between the click and the upload.
+  const [resolving, setResolving] = useState(false);
 
-  const { aggregate: processingAggregate } = useUploadProgress(uploadIds, {
-    enabled: phase.kind === 'processing' && uploadIds.length > 0,
-  });
+  // React has no typed prop for webkitdirectory, so it is set on the node.
+  useEffect(() => {
+    folderInputRef.current?.setAttribute('webkitdirectory', '');
+  }, []);
 
-  // Single source of truth for the "which files failed" report: transfer
-  // stage failures (collected during handleUpload) plus processing failures
-  // (captured on completion). Both carry filename + reason.
-  const failures = useMemo<UploadFailure[]>(
-    () => [...transferFailures, ...processingFailures],
-    [transferFailures, processingFailures]
-  );
-  
   // Fetch categories for this event
   const { data: categories = [] } = useQuery({
     queryKey: ['event-categories', eventId],
     queryFn: () => categoriesService.getEventCategories(eventId),
   });
 
-  const { data: settings } = useQuery({
+  // Folders for the "Upload into" select. Upload-only roles can read them
+  // too (photos.view); the select is hidden while there are none.
+  const { data: folderTree } = useQuery({
+    queryKey: folderQueryKey(eventId),
+    queryFn: () => foldersService.list(eventId),
+  });
+  const folders = folderTree?.folders ?? [];
+  // Depth-first, so the select reads like the tree.
+  const folderOptions = useMemo(() => {
+    const list = folderTree?.folders ?? [];
+    const out: Array<{ id: number; label: string; depth: number }> = [];
+    const walk = (parentId: number | null, depth: number) => {
+      for (const f of childFolders(list, parentId)) {
+        out.push({ id: f.id, label: f.name, depth });
+        walk(f.id, depth + 1);
+      }
+    };
+    walk(null, 0);
+    return out;
+  }, [folderTree]);
+  // Folders are no categories any more (issue 1786): only filter categories
+  // are offered as the upload's category.
+  const filterCategories = useMemo(() => categories.filter((c) => !c.is_folder), [categories]);
+
+  const { data: settings, isPending: settingsPending } = useQuery({
     queryKey: ['admin-settings'],
     queryFn: () => settingsService.getAllSettings(),
   });
@@ -146,23 +164,51 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
   // change handler and the drop handler. #504 — without the drop handler
   // the dashed-border zone looked draggable but silently fell through to
   // the browser's default "open the file in a new tab" behaviour.
-  const addFiles = (incoming: File[]) => {
-    const imageFiles = incoming.filter((file) => {
-      if (!allowedMimeTypes.includes(file.type)) return false;
-      // Pre-flight size check, mirroring the guest uploader: without it the
-      // admin streams the whole oversized file before the backend 400s it.
-      const limitMb = sizeLimitMbFor(file);
-      if (file.size > limitMb * 1024 * 1024) {
-        toast.error(t('upload.fileTooLarge', { name: file.name, limit: limitMb }));
-        return false;
-      }
-      return true;
-    });
+  // One admission rule for picked and dropped files: allowed type, and the
+  // pre-flight size check mirroring the guest uploader (without it the admin
+  // streams the whole oversized file before the backend 400s it). The folder
+  // walk applies it too, so sidecars and oversized files do not use up the
+  // per-upload budget before the photos behind them are reached.
+  const admitFile = (file: File, rejected?: string[]): boolean => {
+    // Matches on the extension when the browser reports no type, which is
+    // what it does for camera RAW on macOS and Windows. A rejection is
+    // silent and its name goes on `rejected` if the caller passed a list,
+    // because a file chosen by hand is worth naming and a sidecar found
+    // inside a dropped folder is not.
+    if (!isAllowedUploadFile(file, allowedMimeTypes)) {
+      rejected?.push(file.name);
+      return false;
+    }
+    const limitMb = sizeLimitMbFor(file);
+    if (file.size > limitMb * 1024 * 1024) {
+      toast.error(t('upload.fileTooLarge', { name: file.name, limit: limitMb }));
+      return false;
+    }
+    return true;
+  };
+
+  // Picking or dropping a file of the wrong type used to produce nothing at
+  // all: no toast, no log, no request. The zone simply did not react, which
+  // reads as a broken page rather than a rejected format.
+  const reportRejectedTypes = (rejected: string[]) => {
+    if (rejected.length === 0) return;
+    toast.error(t('upload.invalidFileType', { names: rejected.join(', ') }));
+  };
+
+  const addFiles = (incoming: PickedFile[]) => {
+    // Only loose files (chosen or dropped by hand, dir '') are named when
+    // rejected: a picked folder of RAW plus XMP sidecars would otherwise put
+    // every sidecar in one toast. The folder input has no `accept` to
+    // prefilter it.
+    const rejected: string[] = [];
+    const imageFiles = incoming.filter((picked) => admitFile(picked.file, picked.dir === '' ? rejected : undefined));
+    reportRejectedTypes(rejected);
     if (imageFiles.length === 0) return;
 
-    const totalFiles = selectedFiles.length + imageFiles.length;
+    const current = selectedFilesRef.current;
+    const totalFiles = current.length + imageFiles.length;
     if (totalFiles > maxFilesPerUpload) {
-      const allowedNewFiles = maxFilesPerUpload - selectedFiles.length;
+      const allowedNewFiles = maxFilesPerUpload - current.length;
       if (allowedNewFiles <= 0) {
         toast.error(
           t('upload.maxFilesReached', { limit: maxFilesPerUpload }) ||
@@ -174,15 +220,42 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
         t('upload.someFilesSkipped', { allowed: allowedNewFiles, limit: maxFilesPerUpload }) ||
         `Only ${allowedNewFiles} more files can be added (limit ${maxFilesPerUpload})`
       );
-      setSelectedFiles((prev) => [...prev, ...imageFiles.slice(0, allowedNewFiles)]);
+      commitSelection([...current, ...imageFiles.slice(0, allowedNewFiles)]);
       return;
     }
 
-    setSelectedFiles((prev) => [...prev, ...imageFiles]);
+    commitSelection([...current, ...imageFiles]);
   };
 
+  // A folder walk settles in a later render; it must validate with the
+  // limits of that render (admin-settings may have resolved or refreshed
+  // meanwhile), not with the addFiles closure of the drop.
+  const addFilesRef = useRef(addFiles);
+  addFilesRef.current = addFiles;
+  const admitFileRef = useRef(admitFile);
+  admitFileRef.current = admitFile;
+  // Whether the limits above come from the server yet. Until admin-settings
+  // has resolved, admitFile judges by the defaults (no video, 50 MB), which
+  // must not decide what a folder walk keeps.
+  const settingsLoadedRef = useRef(false);
+  settingsLoadedRef.current = settings !== undefined;
+  // Dropped files are admitted only once admin-settings has settled (loaded
+  // or failed): a walk that finishes earlier waits here, or addFiles would
+  // discard a server-allowed video or larger photo under the defaults for
+  // good. The walk stays counted in pendingWalks, so Upload is held too.
+  const settingsSettledRef = useRef(false);
+  settingsSettledRef.current = !settingsPending;
+  const settledWaiters = useRef<Array<() => void>>([]);
+  useEffect(() => {
+    if (!settingsPending) settledWaiters.current.splice(0).forEach((resume) => resume());
+  }, [settingsPending]);
+  const whenSettingsSettled = () => (settingsSettledRef.current
+    ? Promise.resolve()
+    : new Promise<void>((resume) => { settledWaiters.current.push(resume); }));
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    addFiles(Array.from(e.target.files || []));
+    // A folder pick carries webkitRelativePath; a plain pick does not.
+    addFiles(pickedFromInput(Array.from(e.target.files || [])));
     // Reset the input so picking the same files again still fires onChange.
     if (e.target.value) e.target.value = '';
   };
@@ -210,17 +283,91 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
     e.preventDefault();
     e.stopPropagation();
     setIsDragOver(false);
-    const files = Array.from(e.dataTransfer.files || []);
-    addFiles(files);
+    // Dropped folders are walked recursively (issue 1733, C1); the result
+    // goes through the same filter and per-upload cap as picked files.
+    setPendingWalks((n) => n + 1);
+    // The walk stops at a fixed ceiling instead of reading a whole archive;
+    // the cap itself is applied by addFiles against the selection and the
+    // settings as they are when the walk lands.
+    // The prefilter only keeps sidecars and oversized files from using up
+    // the ceiling, and only once the real limits are known: a file read
+    // before admin-settings resolved is collected as it is and judged by
+    // addFiles when the walk lands. A file it rejects is not collected, so
+    // its size toast fires here or in addFiles, never in both.
+    // Same for the wrong-type toast, which is why the names are gathered
+    // here rather than inside the admission rule. Only the items dropped by
+    // hand, depth 0: a folder of RAW next to its XMP sidecars would
+    // otherwise name every sidecar in it.
+    const rejected: string[] = [];
+    const accept = (file: File, depth: number) => !settingsLoadedRef.current
+      || admitFileRef.current(file, depth === 0 ? rejected : undefined);
+    // The walk also stops after examining a multiple of the ceiling (a tree
+    // of mostly unsupported files); say so rather than omit the rest silently.
+    const onTruncated = () => toast.warning(t('upload.folderTooLarge'));
+    void collectDroppedEntries(e.dataTransfer, { limit: FOLDER_WALK_CEILING, accept, onTruncated })
+      .then(async (files) => {
+        await whenSettingsSettled();
+        reportRejectedTypes(rejected);
+        addFilesRef.current(files);
+      })
+      .finally(() => setPendingWalks((n) => n - 1));
   };
 
   const removeFile = (index: number) => {
-    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+    commitSelection(selectedFilesRef.current.filter((_, i) => i !== index));
   };
 
+  // --- Structure preview (issues 1786 + 1562) ---------------------------
+  const withFolders = hasDirectories(selectedFiles);
+  const directories = useMemo(() => uniqueDirectories(selectedFiles), [selectedFiles]);
+  const directoriesKey = directories.join('\n');
+  const [debouncedKey, setDebouncedKey] = useState(directoriesKey);
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedKey(directoriesKey), PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [directoriesKey]);
+  const tooManyDirectories = directories.length > MAX_RESOLVE_PATHS;
+  const previewQuery = useQuery({
+    queryKey: ['folder-resolve-preview', eventId, debouncedKey, skipOuter, keepStructure],
+    queryFn: () => foldersService.resolve(eventId, {
+      paths: debouncedKey.split('\n'),
+      skipOuter,
+      keepStructure,
+      dryRun: true,
+    }),
+    enabled: withFolders && !tooManyDirectories && debouncedKey === directoriesKey,
+    placeholderData: keepPreviousData,
+    staleTime: 10_000,
+  });
+  const resolved = withFolders ? previewQuery.data : undefined;
+  const preview = useMemo(
+    () => (resolved ? buildUploadPreview(selectedFiles, resolved, { skipOuter, keepStructure }) : null),
+    [resolved, selectedFiles, skipOuter, keepStructure]
+  );
+  // Unknown until the folder list loads: assume the narrower role so an
+  // upload-only admin never sees "create folders" wording first.
+  const canManageFolders = resolved?.can_manage ?? folderTree?.can_manage ?? false;
+  const looseTargetLabel = looseFolderId
+    ? folderPathLabel(folders, looseFolderId) || t('upload.structure.galleryRoot', 'gallery root')
+    : t('upload.structure.galleryRoot', 'gallery root');
+
+  const uploadLabel = (() => {
+    const count = selectedFiles.length;
+    if (withFolders && preview && keepStructure && preview.folderCount > 0) {
+      const requesting = !canManageFolders && preview.requestedFolders > 0;
+      const folderText = t('upload.structure.folderCount', '{{count}} folders', {
+        count: requesting ? preview.requestedFolders : preview.folderCount,
+      });
+      return requesting
+        ? t('upload.structure.uploadRequesting', 'Upload {{count}} files · request {{folders}}', { count, folders: folderText })
+        : t('upload.structure.uploadIntoFolders', 'Upload {{count}} files into {{folders}}', { count, folders: folderText });
+    }
+    return t('common.upload') + ` ${count} ${t(count === 1 ? 'common.photo' : 'common.photos')}`;
+  })();
+
   const handleUpload = async () => {
-    if (selectedFiles.length === 0) return;
-    
+    if (selectedFiles.length === 0 || isUploading || pendingWalks > 0 || resolving) return;
+
     // Validate file count
     if (selectedFiles.length > maxFilesPerUpload) {
       toast.error(
@@ -230,353 +377,81 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
       return;
     }
 
-    setIsUploading(true);
-    setUploadProgress(0);
-    setUploadIds([]);
-    // Clear any prior failure report before this run.
-    setTransferFailures([]);
-    setProcessingFailures([]);
-    setFailuresDismissed(false);
-
-    // For large uploads, chunk the files by both count AND size to prevent memory/network issues.
     // #509: the per-chunk byte cap MUST be tunable so users behind Cloudflare Tunnel and other
     // reverse proxies with request-size limits can drop it below their proxy's cap. Falls back
     // to 95MB (Cloudflare-safe headroom under 100MB) when the setting is unset — that matches
     // the value the migration seeds and is what worked in #208's resolution.
-    //
-    // That cap only splits *sets* of files: a lone file above it still went out as one
-    // POST and failed at the proxy. Route those through the existing chunked-upload API
-    // (10MB parts, reachable since #1377) and keep everything else on the multipart path.
-    const MAX_FILES_PER_CHUNK = Math.max(1, Math.min(50, maxFilesPerUpload)); // Max 50 files per chunk
     const maxBatchSizeMb = Number(settings?.general_max_upload_batch_size_mb) || 95;
-    const MAX_BYTES_PER_CHUNK = maxBatchSizeMb * 1024 * 1024;
 
-    // Split: large singles use resumable/chunked API; the rest keep the proven multipart path.
-    const largeFiles = selectedFiles.filter((f) =>
-      photosService.shouldUseChunkedUpload(f.size, MAX_BYTES_PER_CHUNK)
-    );
-    const smallFiles = selectedFiles.filter(
-      (f) => !photosService.shouldUseChunkedUpload(f.size, MAX_BYTES_PER_CHUNK)
-    );
-
-    // The chunked complete step has no replace flag, so a large file with
-    // replace-by-name on would silently land as a second copy. Skip it and
-    // say so in the report rather than behind a toast.
-    const skippedForReplace: UploadFailure[] = replaceByName
-      ? largeFiles.map((f) => ({
-          filename: f.name,
-          reason: t(
-            'upload.largeFileReplaceSkipped',
-            'Replace-by-name is not supported for files above the batch size; upload it without replace.'
-          ),
-          kind: 'rejected' as const,
-        }))
-      : [];
-    const largeFilesToUpload = replaceByName ? [] : largeFiles;
-
-    const chunks: File[][] = [];
-    let currentChunk: File[] = [];
-    let currentChunkSize = 0;
-
-    for (const file of smallFiles) {
-      // Start a new chunk if adding this file would exceed limits
-      if (currentChunk.length >= MAX_FILES_PER_CHUNK ||
-          (currentChunkSize + file.size > MAX_BYTES_PER_CHUNK && currentChunk.length > 0)) {
-        chunks.push(currentChunk);
-        currentChunk = [];
-        currentChunkSize = 0;
+    // Files from folders: resolve their directories for real (creates the
+    // folders, or opens folder requests for an upload-only role), then send
+    // one batch per placement. Loose files keep the old single batch.
+    // What this click sends. Files dropped while the folders below resolve
+    // are not part of it: they stay selected for the next upload instead of
+    // being cleared unsent (review of PR 1826, concern 14).
+    const sending = selectedFilesRef.current;
+    let batches: UploadBatch[] = [{
+      files: sending.map((picked) => picked.file),
+      placement: { categoryId: selectedCategoryId, folderId: looseFolderId },
+    }];
+    if (withFolders) {
+      if (tooManyDirectories) {
+        toast.error(t('upload.structure.tooManyFolders', 'This selection has more than {{limit}} folders. Upload it in parts.', { limit: MAX_RESOLVE_PATHS }));
+        return;
       }
-
-      currentChunk.push(file);
-      currentChunkSize += file.size;
-    }
-
-    // Don't forget the last chunk
-    if (currentChunk.length > 0) {
-      chunks.push(currentChunk);
-    }
-
-    // Treat each large file as its own "unit" for progress (after multipart batches).
-    const totalUnits = chunks.length + largeFilesToUpload.length;
-    setTotalChunks(Math.max(totalUnits, 1));
-    let totalReplaced = 0;
-    // Accumulates transfer-stage failures (per-file rejections + whole-chunk
-    // failures) with their reasons, so the report can name each one.
-    const collected: UploadFailure[] = [...skippedForReplace];
-    // Whether at least one chunk was accepted for background processing.
-    let anyQueued = false;
-    // Large-file chunked path processes synchronously on complete — count successes
-    // so we can settle immediately when nothing is left in the async worker.
-    let largeSucceeded = 0;
-    let unitIndex = 0;
-
-    try {
-      // --- Large files: existing backend chunked-upload (10MB parts) ---
-      for (let li = 0; li < largeFilesToUpload.length; li++) {
-        const file = largeFilesToUpload[li];
-        setCurrentChunk(unitIndex + 1);
-        setPhase({
-          kind: 'transferring',
-          chunkIndex: unitIndex,
-          totalChunks: totalUnits,
-          bytePct: 0,
+      setResolving(true);
+      try {
+        const result = await foldersService.resolve(eventId, {
+          paths: directories,
+          skipOuter,
+          keepStructure,
+          dryRun: false,
         });
-
-        try {
-          await photosService.uploadLargeFile(
-            eventId,
-            file,
-            selectedCategoryId,
-            (pct) => {
-              // pct is 0–100 for this file's chunks only
-              const overall =
-                totalUnits > 0
-                  ? ((unitIndex + Math.min(pct, 100) / 100) / totalUnits) * 100
-                  : pct;
-              setUploadProgress(Math.round(overall));
-              setPhase({
-                kind: 'transferring',
-                chunkIndex: unitIndex,
-                totalChunks: totalUnits,
-                bytePct: Math.round(Math.min(pct, 100)),
-              });
-            }
-          );
-          largeSucceeded += 1;
-          // complete() already ran ffmpeg + insert — refresh grid
-          if (onUploadComplete) onUploadComplete();
-        } catch (error: any) {
-          console.error(`Error uploading large file ${file.name}:`, error);
-          const reason =
-            error?.response?.data?.error ||
-            error?.message ||
-            t('upload.failures.transferReason', 'Transfer failed');
-          collected.push({ filename: file.name, reason, kind: 'transfer' });
-        }
-        unitIndex += 1;
+        batches = groupFilesByPlacement(sending, result.results, {
+          categoryId: selectedCategoryId,
+          looseFolderId,
+        }).groups;
+      } catch (error: unknown) {
+        const e = error as { response?: { data?: { error?: string } } };
+        toast.error(e.response?.data?.error || t('upload.structure.resolveFailed', 'The folders for this upload could not be prepared. Nothing was uploaded.'));
+        return;
+      } finally {
+        setResolving(false);
       }
-
-      // --- Small files: existing multipart batch path ---
-      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-        setCurrentChunk(unitIndex + 1);
-        const chunk = chunks[chunkIndex];
-        const formData = new FormData();
-
-        chunk.forEach((file) => {
-          formData.append('photos', file);
-        });
-
-        if (selectedCategoryId) {
-          formData.append('category_id', selectedCategoryId.toString());
-        }
-        if (replaceByName) {
-          formData.append('replace_by_name', 'true');
-        }
-
-        setPhase({
-          kind: 'transferring',
-          chunkIndex: unitIndex,
-          totalChunks: totalUnits,
-          bytePct: 0,
-        });
-
-        try {
-          const response = await api.post(`/admin/events/${eventId}/upload`, formData, {
-            onUploadProgress: (progressEvent) => {
-              if (progressEvent.total) {
-                const chunkProgress = progressEvent.loaded / progressEvent.total;
-                const overallProgress =
-                  totalUnits > 0
-                    ? ((unitIndex + chunkProgress) / totalUnits) * 100
-                    : chunkProgress * 100;
-                setUploadProgress(Math.round(overallProgress));
-
-                // Once bytes have all left the browser, the request is
-                // sitting in the backend processing pipeline. Flip to
-                // 'processing' so the UI explains the wait instead of
-                // looking frozen at the chunk's max progress.
-                if (chunkProgress >= 1) {
-                  setPhase((prev) =>
-                    prev.kind === 'transferring' && prev.chunkIndex === unitIndex
-                      ? {
-                          kind: 'processing',
-                          chunkIndex: unitIndex,
-                          totalChunks: totalUnits,
-                          filesInChunk: chunk.length,
-                        }
-                      : prev
-                  );
-                } else {
-                  setPhase({
-                    kind: 'transferring',
-                    chunkIndex: unitIndex,
-                    totalChunks: totalUnits,
-                    bytePct: Math.round(chunkProgress * 100),
-                  });
-                }
-              }
-            },
-          });
-
-          totalReplaced += (response.data?.replacedCount || 0);
-          // The backend accepts the request (202) but may reject individual
-          // files (bad type, too large, corrupt) and reports them in
-          // `errors: [{ filename, error }]`. Surface each one by name.
-          const rejected = response.data?.errors;
-          if (Array.isArray(rejected)) {
-            for (const r of rejected) {
-              collected.push({
-                filename: r?.filename || t('upload.failures.unknownFile', 'Unknown file'),
-                reason: r?.error || t('upload.failures.unknownReason', 'Unknown error'),
-                kind: 'rejected',
-              });
-            }
-          }
-          // Track the per-request upload_id so the processing hook can poll
-          // for live progress — but only when photos were actually queued
-          // (count > 0). The backend returns an upload_id even when every
-          // file was rejected (count 0); tracking it there would make us wait
-          // for a processing phase that never starts, hanging the spinner.
-          if (response.data?.upload_id && (response.data?.count ?? 0) > 0) {
-            anyQueued = true;
-            const newId = response.data.upload_id as string;
-            setUploadIds((prev) => (prev.includes(newId) ? prev : [...prev, newId]));
-          }
-        } catch (error: any) {
-          console.error(`Error uploading chunk ${chunkIndex + 1}:`, error);
-          const reason =
-            error?.response?.data?.error ||
-            error?.message ||
-            t('upload.failures.transferReason', 'Transfer failed');
-          collected.push(
-            ...chunk.map((f) => ({ filename: f.name, reason, kind: 'transfer' as const }))
-          );
-
-          // Continue with next chunk even if one fails
-        }
-        unitIndex += 1;
-      }
-
-      // Bytes are all on the server. Clear the file picker so the
-      // user can queue another batch — but DON'T dismiss the upload
-      // UI yet; we'll watch the processing aggregate (useEffect below)
-      // to know when the backend has finished generating thumbnails
-      // and metadata.
-      setSelectedFiles([]);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-
-      if (totalReplaced > 0) {
-        toast.info(t('upload.replacedFiles', { count: totalReplaced }) || `${totalReplaced} photo(s) replaced`);
-      }
-      // Publish transfer-stage failures to the report (rendered below with
-      // each filename + reason). The toast is just the headline; the list
-      // is where the user finds out *which* files failed.
-      setTransferFailures(collected);
-      if (collected.length > 0) {
-        toast.warning(
-          t('upload.failures.toast', '{{count}} file(s) could not be uploaded — see the list below.', {
-            count: collected.length,
-          })
-        );
-      } else if (largeSucceeded > 0 && !anyQueued) {
-        toast.success(
-          t('upload.uploadComplete') ||
-            `Successfully uploaded ${largeSucceeded} file(s)`
-        );
-      }
-
-      // Refresh the grid early so the user sees their photos appearing
-      // as the worker processes them. The processing-aggregate effect
-      // below will refresh again on completion.
-      if (onUploadComplete) {
-        onUploadComplete();
-      }
-
-      // Settling (and the modal's close decision) is deferred until we know
-      // the WHOLE outcome, including background processing. If nothing was
-      // queued (every file rejected, or a pre-async backend), the transfer
-      // stage is already terminal — settle now and reset the UI. Otherwise
-      // the processing effect below settles once the worker finishes, so
-      // processing failures are included before the modal decides to close.
-      // Large chunked uploads finish processing inside complete() — no async queue.
-      if (!anyQueued) {
-        onUploadSettled?.({ hasFailures: collected.length > 0 });
-        setIsUploading(false);
-        setUploadProgress(0);
-        setCurrentChunk(0);
-        setTotalChunks(0);
-        setPhase({ kind: 'idle' });
-      }
-    } catch (error: any) {
-      console.error('Upload error:', error);
-      toast.error(error.response?.data?.error || t('toast.uploadError'));
-      setIsUploading(false);
-      setUploadProgress(0);
-      setCurrentChunk(0);
-      setTotalChunks(0);
-      setPhase({ kind: 'idle' });
-      setUploadIds([]);
-    }
-  };
-
-  // When the background worker finishes processing every photo from
-  // this upload, dismiss the upload UI and surface the result.
-  useEffect(() => {
-    if (!isUploading) return;
-    if (uploadIds.length === 0) return;
-    if (!processingAggregate.isComplete) return;
-
-    if (processingAggregate.failed > 0) {
-      // Persist the failed photos into the report before uploadIds is cleared
-      // below (which would otherwise empty the progress hook's failedPhotos).
-      setProcessingFailures(
-        processingAggregate.failedPhotos.map((p) => ({
-          filename: p.filename,
-          reason: p.error || t('upload.failures.unknownReason', 'Unknown error'),
-          kind: 'processing' as const,
-        }))
-      );
-      toast.warning(
-        t('upload.processingFailed', { count: processingAggregate.failed }) ||
-          `${processingAggregate.failed} photo(s) failed to process`
-      );
-    } else if (transferFailures.length > 0) {
-      // Processing was clean, but files were rejected or lost before they got
-      // there. A plain "Upload complete!" here would contradict the failure
-      // report right below it (QA P4-B.05 / 7.05) — report the real split.
-      toast.warning(
-        t('upload.partialComplete', '{{uploaded}} of {{total}} files uploaded — {{failed}} could not be uploaded.', {
-          uploaded: processingAggregate.complete,
-          total: processingAggregate.complete + transferFailures.length,
-          failed: transferFailures.length,
-        })
-      );
-    } else {
-      toast.success(
-        t('upload.uploadComplete') || `Successfully uploaded ${processingAggregate.complete} photo(s)`
-      );
     }
 
-    if (onUploadComplete) onUploadComplete();
-    // Now the whole outcome is known — settle. The modal auto-closes only
-    // when nothing failed at either stage; any transfer OR processing
-    // failure keeps it open so the report (which lists both) stays visible.
-    onUploadSettled?.({
-      hasFailures: transferFailures.length > 0 || processingAggregate.failed > 0,
+    batches = batches.filter((batch) => batch.files.length > 0);
+    if (batches.length === 0) {
+      // Everything sat in hidden or skipped folders: say so instead of
+      // closing the dialog as if an upload had started.
+      toast.warning(t('upload.structure.nothingToUpload', 'None of the selected files can be uploaded: they are all in hidden or skipped folders.'));
+      return;
+    }
+
+    startUpload({
+      eventId,
+      batches,
+      replaceByName,
+      maxFilesPerChunk: Math.max(1, Math.min(50, maxFilesPerUpload)), // Max 50 files per chunk
+      maxBytesPerChunk: maxBatchSizeMb * 1024 * 1024,
     });
-    setIsUploading(false);
-    setUploadProgress(0);
-    setCurrentChunk(0);
-    setTotalChunks(0);
-    setPhase({ kind: 'idle' });
-    setUploadIds([]);
-    // We intentionally only react to processingAggregate.isComplete /
-    // .failed — the rest of the deps either don't move during this
-    // effect's lifetime or are stable callbacks.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processingAggregate.isComplete, processingAggregate.failed, isUploading]);
+
+    const sentSet = new Set(sending);
+    const leftOver = selectedFilesRef.current.filter((picked) => !sentSet.has(picked));
+    commitSelection(leftOver);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+    if (folderInputRef.current) {
+      folderInputRef.current.value = '';
+    }
+    if (leftOver.length > 0) {
+      // Keep the dialog open with what arrived while preparing.
+      toast.info(t('upload.structure.keptForNext', 'Files added while the folders were prepared are still selected: {{count}}.', { count: leftOver.length }));
+      return;
+    }
+    onUploadStarted?.();
+  };
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return bytes + ' B';
@@ -586,18 +461,55 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
 
   return (
     <div className="space-y-4">
+      {/* One session at a time: the bar tracks a single upload, so a second
+          one waits until it is through. */}
+      {isUploading && (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-lg border border-line bg-neutral-50 dark:bg-neutral-800/60 p-3 text-sm text-body"
+        >
+          <Info className="w-4 h-4 mt-0.5 flex-shrink-0 text-neutral-500" />
+          <p>{t('upload.alreadyRunning', 'An upload is already running. It has to finish before the next one can start.')}</p>
+        </div>
+      )}
+
+      {/* Target folder (issue 1786): where files without a folder of their
+          own land. Shown once the event has folders. */}
+      {folderOptions.length > 0 && (
+        <div>
+          <label htmlFor="upload-target-folder" className="block text-sm font-medium text-body mb-2">
+            {withFolders
+              ? t('upload.structure.looseFilesGoTo', 'Loose files go to')
+              : t('upload.structure.uploadInto', 'Upload into')}
+          </label>
+          <select
+            id="upload-target-folder"
+            value={looseFolderId ?? ''}
+            onChange={(e) => setLooseFolderId(e.target.value ? Number(e.target.value) : null)}
+            className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500"
+          >
+            <option value="">{t('photos.folders.galleryRoot', 'Gallery root')}</option>
+            {folderOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {'\u00a0\u00a0'.repeat(option.depth + 1)}{option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* Category Selection */}
       <div>
-        <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+        <label className="block text-sm font-medium text-body mb-2">
           {t('upload.photoCategory')}
         </label>
         <select
           value={selectedCategoryId || ''}
           onChange={(e) => setSelectedCategoryId(e.target.value ? Number(e.target.value) : null)}
-          className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 focus:ring-2 focus:ring-primary-500"
+          className="w-full px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading focus:ring-2 focus:ring-primary-500"
         >
           <option value="">{t('upload.noCategory')}</option>
-          {categories.map((category) => (
+          {filterCategories.map((category) => (
             <option key={category.id} value={category.id}>
               {category.name} {!category.is_global && t('upload.eventSpecific')}
             </option>
@@ -614,7 +526,7 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
           onChange={(e) => setReplaceByName(e.target.checked)}
           className="rounded border-neutral-300 text-accent focus:ring-primary-500"
         />
-        <label htmlFor="replace-by-name" className="text-sm text-neutral-700 dark:text-neutral-300">
+        <label htmlFor="replace-by-name" className="text-sm text-body">
           {t('upload.replaceByName', 'Replace existing photos with same name')}
         </label>
       </div>
@@ -628,7 +540,7 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
             ? "border-accent-dark bg-accent-dark/25"
             : selectedFiles.length > 0
               ? "border-accent-dark bg-accent-dark/15"
-              : "border-neutral-300 dark:border-neutral-600"
+              : "border-line-strong"
         )}
         onClick={() => fileInputRef.current?.click()}
         onDragOver={handleDragOver}
@@ -636,22 +548,22 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <Upload className="w-12 h-12 mx-auto text-neutral-400 dark:text-neutral-500 mb-4" />
-        <p className="text-neutral-700 dark:text-neutral-300 font-medium mb-1">
-          {t('upload.clickToUpload')}
+        <Upload className="w-12 h-12 mx-auto text-faint mb-4" />
+        <p className="text-body font-medium mb-1">
+          {t('upload.clickToUploadOrDropFolder')}
         </p>
-        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+        <p className="text-sm text-muted">
           {t('upload.fileRequirements', { formats: formatsLabel, limit: maxFilesPerUpload, sizeLimit: maxFileSizeMb })}
         </p>
         {videoUploadsAllowed && (
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          <p className="text-sm text-muted">
             {t('upload.videoSizeLimit', 'Videos: max {{sizeLimit}}MB per file', { sizeLimit: maxVideoSizeMb })}
           </p>
         )}
         <p
           className={clsx(
             "text-xs mt-2",
-            remainingSlots === 0 ? "text-red-600" : "text-neutral-500 dark:text-neutral-400"
+            remainingSlots === 0 ? "text-red-600" : "text-muted"
           )}
         >
           {remainingSlots === 0
@@ -670,27 +582,72 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
           onChange={handleFileSelect}
           className="hidden"
         />
+        {/* Folder pick (issue 1786): webkitdirectory is set in an effect. */}
+        <input
+          ref={folderInputRef}
+          type="file"
+          multiple
+          onChange={handleFileSelect}
+          className="hidden"
+          data-testid="folder-input"
+        />
       </div>
+
+      <div className="flex flex-wrap justify-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => fileInputRef.current?.click()}
+          leftIcon={<FilePlus className="w-4 h-4" />}
+        >
+          {t('upload.addFiles', 'Add files')}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => folderInputRef.current?.click()}
+          leftIcon={<FolderUp className="w-4 h-4" />}
+        >
+          {t('upload.chooseFolder', 'Choose folder')}
+        </Button>
+      </div>
+
+      {withFolders && (
+        <UploadStructurePreview
+          preview={preview}
+          isLoading={previewQuery.isFetching}
+          isError={previewQuery.isError || tooManyDirectories}
+          keepStructure={keepStructure}
+          onKeepStructureChange={setKeepStructure}
+          singleRoot={resolved?.single_root ?? null}
+          skipOuter={skipOuter}
+          onSkipOuterChange={setSkipOuter}
+          canManage={canManageFolders}
+          maxDepth={resolved?.max_depth ?? folderTree?.max_depth ?? 3}
+          looseTargetLabel={looseTargetLabel}
+        />
+      )}
 
       {/* Selected Files */}
       {selectedFiles.length > 0 && (
         <div className="space-y-2">
-          <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+          <p className="text-sm font-medium text-body">
             {t('upload.selectedFiles')} ({selectedFiles.length})
           </p>
           <div className="max-h-48 overflow-y-auto space-y-2">
-            {selectedFiles.map((file, index) => (
+            {selectedFiles.map(({ file, dir }, index) => (
               <div
                 key={index}
-                className="flex items-center justify-between p-2 bg-neutral-50 dark:bg-neutral-800 rounded-lg"
+                className="flex items-center justify-between p-2 bg-subtle rounded-lg"
               >
                 <div className="flex items-center gap-3">
                   <Image className="w-5 h-5 text-neutral-400" />
                   <div>
-                    <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 truncate max-w-xs">
+                    <p className="text-sm font-medium text-body truncate max-w-xs">
                       {file.name}
                     </p>
-                    <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                    {dir && <p className="text-xs text-muted truncate max-w-xs">{dir}/</p>}
+                    <p className="text-xs text-muted">
                       {formatFileSize(file.size)}
                     </p>
                   </div>
@@ -715,138 +672,13 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({ eventId, onUploadCompl
         <Button
           variant="primary"
           onClick={handleUpload}
-          disabled={selectedFiles.length === 0 || isUploading}
-          leftIcon={isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+          disabled={selectedFiles.length === 0 || isUploading || pendingWalks > 0 || resolving}
+          isLoading={pendingWalks > 0 || resolving}
+          leftIcon={<Upload className="w-4 h-4" />}
         >
-          {isUploading ? t('upload.uploading') : t('common.upload') + ` ${selectedFiles.length} ${t(selectedFiles.length === 1 ? 'common.photo' : 'common.photos')}`}
+          {uploadLabel}
         </Button>
       </div>
-
-      {/* Failure report — names every file that didn't make it into the
-          gallery, grouped by failure stage, so the user can act on each.
-          Persists until dismissed or a new upload starts. */}
-      {!failuresDismissed && failures.length > 0 && (
-        <div
-          data-testid="upload-failure-report"
-          role="status"
-          aria-live="polite"
-          className="rounded-lg border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-900/20 p-4"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-              <AlertTriangle className="w-5 h-5 flex-shrink-0" />
-              <p className="text-sm font-medium">
-                {t('upload.failures.title', '{{count}} file(s) could not be uploaded', {
-                  count: failures.length,
-                })}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setFailuresDismissed(true)}
-              aria-label={t('common.dismiss', 'Dismiss')}
-              className="p-1 -m-1 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-800/40 rounded"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <ul className="mt-3 max-h-48 overflow-y-auto space-y-1.5">
-            {failures.map((f, i) => (
-              <li key={`${f.kind}-${f.filename}-${i}`} className="flex items-start gap-2 text-xs">
-                <span
-                  className={clsx(
-                    'flex-shrink-0 mt-0.5 px-1.5 py-0.5 rounded font-medium whitespace-nowrap',
-                    f.kind === 'rejected' && 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
-                    f.kind === 'transfer' && 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
-                    f.kind === 'processing' && 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'
-                  )}
-                >
-                  {f.kind === 'rejected' && t('upload.failures.kindRejected', 'Rejected')}
-                  {f.kind === 'transfer' && t('upload.failures.kindTransfer', 'Transfer failed')}
-                  {f.kind === 'processing' && t('upload.failures.kindProcessing', 'Processing failed')}
-                </span>
-                <span className="min-w-0">
-                  <span className="font-medium text-neutral-800 dark:text-neutral-200 break-all">
-                    {f.filename}
-                  </span>
-                  <span className="text-neutral-500 dark:text-neutral-400"> — {f.reason}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* Progress display — two distinct phases. Bytes-on-wire ('transferring')
-          drives the determinate bar; the post-bytes wait ('processing') swaps
-          in an indeterminate spinner with an explanatory hint so users don't
-          assume the upload froze. */}
-      {isUploading && (
-        <div className="mt-4">
-          {phase.kind === 'processing' ? (
-            <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4">
-              <div className="flex items-start gap-3">
-                <Cog className="w-5 h-5 text-amber-600 dark:text-amber-400 animate-spin shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-amber-900 dark:text-amber-100">
-                    {t('upload.processing')}
-                  </p>
-                  {processingAggregate.total > 0 && (
-                    <>
-                      <p className="text-xs text-amber-900 dark:text-amber-100 font-medium mt-2">
-                        {t('upload.processingProgress', {
-                          complete: processingAggregate.complete + processingAggregate.failed,
-                          total: processingAggregate.total,
-                        })}
-                      </p>
-                      <div className="w-full bg-amber-100 dark:bg-amber-900/40 rounded-full h-2 mt-1">
-                        <div
-                          className="bg-amber-600 dark:bg-amber-500 h-2 rounded-full transition-all duration-300"
-                          style={{
-                            width: `${
-                              processingAggregate.total === 0
-                                ? 0
-                                : Math.round(
-                                    ((processingAggregate.complete + processingAggregate.failed) /
-                                      processingAggregate.total) *
-                                      100
-                                  )
-                            }%`,
-                          }}
-                        />
-                      </div>
-                    </>
-                  )}
-                  <p className="text-xs text-amber-800 dark:text-amber-200 mt-2">
-                    {t('upload.processingHint')}
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="flex justify-between text-sm text-neutral-600 dark:text-neutral-400 mb-1">
-                <span>
-                  {t('upload.transferring')}
-                  {totalChunks > 1 && ` (${t('common.chunk')} ${currentChunk}/${totalChunks})`}
-                </span>
-                <span>{uploadProgress}%</span>
-              </div>
-              <div className="w-full bg-neutral-200 dark:bg-neutral-700 rounded-full h-2">
-                <div
-                  className="bg-accent-dark h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${uploadProgress}%` }}
-                />
-              </div>
-              {totalChunks > 1 && (
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                  {t('upload.uploadingChunks', { count: selectedFiles.length, total: totalChunks })}
-                </p>
-              )}
-            </>
-          )}
-        </div>
-      )}
     </div>
   );
 };

@@ -15,7 +15,12 @@ const emailWebhookTransport = require('../services/emailWebhookTransport');
 const businessProfileService = require('../services/businessProfileService');
 const { errorResponse, safeValidationErrors } = require('../utils/routeHelpers');
 const logger = require('../utils/logger');
-const { parseEmailData, secretValues, redactRenderedHtml } = require('../utils/emailSecretRedaction');
+const { parseEmailData, secretValues, redactRenderedHtml, redactBearerLinks } = require('../utils/emailSecretRedaction');
+const { isMaskedOrBlank, sameSmtpTarget, sameImapTarget } = require('../utils/mailCredentialTarget');
+const { queueTimestamp } = require('../utils/queueTimestamps');
+
+// Shared wording for a masked password that may not follow a changed server.
+const PASSWORD_FOR_NEW_SERVER = (kind) => `Enter the ${kind} password again: the server, port, username or encryption changed, and the saved password is only used for the server it was saved for.`;
 const router = express.Router();
 
 // Get email configuration
@@ -36,10 +41,12 @@ router.get('/config', adminAuth, requirePermission('email.view'), async (req, re
       });
     }
 
-    // Don't send the actual password
+    // Don't send the actual passwords — the row also carries the IMAP
+    // login (migration 128), which /incoming-config masks the same way.
     res.json({
       ...config,
-      smtp_pass: config.smtp_pass ? '********' : ''
+      smtp_pass: config.smtp_pass ? '********' : '',
+      imap_pass: config.imap_pass ? '********' : ''
     });
   } catch (error) {
     errorResponse(res, error, 500, 'Failed to fetch email configuration');
@@ -81,6 +88,12 @@ router.post('/config', [
 
     // Check if config exists
     const existingConfig = await db('email_configs').first();
+    // A kept (masked) password must not follow a changed destination: the
+    // test button would then authenticate to the new server with it.
+    if (existingConfig?.smtp_pass && isMaskedOrBlank(smtp_pass)
+      && !sameSmtpTarget(existingConfig, { smtp_host, smtp_port, smtp_user, smtp_secure: smtp_secure || false })) {
+      return res.status(400).json({ error: PASSWORD_FOR_NEW_SERVER('SMTP'), code: 'PASSWORD_REQUIRED' });
+    }
     
     const configData = {
       smtp_host,
@@ -94,7 +107,7 @@ router.post('/config', [
     };
 
     // Only update password if provided and not masked
-    if (smtp_pass && smtp_pass !== '********') {
+    if (!isMaskedOrBlank(smtp_pass)) {
       configData.smtp_pass = smtp_pass;
     }
 
@@ -164,6 +177,11 @@ router.post('/incoming-config', [
       return res.status(400).json({ error: 'IMAP host cannot point to a private or internal network address' });
     }
     const existing = await db('email_configs').first();
+    // Same rule as SMTP: the poller would log in to the new server with it.
+    if (existing?.imap_pass && isMaskedOrBlank(imap_pass)
+      && !sameImapTarget(existing, { imap_host, imap_port, imap_user, imap_secure: imap_secure || false })) {
+      return res.status(400).json({ error: PASSWORD_FOR_NEW_SERVER('IMAP'), code: 'PASSWORD_REQUIRED' });
+    }
     const data = {
       imap_host,
       imap_port: parseInt(imap_port),
@@ -172,7 +190,7 @@ router.post('/incoming-config', [
       imap_folder: imap_folder || 'INBOX',
       updated_at: new Date(),
     };
-    if (imap_pass && imap_pass !== '********') data.imap_pass = imap_pass;
+    if (!isMaskedOrBlank(imap_pass)) data.imap_pass = imap_pass;
     if (existing) await db('email_configs').where('id', existing.id).update(data);
     else await db('email_configs').insert(data);
     await logActivity('incoming_mail_config_updated', { imap_host }, null, { type: 'admin', id: req.admin.id, name: req.admin.username });
@@ -186,7 +204,9 @@ router.post('/incoming-config', [
 // List IMAP folders so the UI can offer a dropdown (auto-detect) instead of a
 // free-text path. Accepts optional creds in the body to detect before saving;
 // falls back to the stored config (and stored password when masked).
-router.post('/incoming-config/folders', adminAuth, requirePermission('email.view'), async (req, res) => {
+// Needs email.edit: it logs in with credentials, and the stored password is
+// only reused for the saved server (emailIntakeService).
+router.post('/incoming-config/folders', adminAuth, requirePermission('email.edit'), async (req, res) => {
   try {
     const { imap_host, imap_port, imap_secure, imap_user, imap_pass } = req.body || {};
     if (imap_host) {
@@ -201,6 +221,7 @@ router.post('/incoming-config/folders', adminAuth, requirePermission('email.view
     );
     res.json({ folders });
   } catch (error) {
+    if (error.code === 'PASSWORD_REQUIRED') return res.status(400).json({ error: error.message, code: error.code });
     logger.error('IMAP folder detection error:', error);
     res.status(422).json({ error: `Could not connect to the mailbox (${error.message}). Check host, port (IMAP is usually 993) and credentials.` });
   }
@@ -208,7 +229,7 @@ router.post('/incoming-config/folders', adminAuth, requirePermission('email.view
 
 // Test the incoming-mail connection: log in + open the configured folder and
 // report message/unread counts. Accepts current form creds (test before save).
-router.post('/incoming-config/test', adminAuth, requirePermission('email.view'), async (req, res) => {
+router.post('/incoming-config/test', adminAuth, requirePermission('email.edit'), async (req, res) => {
   try {
     const { imap_host, imap_port, imap_secure, imap_user, imap_pass, imap_folder } = req.body || {};
     if (imap_host) {
@@ -227,6 +248,7 @@ router.post('/incoming-config/test', adminAuth, requirePermission('email.view'),
     if (result?.ok) capabilityEvidence(res, 'incoming_mail');
     res.json(result);
   } catch (error) {
+    if (error.code === 'PASSWORD_REQUIRED') return res.status(400).json({ error: error.message, code: error.code });
     logger.error('IMAP connection test error:', error);
     res.status(422).json({ error: `Could not connect to the mailbox (${error.message}). Check host, port (IMAP is usually 993), credentials and folder.` });
   }
@@ -321,8 +343,10 @@ router.get('/received/:id', adminAuth, messagingGate, requirePermission('email.v
 
 // Move an email between mailbox states: Archive / Delete (soft) or Restore
 // (back to active). kind = 'queue' | 'received'. Delete is a soft move to the
-// trash; the row is only removed for good by the DELETE handler below.
-router.post('/item/:kind/:id/state', adminAuth, messagingGate, requirePermission('email.view'), async (req, res) => {
+// trash; the row is only removed for good by the DELETE handler below. A
+// write to the shared folders, so email.edit like the permanent delete —
+// email.view stays read-only.
+router.post('/item/:kind/:id/state', adminAuth, messagingGate, requirePermission('email.edit'), async (req, res) => {
   try {
     const table = req.params.kind === 'received' ? 'received_emails' : req.params.kind === 'queue' ? 'email_queue' : null;
     if (!table) return res.status(400).json({ error: 'Invalid kind' });
@@ -412,29 +436,41 @@ router.post('/accounts', adminAuth, messagingGate, requirePermission('email.edit
       label: b.label || null,
       imap_host: b.imap_host || null,
       imap_port: b.imap_port ? parseInt(b.imap_port, 10) : 993,
-      imap_secure: b.imap_secure !== false,
+      // SQLite returns these flags as 0/1 and the form sends them back as-is.
+      imap_secure: b.imap_secure !== false && b.imap_secure !== 0 && b.imap_secure !== '0',
       imap_user: b.imap_user || null,
       imap_folder: b.imap_folder || 'INBOX',
       // Outgoing (SMTP) identity — replies from this mailbox send from here.
       smtp_host: b.smtp_host || null,
       smtp_port: b.smtp_port ? parseInt(b.smtp_port, 10) : 587,
-      smtp_secure: b.smtp_secure === true,
+      smtp_secure: b.smtp_secure === true || b.smtp_secure === 1 || b.smtp_secure === '1',
       smtp_user: b.smtp_user || null,
       from_email: b.from_email || null,
       from_name: b.from_name || null,
       enabled: !!b.enabled,
       updated_at: new Date(),
     };
-    if (b.imap_pass && b.imap_pass !== '********') patch.imap_pass = b.imap_pass;
-    if (b.smtp_pass && b.smtp_pass !== '********') patch.smtp_pass = b.smtp_pass;
+    if (!isMaskedOrBlank(b.imap_pass)) patch.imap_pass = b.imap_pass;
+    if (!isMaskedOrBlank(b.smtp_pass)) patch.smtp_pass = b.smtp_pass;
+    // Removing a connection (blank host) drops its password with it; leaving
+    // SMTP blank sends through the global outgoing transport.
+    if (!patch.imap_host) patch.imap_pass = '';
+    if (!patch.smtp_host) patch.smtp_pass = '';
     const existing = await db('mail_accounts').where({ account_key: b.account_key }).first();
+    // A kept password must not follow a changed server (see mailCredentialTarget).
+    if (patch.imap_host && existing?.imap_pass && isMaskedOrBlank(b.imap_pass) && !sameImapTarget(existing, patch)) {
+      return res.status(400).json({ error: PASSWORD_FOR_NEW_SERVER('IMAP'), code: 'PASSWORD_REQUIRED' });
+    }
+    if (patch.smtp_host && existing?.smtp_pass && isMaskedOrBlank(b.smtp_pass) && !sameSmtpTarget(existing, patch)) {
+      return res.status(400).json({ error: PASSWORD_FOR_NEW_SERVER('SMTP'), code: 'PASSWORD_REQUIRED' });
+    }
     if (existing) {
       await db('mail_accounts').where({ account_key: b.account_key }).update(patch);
     } else {
       await db('mail_accounts').insert({
         account_key: b.account_key,
-        imap_pass: (b.imap_pass && b.imap_pass !== '********') ? b.imap_pass : '',
-        smtp_pass: (b.smtp_pass && b.smtp_pass !== '********') ? b.smtp_pass : '',
+        imap_pass: '',
+        smtp_pass: '',
         created_at: new Date().toISOString(),
         ...patch,
       });
@@ -447,7 +483,7 @@ router.post('/accounts', adminAuth, messagingGate, requirePermission('email.edit
 
 // Test an inbound mailbox's IMAP connection (before or after saving). Resolves
 // a masked/blank password from the stored row for the given account_key.
-router.post('/accounts/test', adminAuth, messagingGate, requirePermission('email.view'), async (req, res) => {
+router.post('/accounts/test', adminAuth, messagingGate, requirePermission('email.edit'), async (req, res) => {
   try {
     const b = req.body || {};
     const { isHostAllowed } = require('../utils/networkValidation');
@@ -455,9 +491,13 @@ router.post('/accounts/test', adminAuth, messagingGate, requirePermission('email
       return res.status(400).json({ error: 'IMAP host cannot point to a private or internal network address' });
     }
     let pass = b.imap_pass;
-    if ((!pass || pass === '********') && b.account_key) {
-      const stored = await db('mail_accounts').where({ account_key: b.account_key }).first();
-      pass = stored?.imap_pass || '';
+    if (isMaskedOrBlank(pass)) {
+      // The stored password only for the server it was saved for.
+      const stored = b.account_key ? await db('mail_accounts').where({ account_key: b.account_key }).first() : null;
+      if (!stored?.imap_pass || !sameImapTarget(stored, b)) {
+        return res.status(400).json({ ok: false, error: 'Enter the IMAP password: the saved password is only used for the server it was saved for.', code: 'PASSWORD_REQUIRED' });
+      }
+      pass = stored.imap_pass;
     }
     const emailIntakeService = require('../services/emailIntakeService');
     const result = await emailIntakeService.testConnection({
@@ -673,7 +713,7 @@ router.post('/flush-queue', adminAuth, requirePermission('email.send'), async (r
     res.json({ message: 'Email queue flushed', ...summary });
   } catch (error) {
     logger.error('Flush email queue error:', error);
-    res.status(500).json({ error: 'Failed to flush email queue', details: error.message });
+    res.status(500).json({ error: 'Failed to flush email queue' });
   }
 });
 
@@ -772,7 +812,7 @@ router.get('/queue', adminAuth, requirePermission('email.view'), [
     });
   } catch (error) {
     logger.error('List email queue error:', error);
-    res.status(500).json({ error: 'Failed to load email queue', details: error.message });
+    res.status(500).json({ error: 'Failed to load email queue' });
   }
 });
 
@@ -798,7 +838,9 @@ router.get('/queue/:id', adminAuth, messagingGate, requirePermission('email.view
     // gallery password / client PIN in their variables and body. Redact on
     // read from the same rule, so the pane never serves a password.
     const data = parseEmailData(row.email_data);
-    const renderedHtml = redactRenderedHtml(row.rendered_html || null, secretValues(data));
+    // Link tokens are credentials too: documents, invitation and
+    // password-reset links, and admin action links.
+    const renderedHtml = redactBearerLinks(redactRenderedHtml(row.rendered_html || null, secretValues(data)));
     try {
       if (data.cc) cc = Array.isArray(data.cc) ? data.cc.join(', ') : String(data.cc);
       if (Array.isArray(data.attachments)) {
@@ -827,7 +869,7 @@ router.get('/queue/:id', adminAuth, messagingGate, requirePermission('email.view
     });
   } catch (error) {
     logger.error('Get email queue item error:', error);
-    res.status(500).json({ error: 'Failed to load email', details: error.message });
+    res.status(500).json({ error: 'Failed to load email' });
   }
 });
 
@@ -877,13 +919,16 @@ router.post('/send', adminAuth, messagingGate, requirePermission('email.send'), 
       status: 'sent',
       origin: 'manual',
       rendered_html: html,
-      created_at: new Date().toISOString(),
+      // Engine-shaped like queueEmail's rows, so the queue orders and filters
+      // on one shape per engine (issue 1670). Already sent, so no schedule.
+      created_at: queueTimestamp(Date.now()),
+      scheduled_at: null,
       sent_at: new Date().toISOString(),
     });
     res.json({ ok: true });
   } catch (error) {
     logger.error('Manual send error:', error);
-    res.status(500).json({ error: 'Failed to send message', details: error.message });
+    res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
@@ -1246,11 +1291,14 @@ router.post('/templates/:key/preview', adminAuth, requirePermission('email.view'
         .replace(/'/g, '&#039;');
 
       Object.keys(preview_data).forEach(key => {
-        const regex = new RegExp(`{{${key}}}`, 'g');
+        // A literal replace: the key comes from the request, and compiling it
+        // into a RegExp let a crafted key stall the event loop through
+        // catastrophic backtracking (Codex security audit 2026-09-30).
+        const placeholder = `{{${key}}}`;
         const escapedValue = escapeHtml(preview_data[key]);
-        htmlContent = htmlContent.replace(regex, escapedValue);
-        textContent = textContent.replace(regex, preview_data[key]);
-        subject = subject.replace(regex, escapeHtml(preview_data[key]));
+        htmlContent = htmlContent.split(placeholder).join(escapedValue);
+        textContent = textContent.split(placeholder).join(String(preview_data[key]));
+        subject = subject.split(placeholder).join(escapeHtml(preview_data[key]));
       });
     }
 

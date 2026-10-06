@@ -3,6 +3,7 @@ const logger = require('../utils/logger');
 const { ensureThumbnail } = require('./imageProcessor');
 const { getStorage } = require('./storage');
 const { getAbsoluteFrontendUrl } = require('../utils/frontendUrl');
+const { isGalleryAvailable } = require('../utils/galleryLifecycle');
 
 const SOCIAL_CRAWLER_PATTERNS = [
   /facebookexternalhit/i,
@@ -169,19 +170,12 @@ async function formatEventDate(value) {
   }
 }
 
-// Draft, archived and deactivated galleries are refused by /info; the OG
-// preview must not leak their name, date and welcome message to crawlers.
-function isPubliclyVisible(event) {
-  if (!event) return false;
-  const truthy = (v) => v === true || v === 1 || v === '1' || v === 'true';
-  if (truthy(event.is_draft) || truthy(event.is_archived)) return false;
-  if (event.is_active === false || event.is_active === 0 || event.is_active === '0') return false;
-  return true;
-}
-
+// Draft, archived, deactivated and expired galleries are refused by /info;
+// the OG preview must not leak their name, date and welcome message to
+// crawlers. Same predicate as gallery access, so the two never disagree.
 async function buildOgMetadata(slug, requestPath) {
   const resolved = await resolveSlug(slug);
-  const event = isPubliclyVisible(resolved) ? resolved : null;
+  const event = isGalleryAvailable(resolved) ? resolved : null;
   const branding = await fetchBranding();
   const base = await frontendBase();
   const siteName = branding.companyName || 'PicPeak';
@@ -204,7 +198,11 @@ async function buildOgMetadata(slug, requestPath) {
   const title = titleParts.join(' — ');
 
   let description;
-  if (event.welcome_message) {
+  // Only explicitly password-free galleries may publish their welcome text.
+  // Missing/legacy values default to private, as they do in gallery auth.
+  const isPasswordFree = [false, 0, '0'].includes(event.require_password);
+  const { isGalleryHidden } = require('../utils/revealMode');
+  if (isPasswordFree && !isGalleryHidden(event) && event.welcome_message) {
     description = String(event.welcome_message).replace(/\s+/g, ' ').trim().slice(0, 200);
   } else if (eventDate) {
     description = `Photo gallery from ${eventName} on ${eventDate}.`;
@@ -222,7 +220,6 @@ async function buildOgMetadata(slug, requestPath) {
   // Reveal mode (#838): while the gallery is hidden from guests, social
   // crawlers must not get the hero photo either — fall back to the brand
   // logo like the opt-out case.
-  const { isGalleryHidden } = require('../utils/revealMode');
   if (event.og_image_share_enabled && event.hero_photo_id && !isGalleryHidden(event)) {
     const heroPhoto = await db('photos')
       .where({ id: event.hero_photo_id, event_id: event.id })
@@ -250,6 +247,7 @@ function renderOgHtml(meta) {
   const i = escapeHtml(meta.image);
   const u = escapeHtml(meta.url);
   const s = escapeHtml(meta.siteName);
+  const l = escapeHtml(meta.linkLabel || 'View gallery');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -272,7 +270,7 @@ function renderOgHtml(meta) {
 <body>
   <h1>${t}</h1>
   <p>${d}</p>
-  <p><a href="${u}">View gallery</a></p>
+  <p><a href="${u}">${l}</a></p>
 </body>
 </html>`;
 }
@@ -319,7 +317,9 @@ async function handleGalleryOgCover(req, res) {
     }
     const event = await resolveSlug(slug);
     const { isGalleryHidden } = require('../utils/revealMode');
-    if (!event || !event.og_image_share_enabled || !event.hero_photo_id || isGalleryHidden(event)) {
+    // Lifecycle first: a draft, archived, deactivated or expired gallery has
+    // no public cover, however the opt-in is set.
+    if (!isGalleryAvailable(event) || !event.og_image_share_enabled || !event.hero_photo_id || isGalleryHidden(event)) {
       res.status(404).type('text/plain').send('Cover not available');
       return;
     }
@@ -372,6 +372,8 @@ async function handleGalleryOgCover(req, res) {
 
 module.exports = {
   isSocialCrawler,
+  fetchBranding,
+  absoluteUrl,
   buildOgMetadata,
   renderOgHtml,
   handleGalleryOgRequest,

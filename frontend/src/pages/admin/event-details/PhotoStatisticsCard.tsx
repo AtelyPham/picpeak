@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Image } from 'lucide-react';
 import type { Event } from '../../../types';
 import { Button, Card } from '../../../components/common';
+import { formatRuntime, splitMediaCount } from '../../../utils/mediaCounts';
 import type { EventDetailsTab } from './types';
 
 interface PhotoStatisticsCardProps {
@@ -17,47 +18,65 @@ export const PhotoStatisticsCard: React.FC<PhotoStatisticsCardProps> = ({
   setActiveTab
 }) => {
   const { t } = useTranslation();
+  // An event that holds videos is described as media and counted by type; one
+  // that holds only photos keeps the photo wording (issue 1430).
+  const media = splitMediaCount(event.photo_count, event.video_count);
 
   return (
     <Card padding="md">
-      <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">{t('events.photoStatistics')}</h2>
+      <h2 className="text-lg font-semibold text-heading mb-4">
+        {media.hasVideos ? t('events.mediaStatistics', 'Media Statistics') : t('events.photoStatistics')}
+      </h2>
 
       <div className="space-y-3">
-        <div className="flex items-center justify-between py-2 px-3 bg-neutral-50 dark:bg-neutral-700 rounded-lg">
-          <span className="text-sm text-neutral-600 dark:text-neutral-400">{t('events.totalPhotos')}</span>
-          <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{event.photo_count || 0}</span>
+        <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+          <span className="text-sm text-soft">{media.hasVideos ? t('events.photos') : t('events.totalPhotos')}</span>
+          <span className="text-sm font-medium text-heading">{media.photos}</span>
         </div>
 
-        <div className="flex items-center justify-between py-2 px-3 bg-neutral-50 dark:bg-neutral-700 rounded-lg">
-          <span className="text-sm text-neutral-600 dark:text-neutral-400">{t('events.totalSize')}</span>
-          <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
+        {media.hasVideos && (
+          <>
+            <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+              <span className="text-sm text-soft">{t('events.videos', 'Videos')}</span>
+              <span className="text-sm font-medium text-heading">{media.videos}</span>
+            </div>
+            <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+              <span className="text-sm text-soft">{t('events.videoRuntime', 'Video runtime')}</span>
+              <span className="text-sm font-medium text-heading tabular-nums">{formatRuntime(event.video_duration)}</span>
+            </div>
+          </>
+        )}
+
+        <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+          <span className="text-sm text-soft">{t('events.totalSize')}</span>
+          <span className="text-sm font-medium text-heading">
             {event.total_size ? `${(event.total_size / (1024 * 1024)).toFixed(1)} MB` : '0 MB'}
           </span>
         </div>
 
-        <div className="flex items-center justify-between py-2 px-3 bg-neutral-50 dark:bg-neutral-700 rounded-lg">
-          <span className="text-sm text-neutral-600 dark:text-neutral-400">{t('events.categories')}</span>
-          <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{categories.length}</span>
+        <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+          <span className="text-sm text-soft">{t('events.categories')}</span>
+          <span className="text-sm font-medium text-heading">{categories.length}</span>
         </div>
 
         {event.total_views !== undefined && (
-          <div className="flex items-center justify-between py-2 px-3 bg-neutral-50 dark:bg-neutral-700 rounded-lg">
-            <span className="text-sm text-neutral-600 dark:text-neutral-400">{t('events.totalViews')}</span>
-            <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{event.total_views || 0}</span>
+          <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+            <span className="text-sm text-soft">{t('events.totalViews')}</span>
+            <span className="text-sm font-medium text-heading">{event.total_views || 0}</span>
           </div>
         )}
 
         {event.total_downloads !== undefined && (
-          <div className="flex items-center justify-between py-2 px-3 bg-neutral-50 dark:bg-neutral-700 rounded-lg">
-            <span className="text-sm text-neutral-600 dark:text-neutral-400">{t('events.totalDownloads')}</span>
-            <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{event.total_downloads || 0}</span>
+          <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+            <span className="text-sm text-soft">{t('events.totalDownloads')}</span>
+            <span className="text-sm font-medium text-heading">{event.total_downloads || 0}</span>
           </div>
         )}
 
         {event.unique_visitors !== undefined && (
-          <div className="flex items-center justify-between py-2 px-3 bg-neutral-50 dark:bg-neutral-700 rounded-lg">
-            <span className="text-sm text-neutral-600 dark:text-neutral-400">{t('events.uniqueVisitors')}</span>
-            <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{event.unique_visitors || 0}</span>
+          <div className="flex items-center justify-between py-2 px-3 bg-inset rounded-lg">
+            <span className="text-sm text-soft">{t('events.uniqueVisitors')}</span>
+            <span className="text-sm font-medium text-heading">{event.unique_visitors || 0}</span>
           </div>
         )}
       </div>
@@ -70,7 +89,7 @@ export const PhotoStatisticsCard: React.FC<PhotoStatisticsCardProps> = ({
           onClick={() => setActiveTab('photos')}
           className="w-full justify-center"
         >
-          {t('events.managePhotos')}
+          {media.hasVideos ? t('events.manageMedia', 'Manage Media') : t('events.managePhotos')}
         </Button>
       </div>
     </Card>

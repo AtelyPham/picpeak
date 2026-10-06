@@ -25,6 +25,7 @@ class XmpGenerator {
     const label = include_label ? this.mapLabel(photo) : null;
 
     const descriptionXml = include_description ? this.generateDescription(photo) : '';
+    const creatorXml = this.generateCreator(photo);
     const keywordsXml = include_keywords ? this.generateKeywords(photo) : '';
 
     return `<?xml version="1.0" encoding="UTF-8"?>
@@ -38,7 +39,8 @@ class XmpGenerator {
       xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
       xmp:Rating="${rating}"${label ? `
       xmp:Label="${label}"` : ''}>
-      ${descriptionXml}
+      ${descriptionXml}${creatorXml ? `
+      ${creatorXml}` : ''}
       ${keywordsXml}
     </rdf:Description>
   </rdf:RDF>
@@ -87,16 +89,19 @@ class XmpGenerator {
 
   /**
    * The pre-#1044 mapping: infer a colour from the average star rating.
-   * @param {number} avgRating - Average rating
+   * @param {number|string} avgRating - Average rating (a decimal string on Postgres)
    * @returns {string|null} XMP label color
    */
   mapRatingToLabel(avgRating) {
-    if (!avgRating || avgRating === 0) return null;
-    if (avgRating >= 4.5) return 'Red';      // Top picks
-    if (avgRating >= 3.5) return 'Yellow';   // Good
-    if (avgRating >= 2.5) return 'Green';    // Average
-    if (avgRating >= 1.5) return 'Blue';     // Below average
-    return 'Purple';                          // Low
+    // Postgres returns the decimal average as a string, and "0.00" is
+    // truthy — without the coercion every unrated photo got a label.
+    const value = parseFloat(avgRating);
+    if (!value || Number.isNaN(value)) return null;
+    if (value >= 4.5) return 'Red';      // Top picks
+    if (value >= 3.5) return 'Yellow';   // Good
+    if (value >= 2.5) return 'Green';    // Average
+    if (value >= 1.5) return 'Blue';     // Below average
+    return 'Purple';                      // Low
   }
 
   /**
@@ -118,6 +123,22 @@ class XmpGenerator {
           <rdf:li xml:lang="x-default">${this.escapeXml(desc)}</rdf:li>
         </rdf:Alt>
       </dc:description>`;
+  }
+
+  /**
+   * dc:creator from the photo credit (#1561), so the name follows the sidecar
+   * into Lightroom's Creator field. Nothing when the photo has no credit —
+   * an empty element would clear a Creator the catalog already holds.
+   * @param {Object} photo - Photo object
+   * @returns {string} Creator XML, or ''
+   */
+  generateCreator(photo) {
+    if (!photo || !photo.credit_name) return '';
+    return `<dc:creator>
+        <rdf:Seq>
+          <rdf:li>${this.escapeXml(photo.credit_name)}</rdf:li>
+        </rdf:Seq>
+      </dc:creator>`;
   }
 
   /**

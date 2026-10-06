@@ -53,6 +53,9 @@ class PhotoExportService {
   async getPhotosWithFeedback(eventId, photoIds = null, adminId = null) {
     let query = db('photos')
       .leftJoin('photo_categories', 'photos.category_id', 'photo_categories.id')
+      // The folder a photo lives in (issue 1786, migration 265): since then
+      // category_id holds filter categories only.
+      .leftJoin('photo_categories as photo_folders', 'photos.folder_id', 'photo_folders.id')
       .where('photos.event_id', eventId)
       .select(
         'photos.id',
@@ -72,7 +75,10 @@ class PhotoExportService {
         'photos.height',
         'photos.size_bytes',
         'photos.uploaded_at',
-        'photo_categories.name as category_name'
+        // Photo credit (#1561) — the CSV/JSON column and the XMP dc:creator.
+        'photos.credit_name',
+        'photo_categories.name as category_name',
+        'photo_folders.name as folder_name'
       )
       .orderBy('photos.filename', 'asc');
 
@@ -206,7 +212,8 @@ class PhotoExportService {
       'width',
       'height',
       'size_bytes',
-      'uploaded_at'
+      'uploaded_at',
+      'credit'
     ];
 
     const rows = photos.map(photo => [
@@ -224,7 +231,8 @@ class PhotoExportService {
       photo.width || '',
       photo.height || '',
       photo.size_bytes || '',
-      photo.uploaded_at ? new Date(photo.uploaded_at).toISOString() : ''
+      photo.uploaded_at ? new Date(photo.uploaded_at).toISOString() : '',
+      photo.credit_name || ''
     ]);
 
     const csvContent = [
@@ -324,7 +332,8 @@ class PhotoExportService {
           height: photo.height || null
         },
         size_bytes: photo.size_bytes || null,
-        uploaded_at: photo.uploaded_at || null
+        uploaded_at: photo.uploaded_at || null,
+        credit: photo.credit_name || null
       }))
     };
 

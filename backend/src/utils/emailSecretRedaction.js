@@ -98,6 +98,19 @@ function redactRenderedHtml(html, secrets) {
   }).join('');
 }
 
+// Contract and quote emails link to `/contract/<64 hex>` and `/quote/<64 hex>`,
+// and that path segment is the link's bearer token. The archived body keeps it
+// for as long as the row lives, and the Messages pane and the project cockpit
+// serve that body to admins who hold no contract or quote permission. Only the
+// token is masked, so the preview still shows that the email carried a link.
+const DOCUMENT_LINK_TOKEN_RE = /(\/(?:contracts?|quotes?)\/)[a-f0-9]{64}(?![a-f0-9])/gi;
+
+/** A copy of an email body with document-link tokens masked. */
+function redactDocumentLinks(html) {
+  if (!html) return html;
+  return String(html).replace(DOCUMENT_LINK_TOKEN_RE, `$1${MASK}`);
+}
+
 /** Parse a stored email_data column leniently (string or already-parsed). */
 function parseEmailData(raw) {
   if (!raw) return {};
@@ -128,5 +141,62 @@ function replaceMaskedSecrets(emailData, sentinel = '{{password_security_message
   return walk(emailData);
 }
 
+// Invitation and password-reset emails link to `/invite/<64 hex>`,
+// `/customer/invite/<64 hex>` and `/customer/reset-password/<64 hex>`. That
+// token sets the password of the account, so whoever can read the archived
+// mail can take the account over — including a pending super-admin invite
+// read by an admin who only holds email.view. Unlike a contract link, the
+// archive has no use for it once the mail is out.
+const RECOVERY_LINK_TOKEN_RE = /(\/(?:customer\/)?(?:invite|reset-password)\/)[a-f0-9]{64}(?![a-f0-9])/gi;
+
+// Workflow approval and payment-check emails go to the admin and act without
+// a login: `/api/public/workflow-approvals/<64 hex>/confirm` and
+// `/payment-check/<64 hex>?action=…`. Masked for readers of the archive; the
+// stored row keeps them, like document links.
+const ACTION_LINK_TOKEN_RE = /(\/(?:api\/public\/workflow-approvals|payment-check)\/)[a-f0-9]{64}(?![a-f0-9])/gi;
+
+/** A copy of a string with invitation and password-reset link tokens masked. */
+function redactRecoveryLinks(text) {
+  if (!text) return text;
+  return String(text).replace(RECOVERY_LINK_TOKEN_RE, `$1${MASK}`);
+}
+
+/** Template variables with every recovery link token masked, at any depth. */
+function redactRecoveryLinksInData(emailData) {
+  if (!emailData || typeof emailData !== 'object') return emailData;
+  const copy = Array.isArray(emailData) ? [] : {};
+  for (const [key, value] of Object.entries(emailData)) {
+    if (value && typeof value === 'object') copy[key] = redactRecoveryLinksInData(value);
+    else copy[key] = typeof value === 'string' ? redactRecoveryLinks(value) : value;
+  }
+  return copy;
+}
+
+/**
+ * Whether archived variables carry a recovery link whose token was masked.
+ * Such a row cannot be sent again: the mail would carry a dead link.
+ */
+function hasMaskedRecoveryLink(emailData) {
+  const needle = new RegExp(`/(?:customer/)?(?:invite|reset-password)/${escapeRegExp(MASK)}`);
+  const walk = (value) => {
+    if (typeof value === 'string') return needle.test(value);
+    if (value && typeof value === 'object') return Object.values(value).some(walk);
+    return false;
+  };
+  return walk(emailData);
+}
+
+/**
+ * An email body as shown to admins reading the archive: every bearer link
+ * token masked — documents, account recovery, and admin action links.
+ */
+function redactBearerLinks(html) {
+  if (!html) return html;
+  return redactDocumentLinks(String(html))
+    .replace(RECOVERY_LINK_TOKEN_RE, `$1${MASK}`)
+    .replace(ACTION_LINK_TOKEN_RE, `$1${MASK}`);
+}
+
 module.exports = {
-  replaceMaskedSecrets, MASK, isSecretKey, secretValues, redactEmailData, redactRenderedHtml, parseEmailData };
+  replaceMaskedSecrets, MASK, isSecretKey, secretValues, redactEmailData, redactRenderedHtml, redactDocumentLinks, parseEmailData,
+  redactRecoveryLinks, redactRecoveryLinksInData, hasMaskedRecoveryLink, redactBearerLinks };

@@ -2,19 +2,25 @@
  * Customer-side Contracts list. Read-only view of every contract the
  * photographer has sent. Mirrors CustomerQuotesPage in shape:
  *   - status filter + sort
- *   - "Open & sign" link on `sent` rows (deep-link to the public page)
+ *   - "Sign" on signable rows: asks the server for signing access — a signing
+ *     session for a signatures-v2 contract (opens /contract/signing, no code
+ *     needed), or the portal's own signing page for a contract sent before.
+ *     Either way the emailed signing token never reaches the browser.
  *   - "Download PDF" on any non-cancelled row — prefers the signed PDF
  *     when present, otherwise the system-rendered copy
  */
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import { ScrollText, ExternalLink, Download } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { ScrollText, PenLine, Download, ShieldCheck } from 'lucide-react';
 import { customerService, type CustomerContract } from '../../services/customer.service';
+import { PORTAL_SIGNING_SCOPE, signingSessionStore } from '../../services/publicContractSigning.service';
 import { Card, Loading } from '../../components/common';
 import { toast } from 'react-toastify';
 
 import { formatShortDate } from '../../utils/dateShort';
+import { contractStatusLabel } from '../../utils/contractStatus';
 
 type SortKey = 'newest' | 'oldest';
 type StatusFilter =
@@ -23,15 +29,21 @@ type StatusFilter =
   | 'signed_by_customer'
   | 'signed_by_admin'
   | 'fully_signed'
-  | 'cancelled';
+  | 'declined'
+  | 'cancelled'
+  | 'expired'
+  | 'awaiting_data';
 
 const STATUS_OPTIONS: { value: StatusFilter; key: string; fallback: string }[] = [
   { value: 'all',                 key: 'customer.filter.all',                    fallback: 'All' },
+  { value: 'awaiting_data',       key: 'contracts.status.awaiting_data',         fallback: 'Waiting for your details' },
   { value: 'sent',                key: 'contracts.status.sent',                  fallback: 'Awaiting signature' },
-  { value: 'signed_by_customer',  key: 'contracts.status.signed_by_customer',   fallback: 'Signed by customer' },
+  { value: 'signed_by_customer',  key: 'contracts.status.signed_by_customer',   fallback: 'Signed by customer · awaiting countersignature' },
   { value: 'signed_by_admin',     key: 'contracts.status.signed_by_admin',      fallback: 'Counter-signed' },
-  { value: 'fully_signed',        key: 'contracts.status.fully_signed',         fallback: 'Fully signed' },
-  { value: 'cancelled',           key: 'contracts.status.cancelled',            fallback: 'Cancelled' },
+  { value: 'fully_signed',        key: 'contracts.status.fully_signed',         fallback: 'Completed' },
+  { value: 'declined',            key: 'contracts.status.declined',             fallback: 'Declined' },
+  { value: 'cancelled',           key: 'contracts.status.cancelled',            fallback: 'Withdrawn' },
+  { value: 'expired',             key: 'contracts.status.expired',              fallback: 'Expired' },
 ];
 
 export const CustomerContractsPage: React.FC = () => {
@@ -70,7 +82,7 @@ export const CustomerContractsPage: React.FC = () => {
     }
     return (
       <div className="container py-8">
-        <p className="text-red-600">{t('customer.contracts.loadError', 'Could not load contracts.')}</p>
+        <p className="text-status hue-danger">{t('customer.contracts.loadError', 'Could not load contracts.')}</p>
       </div>
     );
   }
@@ -152,10 +164,41 @@ export const CustomerContractsPage: React.FC = () => {
 
 const ContractRow: React.FC<{ c: CustomerContract }> = ({ c }) => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [opening, setOpening] = useState(false);
 
-  async function handleDownload() {
-    // Sync-open BEFORE await so the popup-blocker accepts the gesture
-    // — same pattern bills/quotes use.
+  async function handleSign() {
+    setOpening(true);
+    try {
+      const access = await customerService.contractSigningAccess(c.id);
+      if (access.mode === 'session') {
+        signingSessionStore.write(PORTAL_SIGNING_SCOPE, {
+          sessionToken: access.sessionToken,
+          expiresAt: access.expiresAt,
+        });
+        navigate('/contract/signing');
+      } else {
+        // Sent before signatures v2: the portal signs it with the session.
+        navigate(`/customer/contracts/${c.id}/sign`);
+      }
+    } catch (err: any) {
+      const code = err?.response?.data?.code;
+      toast.error(code === 'SIGNER_NOT_FOUND'
+        ? t('customer.contracts.notSigner', 'You\'re not listed as a signer of this contract. Use the link in the signing email instead.') as string
+        : code === 'CONTRACT_NOT_SIGNABLE'
+          ? t('customer.contracts.notSignable', 'This contract is no longer waiting for your signature. Reload the page to see its current status.') as string
+          : code === 'CONTRACT_EXPIRED'
+            ? t('customer.contracts.expired', 'The time to sign this contract has run out. Ask the sender for a new one.') as string
+            : t('customer.contracts.signError', 'The contract couldn\'t be opened for signing. Try again in a moment.') as string);
+      setOpening(false);
+    }
+  }
+
+  /**
+   * Sync-open BEFORE the await so the popup-blocker accepts the gesture
+   * — same pattern bills/quotes use.
+   */
+  async function openBlob(load: () => Promise<string>) {
     const w = window.open('about:blank', '_blank');
     if (!w) {
       toast.error(t('customer.contracts.popupBlocked',
@@ -163,20 +206,26 @@ const ContractRow: React.FC<{ c: CustomerContract }> = ({ c }) => {
       return;
     }
     try {
-      const url = await customerService.contractPdfUrl(c.id);
-      w.location.href = url;
+      w.location.href = await load();
     } catch (err: any) {
       w.close();
       toast.error(err?.response?.data?.error || 'Download failed');
     }
   }
 
+  const handleDownload = () => openBlob(() => customerService.contractPdfUrl(c.id));
+  const handleCertificate = () => openBlob(() => customerService.contractCertificateUrl(c.id));
+
+  // Token-derived, because `dark:` does not fire on the customer surface
+  // (see .status-chip in index.css). These were fixed light colours, so on a
+  // dark portal the contract's status — the reason this list exists — was
+  // dark text on a pale chip nobody could read.
   const statusBadge =
-    c.status === 'fully_signed' ? 'bg-green-100 text-green-800'
-      : c.status === 'signed_by_customer' || c.status === 'signed_by_admin' ? 'bg-blue-100 text-blue-800'
-      : c.status === 'sent' ? 'bg-amber-100 text-amber-800'
-      : c.status === 'cancelled' ? 'bg-neutral-200 text-neutral-600'
-      : 'bg-neutral-100 text-neutral-700';
+    c.status === 'fully_signed' ? 'status-chip hue-success'
+      : c.status === 'signed_by_customer' || c.status === 'signed_by_admin' ? 'status-chip hue-info'
+      : c.status === 'sent' || c.status === 'awaiting_data' ? 'status-chip hue-warning'
+      : c.status === 'declined' ? 'status-chip hue-danger'
+      : 'status-chip hue-neutral';
 
   return (
     <li className="p-4 flex items-center justify-between gap-3 flex-wrap">
@@ -184,7 +233,7 @@ const ContractRow: React.FC<{ c: CustomerContract }> = ({ c }) => {
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-mono text-sm">{c.contractNumber}</span>
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusBadge}`}>
-            {t(`contracts.status.${c.status}`, c.status)}
+            {contractStatusLabel(t, c.status, c.signerProgress)}
           </span>
         </div>
         {c.title && (
@@ -205,18 +254,55 @@ const ContractRow: React.FC<{ c: CustomerContract }> = ({ c }) => {
             </>
           )}
         </p>
+        {c.status === 'declined' && (
+          <p className="text-xs text-muted-theme mt-0.5">
+            {t('customer.contracts.declinedHint', 'This contract was declined and can no longer be signed.')}
+          </p>
+        )}
+        {c.status === 'sent' && c.signerState === 'signed' && (
+          <p className="text-xs text-muted-theme mt-0.5">
+            {t('customer.contracts.signedWaiting', 'You\'ve signed — waiting for the others.')}
+          </p>
+        )}
+        {c.status === 'sent' && c.signerState === 'waiting' && (
+          <p className="text-xs text-muted-theme mt-0.5">
+            {c.waitingFor
+              ? t('customer.contracts.turnAfter', 'Your turn comes after {{name}}.', { name: c.waitingFor })
+              : t('contractSigning.waiting.title', 'It isn\'t your turn yet')}
+          </p>
+        )}
+        {c.status === 'expired' && (
+          <p className="text-xs text-muted-theme mt-0.5">
+            {t('customer.contracts.expiredHint', 'The time to sign ran out before every signature was in, so it can no longer be signed.')}
+          </p>
+        )}
       </div>
       <div className="flex items-center gap-2">
-        {c.status === 'sent' && c.responseToken && (
-          <a
-            href={`/contract/${c.responseToken}`}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm bg-accent-dark text-white hover:opacity-90"
+        {c.canSign && (
+          <button
+            type="button"
+            onClick={handleSign}
+            disabled={opening}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm bg-accent-dark text-white hover:opacity-90 disabled:opacity-50"
           >
-            <ExternalLink className="w-4 h-4" />
-            {t('customer.contracts.openSign', 'Open & sign')}
-          </a>
+            <PenLine className="w-4 h-4" />
+            {opening
+              ? t('customer.contracts.opening', 'Opening…')
+              : t('customer.contracts.sign', 'Sign')}
+          </button>
+        )}
+        {c.canCompleteDetails && (
+          <button
+            type="button"
+            onClick={handleSign}
+            disabled={opening}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm bg-accent-dark text-white hover:opacity-90 disabled:opacity-50"
+          >
+            <PenLine className="w-4 h-4" />
+            {opening
+              ? t('customer.contracts.opening', 'Opening…')
+              : t('customer.contracts.completeDetails', 'Complete my details')}
+          </button>
         )}
         {(c.hasPdf || c.hasSignedPdf) && (
           <button
@@ -233,6 +319,24 @@ const ContractRow: React.FC<{ c: CustomerContract }> = ({ c }) => {
             {c.hasSignedPdf
               ? t('customer.contracts.downloadSigned', 'Download signed PDF')
               : t('customer.contracts.download', 'Download PDF')}
+          </button>
+        )}
+        {/* The signing certificate (#1446): who signed, when, from where,
+            and the hashes of the exact document. It arrived by email at
+            completion; this is the copy that does not get lost. */}
+        {c.hasCertificate && (
+          <button
+            type="button"
+            onClick={handleCertificate}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm border"
+            style={{
+              backgroundColor: 'var(--color-surface)',
+              borderColor: 'var(--color-surface-border)',
+              color: 'var(--color-text)',
+            }}
+          >
+            <ShieldCheck className="w-4 h-4" />
+            {t('customer.contracts.downloadCertificate', 'Signing certificate')}
           </button>
         )}
       </div>

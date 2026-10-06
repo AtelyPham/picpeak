@@ -79,7 +79,7 @@ describe('product usage notice', () => {
     }
   );
 
-  it.each(['/admin/events', '/admin/archives', '/admin/users'])(
+  it.each(['/admin/events', '/admin/events/archives', '/admin/messages'])(
     'stays out of the way on %s',
     async (path) => {
       const { settled } = renderAt(path);

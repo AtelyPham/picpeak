@@ -204,7 +204,8 @@ export interface InvoiceCreatePayload {
   /** Migration 130 — snapshot of the chosen output VAT code (null = custom rate). */
   vatCode?: string | null;
   shippingAmountMinor?: number;
-  ccPdfEmail?: string;
+  // null clears the field on save (the editor sends a cleared field as null).
+  ccPdfEmail?: string | null;
   // null = explicitly clear the per-invoice override (back to the
   // business-profile default for the currency). undefined = no
   // change. number = pin this specific bank account.
@@ -224,10 +225,10 @@ export interface InvoiceCreatePayload {
   installments?: import('./quotes.service').PaymentTermInstallment[];
   // Inline event snapshot (migration 123). All optional — standalone
   // invoices may have none of these.
-  eventName?: string;
-  eventDate?: string;
-  eventTimeStart?: string;
-  eventTimeEnd?: string;
+  eventName?: string | null;
+  eventDate?: string | null;
+  eventTimeStart?: string | null;
+  eventTimeEnd?: string | null;
   lineItems: QuoteLineItem[];
 }
 

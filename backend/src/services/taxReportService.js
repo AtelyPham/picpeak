@@ -40,6 +40,8 @@ const { db, withRetry } = require('../database/db');
 const pdfService = require('./pdfService');
 const businessProfileService = require('./businessProfileService');
 const { getAppSetting } = require('../utils/appSettings');
+// Null when never set: the report then treats VAT charged this period as registered.
+const { getVatRegisteredSetting } = require('../utils/vatRegistration');
 const { t } = require('./pdf-i18n');
 const { formatMinor, formatDate } = pdfService._internal;
 
@@ -336,19 +338,6 @@ async function loadCosts({ from, to, cur }) {
   rows.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
 
   return { rows, totalNet, totalVat, totalGross, reclaimableVat };
-}
-
-// Is the business VAT-registered? (Settings → Accounting). Returns null when the
-// setting was never set, so the caller can fall back to a behaviour-preserving
-// heuristic (charged output VAT this period ⇒ treat as registered).
-async function getVatRegisteredSetting() {
-  try {
-    const v = await getAppSetting('accounting_vat_registered');
-    if (v === undefined || v === null) return null;
-    return v === true || v === 1 || v === '1' || v === 'true';
-  } catch (_) {
-    return null;
-  }
 }
 
 /**
@@ -768,9 +757,14 @@ async function renderTaxReportPdf({ from, to, currency, locale, scope } = {}) {
   const useLocale = renderCtx.locale;
   const intlLocale = useLocale === 'de' ? 'de-CH' : 'en-GB';
 
+  // The default PDF theme's font family (#1445). Its logo position is not
+  // taken: the report's title fills the top left, so the logo stays in the
+  // issuer column, the only place this layout draws it.
+  const theme = await require('./pdfThemeService').resolveTheme('default');
   const { doc, page, fonts } = pdfService.createBaseDocument({
     orientation: 'landscape',
     issuer: renderCtx.issuer,
+    theme: { ...theme, logo: { ...(theme && theme.logo), position: 'right' } },
     info: {
       Title: `${t(useLocale, 'tax_title')} ${report.period.from}–${report.period.to}`,
       Author: renderCtx.issuer.companyName || 'picpeak',

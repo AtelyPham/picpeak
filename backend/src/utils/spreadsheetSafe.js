@@ -13,7 +13,34 @@
  */
 function neutralizeSpreadsheetFormula(value) {
   const s = value === null || value === undefined ? '' : String(value);
+  // A plain number is not a formula, and a leading minus is how every
+  // negative amount is written: cost rows in the tax report and storno
+  // invoices in the ledger. Prefixing those turned them into text cells, so
+  // a SUM over the imported column silently dropped every one of them
+  // (security review 2026-09-29). Only strict numerics are exempt — an
+  // optional sign, digits, one decimal separator (dot or comma), digits.
+  if (/^-?\d+(?:[.,]\d+)?$/.test(s)) return s;
   return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
 }
 
-module.exports = { neutralizeSpreadsheetFormula };
+/**
+ * One CSV cell: formula-neutralised, then RFC-4180 quoted when it holds a
+ * comma, quote or line break. Callers that render some values differently
+ * (booleans as yes/no, say) map them first and hand the rest here.
+ */
+function csvCell(value) {
+  const s = neutralizeSpreadsheetFormula(value);
+  return /[,"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/**
+ * Rows of plain objects to CSV: the first row's keys are the header, every
+ * row is rendered through `cell`. Empty input gives an empty string.
+ */
+function objectsToCsv(rows, cell = csvCell) {
+  if (!rows || rows.length === 0) return '';
+  const headers = Object.keys(rows[0]);
+  return [headers.join(','), ...rows.map((row) => headers.map((h) => cell(row[h])).join(','))].join('\n');
+}
+
+module.exports = { neutralizeSpreadsheetFormula, csvCell, objectsToCsv };

@@ -10,6 +10,10 @@ const logger = require('../utils/logger');
 
 // Cache for role permissions (refreshed periodically)
 let permissionCache = new Map();
+// Every permission name in the catalog, whether or not a role holds it. Tells
+// "nobody was granted events.view_all" apart from "the migration that adds it
+// has not run" (see roleEventScope).
+let permissionCatalog = new Set();
 let cacheLastUpdated = 0;
 const CACHE_TTL = 60000; // 1 minute
 
@@ -37,7 +41,10 @@ async function refreshPermissionCache() {
       newCache.get(rp.role_name).add(rp.permission_name);
     }
 
+    const catalog = await db('permissions').select('name');
+
     permissionCache = newCache;
+    permissionCatalog = new Set(catalog.map((p) => p.name));
     cacheLastUpdated = now;
   } catch (error) {
     // Handle case where RBAC tables don't exist yet (upgrade scenario)
@@ -72,6 +79,23 @@ async function roleHasPermission(roleName, permissionName) {
   await refreshPermissionCache();
   const rolePerms = permissionCache.get(roleName);
   return rolePerms ? rolePerms.has(permissionName) : false;
+}
+
+/**
+ * Which galleries a role reaches beyond its own (middleware/ownership.js):
+ * `viewAll` lists and reads every gallery, `manageAll` acts on every gallery.
+ * Returns null while the catalog predates events.view_all (the upgrade window,
+ * or no RBAC tables at all); ownership.js then falls back to its legacy
+ * role-name rule, so nothing changes until the migration has run.
+ * @param {string} roleName
+ * @returns {Promise<{viewAll: boolean, manageAll: boolean}|null>}
+ */
+async function roleEventScope(roleName) {
+  await refreshPermissionCache();
+  if (!permissionCatalog.has('events.view_all')) return null;
+  const perms = permissionCache.get(roleName) || new Set();
+  const manageAll = perms.has('events.manage_all');
+  return { viewAll: manageAll || perms.has('events.view_all'), manageAll };
 }
 
 /**
@@ -228,16 +252,30 @@ async function getUserPermissions(userId) {
  */
 function clearPermissionCache() {
   permissionCache.clear();
+  permissionCatalog = new Set();
   cacheLastUpdated = 0;
+}
+
+/** Whether an admin account holds the super_admin role. */
+async function isSuperAdminUser(userId) {
+  if (!userId) return false;
+  const user = await db('admin_users')
+    .join('roles', 'roles.id', 'admin_users.role_id')
+    .where('admin_users.id', userId)
+    .select('roles.name as role_name')
+    .first();
+  return Boolean(user && user.role_name === 'super_admin');
 }
 
 module.exports = {
   requirePermission,
   requireSuperAdmin,
+  isSuperAdminUser,
   getUserPermissions,
   userHasAnyPermission,
   userHasAllPermissions,
   roleHasPermission,
   refreshPermissionCache,
-  clearPermissionCache
+  clearPermissionCache,
+  roleEventScope
 };

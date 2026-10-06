@@ -44,6 +44,7 @@ const { getClientIp } = require('../utils/requestIp');
 const customerAccountsService = require('../services/customerAccountsService');
 const { customerAuth } = require('../middleware/customerAuth');
 const { IDENTITY_PRESERVING_NORMALIZE_EMAIL } = require('../utils/emailNormalization');
+const { auditedUpdate } = require('../services/accountingHistory');
 
 const router = express.Router();
 
@@ -83,8 +84,10 @@ router.post('/login', [
     // attempt counters don't share a bucket — an attacker hitting an
     // admin login with the same email should not lock out the customer
     // account or vice versa.
+    // Scoped to identifier + source IP like the gallery paths, so failures
+    // from one address do not lock the customer out from every other one.
     const lockoutKey = `customer:${email}`;
-    const lockoutStatus = await checkAccountLockout(lockoutKey);
+    const lockoutStatus = await checkAccountLockout(lockoutKey, ipAddress);
     if (lockoutStatus.isLocked) {
       logger.warn('Customer login attempt on locked account', { email, ipAddress });
       return res.status(423).json({
@@ -116,10 +119,11 @@ router.post('/login', [
     }
 
     await trackSuccessfulLogin(lockoutKey, ipAddress, userAgent);
-    await db('customer_accounts').where('id', customer.id).update({
+    // Not a billing field, so this leaves no history entry.
+    await auditedUpdate(db, 'customer_accounts', { id: customer.id }, {
       last_login: new Date(),
       last_login_ip: ipAddress,
-    });
+    }, { actor: { type: 'customer', id: customer.id }, source: 'customer.login' });
 
     const token = jwt.sign({
       customerId: customer.id,
@@ -147,7 +151,7 @@ router.post('/login', [
     // CustomerAuthProvider mount (e.g. after the user navigates to a
     // gallery and back). Mirroring the /session resolution keeps the
     // frontend on a single source of truth.
-    let features = { calendar: false, quotes: false, bills: false };
+    let features = { calendar: false, quotes: false, bills: false, hoursLogging: false, contracts: false, documents: false };
     let branding = { showLogo: true, showCompanyName: true };
     try {
       features = await customerAccountsService.getEffectiveFeaturesForCustomer(customer);
@@ -204,7 +208,7 @@ router.get('/session', customerAuth, async (req, res) => {
   // the correct sidebar without an extra round-trip on every navigation.
   // Failure here is non-fatal — the customer should still be able to see
   // their galleries even if the settings table is briefly unavailable.
-  let features = { calendar: false, quotes: false, bills: false };
+  let features = { calendar: false, quotes: false, bills: false, hoursLogging: false, contracts: false, documents: false };
   let branding = { showLogo: true, showCompanyName: true };
   try {
     features = await customerAccountsService.getEffectiveFeaturesForCustomer(req.customer.id);

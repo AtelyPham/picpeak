@@ -86,15 +86,21 @@ The script will prompt you to choose:
 ### Unattended Installation
 
 #### Docker with full configuration:
+Passwords are read from private files (mode `0600`), never from the command line, so they stay out of the process list and your shell history:
+
 ```bash
+(umask 077
+ read -rsp 'Admin password: ' p; printf '%s\n' "$p" > ~/picpeak-admin.pass; echo
+ read -rsp 'SMTP password: ' p;  printf '%s\n' "$p" > ~/picpeak-smtp.pass; echo)
+
 sudo ./picpeak-setup.sh --docker --unattended \
   --domain photos.example.com \
   --email admin@example.com \
-  --admin-password SecurePass123 \
+  --admin-password-file ~/picpeak-admin.pass \
   --smtp-host smtp.gmail.com \
   --smtp-port 587 \
   --smtp-user your-email@gmail.com \
-  --smtp-pass your-app-password \
+  --smtp-pass-file ~/picpeak-smtp.pass \
   --enable-ssl
 ```
 
@@ -102,7 +108,7 @@ sudo ./picpeak-setup.sh --docker --unattended \
 ```bash
 sudo ./picpeak-setup.sh --native --unattended \
   --email admin@example.com \
-  --admin-password SecurePass123
+  --admin-password-file ~/picpeak-admin.pass
 ```
 
 ### Command Line Options
@@ -114,11 +120,13 @@ sudo ./picpeak-setup.sh --native --unattended \
 | `--unattended` | Run without prompts | `--unattended` |
 | `--domain` | Domain for HTTPS setup | `--domain photos.example.com` |
 | `--email` | Admin email address | `--email admin@example.com` |
-| `--admin-password` | Set admin password | `--admin-password MySecurePass` |
+| `--admin-password-file` | Seed the admin password from a file (regular file, mode `0600` or stricter, first line used) | `--admin-password-file ~/picpeak-admin.pass` |
+| `--admin-password` | Deprecated: admin password on the command line (visible in the process list and shell history) | `--admin-password MySecurePass` |
 | `--smtp-host` | SMTP server hostname | `--smtp-host smtp.gmail.com` |
 | `--smtp-port` | SMTP server port | `--smtp-port 587` |
 | `--smtp-user` | SMTP username | `--smtp-user user@gmail.com` |
-| `--smtp-pass` | SMTP password | `--smtp-pass app-password` |
+| `--smtp-pass-file` | SMTP password from a file (mode `0600` or stricter) | `--smtp-pass-file ~/picpeak-smtp.pass` |
+| `--smtp-pass` | Deprecated: SMTP password on the command line | `--smtp-pass app-password` |
 | `--enable-ssl` | Enable HTTPS with Let's Encrypt | `--enable-ssl` |
 | `--port` | Custom port (native only) | `--port 8080` |
 | `--update` | Update existing installation | `--update` |
@@ -165,7 +173,7 @@ sudo ./picpeak-setup.sh --native --unattended \
 
 ## 🔑 First Login — Create Your Admin
 
-If you installed with `picpeak-setup.sh` and gave an `--admin-password`, your admin account already exists — log in at `/admin` with that email and password.
+If you installed with `picpeak-setup.sh` and gave an `--admin-password-file` (or the deprecated `--admin-password`), your admin account already exists — log in at `/admin` with that email and password.
 
 If you started PicPeak **without** setting `ADMIN_PASSWORD` (e.g. a plain `docker compose up`), there's **no admin yet** and you create it in the browser:
 
@@ -200,7 +208,7 @@ location / {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection 'upgrade';
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_cache_bypass $http_upgrade;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -213,7 +221,7 @@ location /api {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection 'upgrade';
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_cache_bypass $http_upgrade;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -223,7 +231,7 @@ location /api {
 location ~ ^/(photos|thumbnails|uploads) {
     proxy_pass http://localhost:3001;
     proxy_http_version 1.1;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -474,6 +482,24 @@ sudo -u picpeak node scripts/reset-admin-password.js
 ```
 
 > **Note:** The new password will be displayed in the console output and saved to `ADMIN_PASSWORD_RESET.txt`. Save it immediately!
+
+#### SSO Sign-in Refused: "email was not confirmed by a Super Admin"
+
+SSO links an existing admin account by email only when that address was set by
+a Super Admin. An admin who changed their own email address on their profile
+page has to have it confirmed again before SSO will link to their account:
+
+- **Normal case:** any Super Admin opens **Users** in the admin sidebar. The
+  affected row is marked *Email not confirmed for SSO*; the envelope button on
+  that row, **Confirm email for SSO**, confirms the address as it stands. SSO
+  linking works again on the next sign-in.
+- **The refused account is the only Super Admin, and local login is disabled:**
+  start the backend with `OIDC_BREAK_GLASS=true` to re-open the password login,
+  sign in with the local password, confirm your own email on **Users**, then
+  remove the variable and restart. No database edit is needed.
+
+Only a Super Admin sees the marker and the button — confirming an address is
+what allows an SSO identity to take over that account on its next login.
 
 ### Getting Help
 

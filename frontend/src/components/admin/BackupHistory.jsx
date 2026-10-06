@@ -31,6 +31,7 @@ import { useMutationWithToast } from '../../hooks';
 // AM/PM) and 'PPP' (US-locale long date), which ignored the settings —
 // Ralf 2026-05-31 flagged "11:25 PM" on a 24h-configured install.
 import { useLocalizedDate } from '../../hooks/useLocalizedDate';
+import { backupErrorCode, backupErrorText } from '../../utils/backupErrors';
 
 const statusIcons = {
   completed: { icon: CheckCircle, color: 'text-green-500' },
@@ -38,6 +39,10 @@ const statusIcons = {
   running: { icon: Loader2, color: 'text-blue-500 animate-spin' },
   partial: { icon: AlertCircle, color: 'text-amber-500' }
 };
+
+// Codes DELETE /admin/backup/runs/:id answers with (issue 1711); each has a
+// translated message under backup.history.deleteErrors.
+const DELETE_ERROR_CODES = ['BACKUP_NOT_FOUND', 'BACKUP_RUNNING', 'ARTIFACT_OUT_OF_SCOPE', 'ARTIFACT_DELETE_FAILED', 'FORBIDDEN'];
 
 const formatBytes = (bytes) => {
   if (!bytes) return '0 B';
@@ -75,15 +80,28 @@ export const BackupHistory = () => {
     }
   });
 
-  // Delete backup mutation
+  // Delete backup mutation (issue 1711). The route removes the run's own
+  // stored artifact before the record, and answers with a stable code when
+  // it could not; the history query is invalidated only on success, which
+  // useMutationWithToast already guarantees.
   const deleteMutation = useMutationWithToast({
     mutationFn: async (backupId) => {
       const response = await api.delete(`/admin/backup/runs/${backupId}`);
       return response.data;
     },
-    successMessage: 'Backup deleted successfully',
+    successMessage: (data) => (
+      data?.artifact?.status === 'missing'
+        ? t('backup.history.deleteSuccessArtifactMissing')
+        : t('backup.history.deleteSuccess')
+    ),
     invalidateKeys: [['backup-history']],
-    errorMessage: 'Failed to delete backup'
+    errorMessage: (error) => {
+      const code = error?.response?.data?.code;
+      if (code && DELETE_ERROR_CODES.includes(code)) {
+        return t(`backup.history.deleteErrors.${code}`);
+      }
+      return error?.response?.data?.error || t('backup.history.deleteError');
+    }
   });
 
   const toggleRowExpansion = (id) => {
@@ -97,7 +115,7 @@ export const BackupHistory = () => {
   };
 
   const handleDelete = (backup) => {
-    if (window.confirm(`Are you sure you want to delete this backup from ${format(new Date(backup.created_at))}?`)) {
+    if (window.confirm(t('backup.history.deleteConfirm', { date: format(new Date(backup.created_at)) }))) {
       deleteMutation.mutate(backup.id);
     }
   };
@@ -254,7 +272,8 @@ export const BackupHistory = () => {
                               onClick={() => handleDelete(backup)}
                               className="text-neutral-400 hover:text-red-600"
                               title={t('backup.actions.delete')}
-                              disabled={deleteMutation.isLoading}
+                              disabled={deleteMutation.isPending}
+                              aria-label={t('backup.actions.delete')}
                             >
                               <Trash2 size={20} />
                             </button>
@@ -385,7 +404,7 @@ export const BackupHistory = () => {
                                 <div className="space-y-2">
                                   <h4 className="font-medium text-red-900 dark:text-red-200">{t('backup.history.details.errorDetails')}</h4>
                                   <p className="text-sm text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/30 p-2 rounded">
-                                    {backup.error_message}
+                                    {backupErrorText(backupErrorCode(backup.error_message), t) ?? backup.error_message}
                                   </p>
                                 </div>
                               )}

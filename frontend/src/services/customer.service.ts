@@ -5,7 +5,10 @@
  * the /api/customer/* surface and the customer_token cookie. Never falls
  * back to admin endpoints.
  */
+import type { AxiosProgressEvent } from 'axios';
 import { api } from '../config/api';
+import type { ContractStatus, PublicContractView } from './contracts.service';
+import type { PublicQuoteView, QuoteStatus } from './quotes.service';
 
 export interface CustomerProfile {
   id: number;
@@ -14,6 +17,27 @@ export interface CustomerProfile {
   firstName: string | null;
   lastName: string | null;
   preferredLanguage: string;
+}
+
+/**
+ * Effective customer features (global flag AND the per-customer override),
+ * as returned by /customer/auth/login and /customer/auth/session.
+ */
+export interface CustomerFeatures {
+  calendar: boolean;
+  quotes: boolean;
+  bills: boolean;
+  contracts: boolean;
+  documents: boolean;
+}
+
+export const DEFAULT_CUSTOMER_FEATURES: CustomerFeatures = {
+  calendar: false, quotes: false, bills: false, contracts: false, documents: false,
+};
+
+export interface CustomerBranding {
+  showLogo: boolean;
+  showCompanyName: boolean;
 }
 
 /**
@@ -52,6 +76,9 @@ export interface CustomerProfilePrefill {
   country_code?: string;
 }
 
+/** Gallery state, decided by the server (#1444). */
+export type GalleryAvailability = 'active' | 'expired' | 'unavailable';
+
 export interface CustomerEvent {
   id: number;
   slug: string;
@@ -60,7 +87,8 @@ export interface CustomerEvent {
   eventDate: string | null;
   expiresAt: string | null;
   isActive: boolean;
-  assignedAt: string;
+  assignedAt: string | null;
+  availability: GalleryAvailability;
 }
 
 export interface CustomerInvitationInfo {
@@ -93,17 +121,140 @@ export interface CustomerAccessTokenResponse {
   event: { id: number; slug: string; eventName: string };
 }
 
+// ---- documents + dashboard (#1444) ----
+
+export type CustomerDocumentStatus = 'pending' | 'clean' | 'rejected';
+
+export interface CustomerDocument {
+  id: number;
+  name: string;
+  sizeBytes: number;
+  /** `you` = the customer's own upload, `studio` = shared by the photographer. */
+  uploadedBy: 'you' | 'studio';
+  status: CustomerDocumentStatus;
+  downloadable: boolean;
+  rejectionReason: string | null;
+  eventId: number | null;
+  eventName: string | null;
+  /** For a link to the event page; the page itself re-checks access. */
+  eventSlug?: string | null;
+  contractId: number | null;
+  createdAt: string | null;
+  sharedAt: string | null;
+  /** When the studio reviewed the customer's own upload. */
+  reviewedAt?: string | null;
+  /** Own upload that isn't part of a contract: the customer may delete it. */
+  canDelete?: boolean;
+}
+
+/** A document the studio asked for and is still waiting on (#1444). */
+export interface CustomerDocumentRequest {
+  id: number;
+  title: string;
+  note: string | null;
+  dueAt: string | null;
+  status: 'open';
+  eventId: number | null;
+  createdAt: string | null;
+}
+
+export interface CustomerDocumentLimits {
+  maxUploadBytes: number;
+  quotaBytes: number;
+  usedBytes: number;
+}
+
+export interface CustomerDashboard {
+  needsAction: {
+    quotes: Array<{
+      id: number; quoteNumber: string; eventName: string | null; validUntil: string | null;
+      sentAt: string | null; totalAmountMinor: number; currency: string;
+    }>;
+    contracts: Array<{
+      id: number; contractNumber: string; title: string | null; eventName: string | null;
+      validUntil: string | null; sentAt: string | null;
+    }>;
+    /** Signing-v2 contracts waiting on the customer's own details (#1446, issue 1590). */
+    contractDetails?: Array<{
+      id: number; contractNumber: string; title: string | null; eventName: string | null;
+      validUntil: string | null; sentAt: string | null;
+    }>;
+    invoices: Array<{
+      id: number; invoiceNumber: string; status: string; dueDate: string | null; overdue: boolean;
+      eventName: string | null; totalAmountMinor: number; openAmountMinor: number; currency: string;
+    }>;
+    /** The customer's own rejected uploads — upload a corrected one, or delete it. */
+    documents?: Array<{ id: number; name: string; reviewNote: string | null }>;
+    /** Documents the studio asked for; `link` preselects the request on the upload. */
+    documentRequests?: Array<{ id: number; title: string; note: string | null; dueAt: string | null; link: string }>;
+  };
+  /** Newest first, from the same visibility rules as the lists they link to. */
+  recent?: CustomerRecentItem[];
+  galleries: { active: CustomerEvent[]; expired: CustomerEvent[] };
+}
+
+export type CustomerRecentKind =
+  | 'document_shared' | 'document_uploaded' | 'document_accepted' | 'document_rejected'
+  | 'contract_sent' | 'contract_signed' | 'quote_sent' | 'invoice_sent' | 'gallery_assigned';
+
+export interface CustomerRecentItem {
+  kind: CustomerRecentKind;
+  id: number;
+  title: string;
+  at: string;
+  /** A portal path. */
+  link: string;
+}
+
+export interface CustomerEventOverview {
+  event: CustomerEvent;
+  sections: { quotes: boolean; contracts: boolean; invoices: boolean; documents: boolean };
+  quotes: Array<{
+    id: number; quoteNumber: string; status: CustomerQuote['status']; issueDate: string | null;
+    validUntil: string | null; totalAmountMinor: number; currency: string;
+  }>;
+  contracts: Array<{
+    id: number; contractNumber: string; status: CustomerContract['status']; title: string | null;
+    issueDate: string | null; hasPdf: boolean; hasSignedPdf: boolean;
+  }>;
+  invoices: Array<{
+    id: number; kind: 'invoice' | 'storno'; invoiceNumber: string; status: CustomerInvoice['status'];
+    issueDate: string | null; dueDate: string | null; totalAmountMinor: number; paidAmountMinor: number; currency: string;
+  }>;
+  documents: CustomerDocument[];
+}
+
+export interface UploadOptions {
+  eventId?: number | null;
+  /** Answers a document request; the server marks it fulfilled with the upload. */
+  requestId?: number | null;
+  signal?: AbortSignal;
+  onProgress?: (fraction: number) => void;
+}
+
+/** Save a blob under a filename via a temporary link. */
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export const customerService = {
   // ---- auth ----
   async login(email: string, password: string, recaptchaToken?: string | null): Promise<{
     customer: CustomerProfile;
-    features: { calendar: boolean; quotes: boolean; bills: boolean; contracts: boolean };
-    branding: { showLogo: boolean; showCompanyName: boolean };
+    features: CustomerFeatures;
+    branding: CustomerBranding;
   }> {
     const response = await api.post<{
       customer: CustomerProfile;
-      features?: { calendar: boolean; quotes: boolean; bills: boolean; contracts: boolean };
-      branding?: { showLogo: boolean; showCompanyName: boolean };
+      features?: Partial<CustomerFeatures>;
+      branding?: CustomerBranding;
     }>(
       '/customer/auth/login',
       { email, password, recaptchaToken }
@@ -112,7 +263,7 @@ export const customerService = {
     // upgraded yet — defaults match CustomerAuthContext's DEFAULT_*.
     return {
       customer: response.data.customer,
-      features: response.data.features || { calendar: false, quotes: false, bills: false, contracts: false },
+      features: { ...DEFAULT_CUSTOMER_FEATURES, ...(response.data.features || {}) },
       branding: response.data.branding || { showLogo: true, showCompanyName: true },
     };
   },
@@ -145,18 +296,18 @@ export const customerService = {
    */
   async session(): Promise<{
     customer: CustomerProfile;
-    features: { calendar: boolean; quotes: boolean; bills: boolean; contracts: boolean };
-    branding: { showLogo: boolean; showCompanyName: boolean };
+    features: CustomerFeatures;
+    branding: CustomerBranding;
   } | null> {
     try {
       const response = await api.get<{
         customer: CustomerProfile;
-        features?: { calendar: boolean; quotes: boolean; bills: boolean; contracts: boolean };
-        branding?: { showLogo: boolean; showCompanyName: boolean };
+        features?: Partial<CustomerFeatures>;
+        branding?: CustomerBranding;
       }>('/customer/auth/session');
       return {
         customer: response.data.customer,
-        features: response.data.features || { calendar: false, quotes: false, bills: false, contracts: false },
+        features: { ...DEFAULT_CUSTOMER_FEATURES, ...(response.data.features || {}) },
         branding: response.data.branding || { showLogo: true, showCompanyName: true },
       };
     } catch (error: any) {
@@ -233,6 +384,20 @@ export const customerService = {
     return response.data.events;
   },
 
+  /** Needs-action items and galleries split into active / expired (#1444). */
+  async getDashboard(): Promise<CustomerDashboard> {
+    const response = await api.get<CustomerDashboard>('/customer/dashboard');
+    return response.data;
+  },
+
+  /** Everything the customer has for one event (#1444). */
+  async getEventOverview(slug: string): Promise<CustomerEventOverview> {
+    const response = await api.get<CustomerEventOverview>(
+      `/customer/events/${encodeURIComponent(slug)}/overview`
+    );
+    return response.data;
+  },
+
   /**
    * Exchange the customer JWT for a gallery JWT scoped to one event.
    * The dashboard calls this on card-click and stores the resulting
@@ -243,6 +408,56 @@ export const customerService = {
       `/customer/events/${encodeURIComponent(slug)}/access-token`
     );
     return response.data;
+  },
+
+  // ---- documents (#1444) ----
+  async listDocuments(): Promise<{
+    documents: CustomerDocument[]; limits: CustomerDocumentLimits; allowedFormats?: string[];
+  }> {
+    const response = await api.get<{
+      documents: CustomerDocument[]; limits: CustomerDocumentLimits; allowedFormats?: string[];
+    }>('/customer/documents');
+    return response.data;
+  },
+
+  async uploadDocument(file: File, options: UploadOptions = {}): Promise<CustomerDocument> {
+    const form = new FormData();
+    form.append('file', file);
+    if (options.eventId) form.append('eventId', String(options.eventId));
+    if (options.requestId) form.append('requestId', String(options.requestId));
+    const response = await api.post<{ document: CustomerDocument }>('/customer/documents', form, {
+      signal: options.signal,
+      onUploadProgress: (e: AxiosProgressEvent) => {
+        if (options.onProgress && e.total) options.onProgress(e.loaded / e.total);
+      },
+    });
+    return response.data.document;
+  },
+
+  /**
+   * One document (the document page / a deep link). A document the customer
+   * can no longer see rejects with 410 and a code — DOCUMENT_UNSHARED or
+   * DOCUMENT_REMOVED — and an unknown one with 404.
+   */
+  async getDocument(id: number): Promise<CustomerDocument> {
+    const response = await api.get<{ document: CustomerDocument }>(`/customer/documents/${id}`);
+    return response.data.document;
+  },
+
+  async listDocumentRequests(): Promise<CustomerDocumentRequest[]> {
+    const response = await api.get<{ requests: CustomerDocumentRequest[] }>('/customer/document-requests');
+    return response.data.requests;
+  },
+
+  /** Deletes one of the customer's own uploads. */
+  async deleteDocument(id: number): Promise<void> {
+    await api.delete(`/customer/documents/${id}`);
+  },
+
+  /** Downloads the document as an attachment (never opened inline). */
+  async downloadDocument(doc: Pick<CustomerDocument, 'id' | 'name'>): Promise<void> {
+    const res = await api.get(`/customer/documents/${doc.id}/download`, { responseType: 'blob' });
+    saveBlob(res.data, doc.name);
   },
 
   // ---- CRM (customer-side, read-only) ----
@@ -268,6 +483,29 @@ export const customerService = {
     return URL.createObjectURL(res.data);
   },
 
+  /** Full quote view for the portal response page. Session-authenticated:
+   *  the portal never handles the emailed response token. */
+  async getQuote(id: number): Promise<{ quote: PublicQuoteView; canRespond: boolean }> {
+    const { data } = await api.get(`/customer/quotes/${id}`);
+    return data.data || data;
+  },
+
+  async respondToQuote(
+    id: number,
+    action: 'accept' | 'decline',
+    // `expectedTotalMinor` is the total the page showed. A quote that offers
+    // add-ons is accepted with its stored choice, and the server refuses a
+    // total that no longer matches.
+    options: { tosAccepted?: boolean; expectedTotalMinor?: number } = {},
+  ): Promise<{ status: QuoteStatus; lockedAt: string }> {
+    const { data } = await api.post(`/customer/quotes/${id}/respond`, {
+      action,
+      tosAccepted: options.tosAccepted,
+      ...(options.expectedTotalMinor == null ? {} : { expectedTotalMinor: options.expectedTotalMinor }),
+    });
+    return data.data || data;
+  },
+
   // ---- Contracts (customer-side) ----
   async listContracts(): Promise<CustomerContract[]> {
     const response = await api.get<{ contracts: CustomerContract[] }>('/customer/contracts');
@@ -281,7 +519,50 @@ export const customerService = {
     const res = await api.get(`/customer/contracts/${id}/pdf`, { responseType: 'blob' });
     return URL.createObjectURL(res.data);
   },
+
+  /** The signing certificate issued when the contract was completed (#1446). */
+  async contractCertificateUrl(id: number): Promise<string> {
+    const res = await api.get(`/customer/contracts/${id}/certificate`, { responseType: 'blob' });
+    return URL.createObjectURL(res.data);
+  },
+
+  /** Open a contract for signing: a signing session for a signatures-v2
+   *  contract (no code needed — the portal login confirms the email), or a
+   *  short-lived link for a contract sent before. */
+  async contractSigningAccess(id: number): Promise<CustomerContractSigningAccess> {
+    const response = await api.post<CustomerContractSigningAccess>(`/customer/contracts/${id}/signing-access`);
+    return response.data;
+  },
+
+  /** Full contract view for the portal signing page. Session-authenticated:
+   *  the portal never handles the emailed signing token. */
+  async getContract(id: number): Promise<{ contract: PublicContractView; canSign: boolean }> {
+    const { data } = await api.get(`/customer/contracts/${id}`);
+    return data.data || data;
+  },
+
+  async signContract(
+    id: number,
+    payload: { name: string; signatureDataUrl?: string | null; accepted: true },
+  ): Promise<{ status: ContractStatus; signedAt: string }> {
+    const { data } = await api.post(`/customer/contracts/${id}/sign`, payload);
+    return data.data || data;
+  },
+
+  async uploadSignedContractPdf(id: number, file: File): Promise<{ status: 'fully_signed' }> {
+    const form = new FormData();
+    form.append('file', file);
+    const { data } = await api.post(`/customer/contracts/${id}/upload-signed-pdf`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return data.data || data;
+  },
 };
+
+export type CustomerContractSigningAccess =
+  | { mode: 'session'; sessionToken: string; expiresAt: string }
+  /** Sent before signatures v2: sign on the portal's own page, no token. */
+  | { mode: 'portal' };
 
 export interface CustomerQuote {
   id: number;
@@ -304,9 +585,8 @@ export interface CustomerQuote {
   responseLockedAt: string | null;
   acceptedAt: string | null;
   declinedAt: string | null;
-  /** Token to open the public response page from the customer
-   *  dashboard. null when expired/used. */
-  responseToken: string | null;
+  /** Whether the quote can still be accepted or declined from the portal. */
+  canRespond: boolean;
 }
 
 export interface CustomerInvoice {
@@ -356,7 +636,7 @@ export interface CustomerInvoice {
 export interface CustomerContract {
   id: number;
   contractNumber: string;
-  status: 'sent' | 'signed_by_customer' | 'signed_by_admin' | 'fully_signed' | 'cancelled';
+  status: 'sent' | 'signed_by_customer' | 'signed_by_admin' | 'fully_signed' | 'declined' | 'cancelled' | 'expired' | 'awaiting_data';
   language: string;
   issueDate: string;
   validUntil: string | null;
@@ -368,7 +648,16 @@ export interface CustomerContract {
   signedAdminName: string | null;
   hasPdf: boolean;
   hasSignedPdf: boolean;
-  /** Live signing-link token for `sent` contracts so the dashboard can
-   *  deep-link the public sign page when the customer lost the email. */
-  responseToken: string | null;
+  /** Whether a signing certificate has been issued for it (#1446). */
+  hasCertificate?: boolean;
+  /** Whether the customer can sign this contract from the portal. */
+  canSign: boolean;
+  /** How far the customer signers have got (#1446). */
+  signerProgress?: { signed: number; total: number } | null;
+  /** The contract waits for the customer's details before it is prepared (#1446). */
+  canCompleteDetails?: boolean;
+  /** Where this customer stands as a signer (#1446): signed, not their turn yet… */
+  signerState?: 'signed' | 'declined' | 'waiting' | 'not_signer' | null;
+  /** Who signs before them in a sequential contract. */
+  waitingFor?: string | null;
 }

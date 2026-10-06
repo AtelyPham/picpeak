@@ -1,4 +1,5 @@
 const { isGalleryAvailable } = require('../../utils/galleryLifecycle');
+const { publicThemeFields } = require('../../services/galleryTheme');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -14,6 +15,7 @@ const { NotFoundError } = require('../../utils/errors');
 const { setGalleryAuthCookies } = require('../../utils/tokenUtils');
 const { getSlideshowGlobals } = require('../../utils/slideshowGlobals');
 const { isFeatureEnabled } = require('../../middleware/requireFeatureFlag');
+const { slideshowCredentialClaim } = require('../../utils/galleryCredentialCutoff');
 
 function slideshowPhotosQuery(eventId, categoryId = null) {
   const q = db('photos')
@@ -160,9 +162,10 @@ async function slideshowQrDataUrl(event, req) {
     let { shareUrl, sharePath } = await buildShareLinkVariants({ slug: event.slug, shareToken });
     if (!/^https?:\/\//i.test(shareUrl) || QR_LOCAL_BASE_RE.test(shareUrl)) {
       // Prefer the kiosk's own window.location.origin (?origin=, validated):
-      // req.get('host') is NOT the browser origin behind the standard
-      // proxies — frontend/nginx.conf forwards $host (port stripped), so a
-      // compose LAN deployment on :3000 would encode port 80. A LOOPBACK
+      // req.get('host') is not reliably the browser origin: frontend/nginx.conf
+      // forwards $http_host (port kept), but an outer proxy forwarding $host
+      // strips a non-default port, so a deployment on :3000 behind one would
+      // encode port 80. A LOOPBACK
       // kiosk origin is rejected too: it is no more guest-reachable than
       // the loopback base it would replace (codex review of #848).
       const rawOrigin = req?.query?.origin;
@@ -234,6 +237,9 @@ router.get('/:slug/show/:token/session', noStoreCache, handleAsync(async (req, r
     // so one guest's logout would revoke every same-second login (#1357).
     jti: crypto.randomUUID(),
     accessLevel: 'slideshow',
+    // Bound to this link: rotating or disabling it ends the session
+    // (assertGalleryCredentialCurrent).
+    ...slideshowCredentialClaim(event),
     loginTime: Date.now()
   }, process.env.JWT_SECRET, {
     expiresIn: '12h',
@@ -252,7 +258,7 @@ router.get('/:slug/show/:token/session', noStoreCache, handleAsync(async (req, r
     event: {
       event_name: event.event_name,
       event_type: event.event_type,
-      color_theme: event.color_theme
+      color_theme: (await publicThemeFields(event)).color_theme
     },
     settings: await slideshowSettings(event, req),
     photo_count: parseInt(count, 10) || 0,

@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { spawnAsync, spawnToFile } = require('../utils/safeExec');
 const zlib = require('zlib');
 const { pipeline } = require('stream/promises');
-const { createReadStream, createWriteStream, realpathSync } = require('fs');
+const { createReadStream, createWriteStream, realpathSync, constants: fsConstants } = require('fs');
 const { db } = require('../database/db');
 const knexConfig = require('../../knexfile');
 const logger = require('../utils/logger');
@@ -28,8 +28,112 @@ const packageJson = require('../../package.json');
 // createSQLiteBackup below.
 const FACE_TABLES = ['photo_faces', 'event_people', 'event_people_merge_dismissals'];
 
-function getStoragePath() {
-  return process.env.STORAGE_PATH || path.join(__dirname, '../../../storage');
+// sqlite3's `.backup` is a dot-command parsed by sqlite3's OWN tokenizer, not
+// the shell: spawn()'s argv separation does not stop a quote or a line break
+// inside the path from ending the `.backup '<path>'` argument and starting a
+// second dot-command such as `.shell`. The destination is admin-configured,
+// so the copy is written to a server-generated path in this charset and
+// moved to the destination afterwards (same rule as restoreService's
+// assertSafeSqlitePath). Only the `.backup` target is interpolated; every
+// other sqlite3 call passes the file as its own argv element.
+const SAFE_SQLITE_PATH_RE = /^[A-Za-z0-9._/-]+$/;
+function assertSafeSqlitePath(p) {
+  if (typeof p !== 'string' || !SAFE_SQLITE_PATH_RE.test(p)) {
+    throw new Error(`Refusing to run sqlite3 against an unsafe path: ${p}`);
+  }
+}
+
+// Printable, quote-free and without line breaks: what a destination path may
+// contain so that it never has to be interpolated into a dot-command, and
+// what adminDatabaseBackup refuses at save time.
+// eslint-disable-next-line no-control-regex -- intentional: refuses control chars in the path
+const DESTINATION_PATH_FORBIDDEN_RE = /["'`\\]|[\u0000-\u001f\u007f]/;
+function destinationPathProblem(value) {
+  if (typeof value !== 'string') return null;
+  if (DESTINATION_PATH_FORBIDDEN_RE.test(value)) {
+    return 'Destination path must not contain quotes, backslashes or control characters';
+  }
+  return null;
+}
+
+const { getStoragePath } = require('../config/storage');
+const { findWriteBlocker } = require('../utils/localBackupDestination');
+
+// The historical default, also what migration 030 seeds into
+// database_backup_destination_path. It only exists when something is mounted
+// there: both compose files mount ./backup and the all-in-one image symlinks
+// it to /data/backup, but an install that mounts nothing there (production
+// compose before the mount was added) runs the backend as non-root, which
+// cannot create /backup under a root-owned /.
+const LEGACY_DESTINATION = '/backup/database';
+
+// Writable as it stands, or creatable: the nearest existing ancestor must be
+// writable. A present-but-read-only directory is not usable.
+async function canWriteOrCreate(dir) {
+  return (await findWriteBlocker(dir)) === null;
+}
+
+async function canWriteLegacyDestination() {
+  // Only /backup/database itself or /backup: never all the way up to /.
+  for (const dir of [LEGACY_DESTINATION, path.dirname(LEGACY_DESTINATION)]) {
+    try {
+      await fs.access(dir, fsConstants.W_OK);
+      return true;
+    } catch (error) {
+      // Missing: try the parent. Present but not writable: not usable.
+      if (error.code !== 'ENOENT') return false;
+    }
+  }
+  return false;
+}
+
+function readSettingValue(row) {
+  if (!row || row.setting_value == null) return null;
+  let value = row.setting_value;
+  try { value = JSON.parse(value); } catch (_) { /* stored unquoted */ }
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/**
+ * The file-backup directory, when the dump can share it: the file backup
+ * goes to a LOCAL destination and the backend can write there. With S3 or
+ * rsync selected, backup_destination_path is a leftover that nothing mounts
+ * (often the historical /backup/picpeak), so it is not used (issue 1641).
+ */
+async function readFileBackupDestination() {
+  const rows = await db('app_settings')
+    .whereIn('setting_key', ['backup_destination_path', 'backup_destination_type'])
+    .select('setting_key', 'setting_value');
+  const byKey = new Map(rows.map((row) => [row.setting_key, readSettingValue(row)]));
+  const type = byKey.get('backup_destination_type') || 'local';
+  const destination = byKey.get('backup_destination_path');
+  if (type !== 'local' || !destination) return null;
+  return (await canWriteOrCreate(destination)) ? destination : null;
+}
+
+/**
+ * Where a database dump goes when the caller did not pass a destination.
+ *
+ * A customised database_backup_destination_path wins. Unset, empty or still
+ * the seeded /backup/database, the dump stays at /backup/database only where
+ * that location is usable; otherwise it goes under a local, writable
+ * file-backup destination (<backup_destination_path>/database), and failing
+ * that under <storage>/backups/database. For an S3 or rsync backup the dump is
+ * only staged there: the backup run uploads it with the files.
+ *
+ * Before issue 1365, every install without a /backup mount failed with
+ * "EACCES: permission denied, mkdir '/backup'" no matter which backup
+ * destination was configured; before issue 1641, an S3 install whose stale
+ * local path pointed below /backup still did.
+ */
+async function resolveDatabaseBackupDestination(config) {
+  const configured = typeof config.database_backup_destination_path === 'string'
+    ? config.database_backup_destination_path.trim()
+    : '';
+  if (configured && path.resolve(configured) !== LEGACY_DESTINATION) return configured;
+  if (await canWriteLegacyDestination()) return LEGACY_DESTINATION;
+  const fileBackupDestination = await readFileBackupDestination();
+  return path.join(fileBackupDestination || path.join(getStoragePath(), 'backups'), 'database');
 }
 
 // Public, unauthenticated static mounts (server.js) that must never become a
@@ -253,11 +357,32 @@ class DatabaseBackupService {
    */
   async createSQLiteBackup(outputPath, _options = {}) {
     const dbPath = knexConfig.connection.filename;
-    const tempPath = `${outputPath}.tmp`;
-    
+    // `.backup` writes to a path WE generate, never to the configured
+    // destination: next to the output when that directory is already in the
+    // safe charset (same filesystem, plain rename), else in the OS temp dir.
+    const stamp = `picpeak-sqlite-backup-${crypto.randomBytes(8).toString('hex')}.tmp`;
+    const outputDir = path.dirname(outputPath);
+    let tempPath;
+    let stagingDir = null;
+    if (SAFE_SQLITE_PATH_RE.test(path.join(outputDir, stamp))) {
+      tempPath = path.join(outputDir, stamp);
+    } else {
+      // A whole copy of the database must not sit readable in a shared
+      // /tmp while it is scrubbed and verified: a private 0700 directory,
+      // not the bare tmpdir. mkdtemp's name is in the safe charset.
+      stagingDir = await fs.mkdtemp(path.join(require('os').tmpdir(), 'picpeak-sqlite-'));
+      tempPath = path.join(stagingDir, stamp);
+    }
+    assertSafeSqlitePath(tempPath);
+    const dropStaging = async () => {
+      if (stagingDir) await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+    };
+
     try {
       // Use SQLite's backup API for consistency
       await spawnAsync('sqlite3', [dbPath, `.backup '${tempPath}'`]);
+      // sqlite3 creates the copy with the process umask (commonly 0644).
+      await fs.chmod(tempPath, 0o600);
 
       // Strip face data from the COPY (#1074). `.backup` is a whole-file
       // binary copy with no way to exclude a table, so the rows come out and
@@ -307,9 +432,17 @@ class DatabaseBackupService {
         throw new Error('Backup integrity check failed');
       }
       
-      // Move temp file to final location
-      await fs.rename(tempPath, outputPath);
+      // Move temp file to final location (copy when the temp dir is on
+      // another filesystem).
+      try {
+        await fs.rename(tempPath, outputPath);
+      } catch (err) {
+        if (err.code !== 'EXDEV') throw err;
+        await fs.copyFile(tempPath, outputPath);
+        await fs.unlink(tempPath);
+      }
       
+      await dropStaging();
       return { success: true };
     } catch (error) {
       // Cleanup temp file if exists
@@ -318,6 +451,7 @@ class DatabaseBackupService {
       } catch (e) {
         // Ignore
       }
+      await dropStaging();
       throw error;
     }
   }
@@ -450,21 +584,21 @@ class DatabaseBackupService {
       // names used internally below — map them explicitly rather than
       // spreading `config` straight into the destructure, which silently
       // matched nothing and always fell through to the hardcoded
-      // defaults (notably `/backup/database`, regardless of what was
-      // configured).
+      // defaults. The destination comes from
+      // resolveDatabaseBackupDestination unless a caller passed one.
       const config = await this.getBackupConfig();
       const {
-        destinationPath = '/backup/database',
+        destinationPath: requestedDestination,
         compress = true,
         validateIntegrity = true,
         includeChecksums = true
       } = {
-        destinationPath: config.database_backup_destination_path,
         compress: config.database_backup_compress,
         validateIntegrity: config.database_backup_validate_integrity,
         includeChecksums: config.database_backup_include_checksums,
         ...options
       };
+      const destinationPath = requestedDestination || await resolveDatabaseBackupDestination(config);
       
       if (isUnderPubliclyServableRoot(destinationPath)) {
         throw new Error(
@@ -472,8 +606,16 @@ class DatabaseBackupService {
         );
       }
 
-      // Create backup directory
-      await fs.mkdir(destinationPath, { recursive: true });
+      // Create backup directory. A bare "EACCES ... mkdir '/backup'" did not
+      // say which path or setting was involved.
+      try {
+        await fs.mkdir(destinationPath, { recursive: true });
+      } catch (mkdirError) {
+        throw new Error(
+          `Cannot create the database backup directory ${destinationPath}: ${mkdirError.code || mkdirError.message}. ` +
+          'Set database_backup_destination_path to a directory the backend can write to, or mount a writable volume at that path.'
+        );
+      }
       
       // Generate backup filename
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -609,7 +751,7 @@ class DatabaseBackupService {
       };
       
     } catch (error) {
-      logger.error('Database backup failed:', error);
+      logger.error(`Database backup failed: ${error.message}`, { stack: error.stack });
       
       // Update backup run record
       if (backupRun) {
@@ -913,5 +1055,8 @@ module.exports = {
   startScheduledBackups,
   stopScheduledBackups,
   isUnderPubliclyServableRoot,
+  resolveDatabaseBackupDestination,
+  destinationPathProblem,
+  assertSafeSqlitePath,
   DatabaseBackupService // Export class for testing
 };

@@ -20,6 +20,9 @@ export interface PhotoCategory {
   // the category filters the root grid. true makes it a container — its photos
   // leave the root grid and only render inside the folder.
   is_folder?: boolean;
+  // Nesting (issue 1786): the parent folder, null = top level. Only folders
+  // nest; nested ones are managed in the Photos tab's folder bar.
+  parent_id?: number | null;
   created_at: string;
 }
 

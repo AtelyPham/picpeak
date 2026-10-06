@@ -1,0 +1,152 @@
+/**
+ * customerDocumentRescanService — hourly re-scan of pending customer
+ * documents (#1444, plan slice 8; migration 242).
+ *
+ * A document stays `pending` when no scanner was registered at upload, or
+ * the scanner was down, timed out or answered `pending`. Once a scanner is
+ * registered this job gives each such row another scan and moves it to
+ * `clean` or `rejected`.
+ *
+ * Multi-replica safe: each row is claimed with a conditional update on
+ * scan_claimed_until (an epoch-ms lease), so two workers never scan the same
+ * row, and the verdict is written only while the row is still `pending` —
+ * an admin's manual decision in the meantime wins over the scan.
+ *
+ * A file the scanner could not decide on (larger than CLAMAV_MAX_BYTES,
+ * clamd erroring on it) keeps a lease a day long instead of losing it, so
+ * the next runs move on to other rows rather than fetching the same
+ * unscannable files every hour. A rejection goes through the same
+ * afterRejection as an admin's: a request it answered reopens and the
+ * customer is told.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { scheduledTask } = require('./scheduledTask');
+const { db, logActivity } = require('../database/db');
+const logger = require('../utils/logger');
+const { getStorage } = require('./storage');
+const { getStoragePath } = require('../config/storage');
+const { assertPathInside } = require('../utils/safePath');
+const documentScanService = require('./documentScanService');
+const customerDocumentsService = require('./customerDocumentsService');
+
+// Long enough for a clamd timeout plus the copy out of S3.
+const LEASE_MS = 10 * 60 * 1000;
+// A file the scanner couldn't decide on is tried again after this long.
+const RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+const BATCH = 100;
+
+const task = scheduledTask(runCustomerDocumentRescan, { schedule: '40 * * * *' });
+function startCustomerDocumentRescan() { task.start(); }
+const stopCustomerDocumentRescan = () => task.stop();
+
+/** A local path for the stored bytes, and how to clean up after the scan. */
+async function localCopy(row) {
+  const storage = getStorage();
+  const prefix = path.join(getStoragePath(), customerDocumentsService.STORAGE_PREFIX);
+  if (storage.kind() === 'local') {
+    return { file: assertPathInside(storage.resolveLocalPath(row.storage_key), [prefix]), cleanup: async () => {} };
+  }
+  const dir = path.join(getStoragePath(), 'temp', 'customer-documents');
+  await fs.promises.mkdir(dir, { recursive: true });
+  const file = path.join(dir, `rescan-${crypto.randomUUID()}.tmp`);
+  const cleanup = () => fs.promises.unlink(file).catch(() => {});
+  try {
+    await storage.getToFile(row.storage_key, file);
+  } catch (err) {
+    // A download that fails part-way leaves what it wrote; nothing else
+    // clears this directory, and the row is retried.
+    await cleanup();
+    throw err;
+  }
+  return { file, cleanup };
+}
+
+async function rescanRow(row) {
+  // The lease is measured from the claim, not from when the run started: a
+  // long run must not hand out leases that are already half spent.
+  const claimAt = Date.now();
+  const claimed = await db('customer_documents')
+    .where({ id: row.id, status: 'pending' })
+    .whereNull('deleted_at')
+    .andWhere((q) => q.whereNull('scan_claimed_until').orWhere('scan_claimed_until', '<', claimAt))
+    .update({ scan_claimed_until: claimAt + LEASE_MS });
+  if (claimed !== 1) return null;
+
+  let verdict = 'pending';
+  let copy = null;
+  try {
+    copy = await localCopy(row);
+    verdict = await documentScanService.scanFile(copy.file);
+  } catch (err) {
+    logger.warn('Could not re-scan a customer document', { documentId: row.id, error: err.message });
+  } finally {
+    if (copy) await copy.cleanup();
+  }
+
+  const stamp = new Date().toISOString();
+  if (verdict === 'pending') {
+    // Back off: tried again in a day, and the rows behind it get their turn.
+    await db('customer_documents').where({ id: row.id, status: 'pending' })
+      .update({ scan_claimed_until: Date.now() + RETRY_AFTER_MS });
+    return 'pending';
+  }
+  const update = verdict === 'clean'
+    ? { status: 'clean', reviewed_at: stamp, scanned_at: stamp, scan_claimed_until: null, updated_at: stamp }
+    : {
+      status: 'rejected',
+      reviewed_at: stamp,
+      scanned_at: stamp,
+      scan_claimed_until: null,
+      review_note: 'The file did not pass the security check.',
+      // Distinguishes a scanner's verdict from an ordinary content/format
+      // rejection an admin makes by hand: customerDocumentsService.review()
+      // refuses to flip this back to clean through the normal review path.
+      malware_flagged: true,
+      updated_at: stamp,
+    };
+  // Still pending and not deleted: an admin who decided (or deleted) in the
+  // meantime wins.
+  const written = await db('customer_documents').where({ id: row.id, status: 'pending' })
+    .whereNull('deleted_at').update(update);
+  if (written !== 1) {
+    await db('customer_documents').where({ id: row.id }).update({ scan_claimed_until: null });
+    return null;
+  }
+  await logActivity(verdict === 'clean' ? 'customer_document_scan_cleared' : 'customer_document_scan_rejected',
+    { documentId: row.id, customerId: row.customer_account_id }, row.event_id || null, { type: 'system', name: null });
+  if (verdict === 'rejected') {
+    await customerDocumentsService.afterRejection(await db('customer_documents').where({ id: row.id }).first());
+  }
+  return verdict;
+}
+
+/** @returns {Promise<{ clean: number, rejected: number, pending: number }>} */
+async function runCustomerDocumentRescan(now = Date.now()) {
+  const result = { clean: 0, rejected: 0, pending: 0 };
+  if (!documentScanService.hasScanner()) return result;
+  const rows = await db('customer_documents')
+    .where({ status: 'pending' })
+    .whereNull('deleted_at')
+    .whereNull('purged_at')
+    .andWhere((q) => q.whereNull('scan_claimed_until').orWhere('scan_claimed_until', '<', now))
+    .orderBy('id', 'asc')
+    .limit(BATCH)
+    .select('id', 'customer_account_id', 'event_id', 'storage_key');
+  for (const row of rows) {
+    const verdict = await rescanRow(row);
+    if (verdict) result[verdict] += 1;
+  }
+  if (result.clean || result.rejected) {
+    logger.info(`Customer documents: re-scan cleared ${result.clean}, rejected ${result.rejected}`);
+  }
+  return result;
+}
+
+module.exports = {
+  startCustomerDocumentRescan,
+  stopCustomerDocumentRescan,
+  runCustomerDocumentRescan,
+};

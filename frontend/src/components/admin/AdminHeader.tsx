@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Menu, User, LogOut, Settings, Bell, Lock, CheckCircle, Trash2, Sun, Moon, Globe, ChevronDown, Eye, Download, Heart, Calendar, Image, Archive, AlertCircle, Clock, Database, FileText, Folder, Key, Mail, Tag, ToggleRight, UserCog, Webhook } from 'lucide-react';
+import { Menu, User, LogOut, Settings, Search, Bell, Lock, CheckCircle, Trash2, Sun, Moon, Globe, ChevronDown, Eye, Download, Heart, Calendar, Image, Archive, AlertCircle, Clock, Database, FileText, Folder, Key, Mail, Tag, ToggleRight, UserCog, Webhook } from 'lucide-react';
 
 // getNotificationStyle returns an icon NAME — map the ones we render to
 // components; anything unmapped keeps the Bell (codex review of #849:
@@ -13,6 +13,8 @@ const NOTIFICATION_ICONS: Record<string, React.ComponentType<{ className?: strin
   Tag, ToggleRight, Trash2, User, UserCog, Webhook,
 };
 import { useTranslation } from 'react-i18next';
+import { DashboardHomeLink } from './DashboardHomeLink';
+import { useLeaveGuard } from '../../contexts/UnsavedChangesContext';
 import { useLocalizedDate } from '../../hooks/useLocalizedDate';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 
@@ -22,17 +24,26 @@ import { useOnClickOutside } from '../../hooks/useOnClickOutside';
 import { usePublicSettings } from '../../hooks/usePublicSettings';
 import { useModal } from '../../hooks';
 import { PasswordChangeModal } from './PasswordChangeModal';
-import { LanguageSelector, SUPPORTED_LANGUAGES } from '../common';
+import { SUPPORTED_LANGUAGES } from '../common';
 import { notificationsService } from '../../services/notifications.service';
 import { toast } from 'react-toastify';
 import { buildResourceUrl } from '../../utils/url';
+import { useHasVisibleSettings } from '../../features/settings/settingsNav';
 
 interface AdminHeaderProps {
   onMenuClick: () => void;
+  /** Opens the command palette; the keyboard shortcut is bound in AdminLayout. */
+  onOpenSearch?: () => void;
 }
 
-export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
+export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick, onOpenSearch }) => {
   const navigate = useNavigate();
+  // Mac shows the Command glyph, everything else spells out Ctrl. Read from
+  // the platform string rather than the user agent: this only picks a label.
+  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '');
+  // Same gate as the sidebar's Settings entry: any visible tab, not settings.view.
+  const hasVisibleSettings = useHasVisibleSettings();
+  const { confirmLeave } = useLeaveGuard();
   const { user, logout } = useAdminAuth();
   const { isDark, toggle: toggleDarkMode, forcedMode } = useAdminDarkMode();
   const { t, i18n } = useTranslation();
@@ -116,15 +127,17 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
     if (brandingLoading) {
       return (
         <div className="flex items-center gap-2 min-w-0">
-          <div className="h-8 w-8 sm:w-32 bg-neutral-200 dark:bg-neutral-700 rounded animate-pulse" />
+          <div className="h-8 w-8 sm:w-32 bg-fill rounded animate-pulse" />
         </div>
       );
     }
     // min-w-0 + truncate on the name span so long company names shrink
     // within the left cluster instead of pushing into the right-side
     // action buttons on narrow mobile widths (#523 regression).
+    // The brand is also the home button (DashboardHomeLink asks before
+    // leaving a form with unsaved edits).
     return (
-      <div className="flex items-center gap-2 min-w-0">
+      <DashboardHomeLink className="flex items-center gap-2 min-w-0 -mx-2 px-2 py-1 rounded-lg hover:bg-hover-soft transition-colors pointer-events-auto">
         {logoEffectivelyVisible && (
           <img
             src={logoImgSrc}
@@ -142,7 +155,7 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
         {showText && (
           <span className={`${wordmarkVisibilityClass} text-xl sm:text-2xl truncate`} style={{ fontFamily: 'Poppins, sans-serif', fontWeight: 600, color: '#145346' }}>{companyName}</span>
         )}
-      </div>
+      </DashboardHomeLink>
     );
   };
 
@@ -209,7 +222,7 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
     // — same model as the sidebar's brand row (also h-16 border-b
     // border-box). Both bottom borders meet at the exact same
     // y-coordinate.
-    <header className="sticky top-0 z-30 bg-white dark:bg-neutral-900 h-16 border-b border-neutral-200 dark:border-neutral-700">
+    <header className="sticky top-0 z-30 bg-shell h-16 border-b border-line">
       <div className="px-4 sm:px-6 lg:px-8 h-full">
         <div className="relative flex items-center justify-between h-full gap-3">
           {/* Left side - Menu button, optional left-positioned logo, Date.
@@ -254,10 +267,10 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                 logo image. */}
             <div className={`hidden xl:flex items-center self-stretch ml-1 ${
               logoPosition === 'left' && !logoInSidebar
-                ? 'pl-3 border-l border-neutral-200 dark:border-neutral-700'
+                ? 'pl-3 border-l border-line'
                 : ''
             }`}>
-              <p className="text-base leading-none text-neutral-700 dark:text-neutral-300 m-0">
+              <p className="text-base leading-none text-body m-0">
                 {format(new Date(), 'PPPP')}
               </p>
             </div>
@@ -267,8 +280,8 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
               left/right clusters keep their natural sizing; hidden on
               sub-lg widths to avoid colliding with the right-side
               action cluster on narrow screens. pointer-events-none on
-              the wrapper passes hover/click through (the logo itself
-              has no interactive children today). */}
+              the wrapper passes hover/click through to the header; the
+              brand link inside opts back in with pointer-events-auto. */}
           {!logoInSidebar && logoPosition === 'center' && (
             <div className="hidden lg:flex absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
               {renderBrandBlock()}
@@ -281,25 +294,42 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
               cluster so the widgets stay where admins expect them. */}
           <div className="flex items-center gap-3">
             {!logoInSidebar && logoPosition === 'right' && (
-              <div className="hidden md:flex mr-1 pr-2 border-r border-neutral-200 dark:border-neutral-700">
+              <div className="hidden md:flex mr-1 pr-2 border-r border-line">
                 {renderBrandBlock()}
               </div>
             )}
-            {/* Language Selector — hidden on <sm where it's surfaced
-                via the user dropdown instead (#523 follow-up: phone
-                view header was too crowded with 4 widgets; language
-                is a set-once preference so it doesn't deserve permanent
-                header real estate on mobile per Rekoo-PS's feedback). */}
-            <div className="hidden sm:block">
-              <LanguageSelector />
-            </div>
+            {/* Search trigger. Sits where the language selector used to, and
+                shows the shortcut because a palette nobody knows about is a
+                palette nobody uses. Hidden on phones, where the shortcut
+                cannot be typed and the row has no width to spare. */}
+            {onOpenSearch && (
+              <button
+                onClick={onOpenSearch}
+                className="hidden sm:flex items-center gap-2 pl-2.5 pr-2 py-1.5 rounded-lg border border-line text-muted hover:text-body hover:bg-hover-soft transition-colors"
+                aria-label={t('search.palette.open', 'Search pages and settings')}
+                title={t('search.palette.open', 'Search pages and settings')}
+              >
+                <Search className="w-4 h-4" />
+                <kbd className="text-[10px] font-medium px-1 py-0.5 rounded border border-line">
+                  {isMac ? '\u2318K' : 'Ctrl K'}
+                </kbd>
+              </button>
+            )}
+
+            {/* The language selector used to sit here on sm+. It now lives
+                in the user dropdown at every width, and its canonical home
+                is Settings > General > Language — which also carries the
+                gallery/guest default next to it, so the two scopes are
+                visible side by side. Dropping it here takes the widget
+                cluster from four to three, which is what #523 asked for on
+                phones and reads better everywhere else too. */}
 
             {/* Dark Mode Toggle — hidden entirely when an admin has locked
                 the instance to a specific mode via Branding > Force color mode. */}
             {!forcedMode && (
               <button
                 onClick={toggleDarkMode}
-                className="p-2 text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                className="p-2 text-muted hover:text-body hover:bg-hover-soft rounded-lg transition-colors"
                 title={isDark ? t('admin.lightMode', 'Switch to light mode') : t('admin.darkMode', 'Switch to dark mode')}
               >
                 {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
@@ -310,7 +340,7 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
             <div className="relative" ref={notificationRef}>
               <button
                 onClick={notificationsModal.toggle}
-                className="relative p-2 text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                className="relative p-2 text-muted hover:text-body hover:bg-hover-soft rounded-lg transition-colors"
               >
                 <Bell className="w-5 h-5" />
                 {unreadCount > 0 && (
@@ -320,9 +350,9 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
 
               {/* Notifications dropdown */}
               {notificationsModal.isOpen && (
-                <div className="absolute right-0 mt-2 w-96 bg-white dark:bg-neutral-800 rounded-lg shadow-lg border border-neutral-200 dark:border-neutral-700">
-                  <div className="px-4 py-3 border-b border-neutral-100 dark:border-neutral-700 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">{t('admin.notifications')}</h3>
+                <div className="absolute right-0 mt-2 w-96 bg-panel rounded-lg shadow-lg border border-line">
+                  <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-heading">{t('admin.notifications')}</h3>
                     <div className="flex items-center gap-2">
                       {unreadCount > 0 && (
                         <button
@@ -336,7 +366,7 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                       )}
                       <button
                         onClick={() => clearAllMutation.mutate()}
-                        className="text-xs text-neutral-600 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-300 flex items-center gap-1"
+                        className="text-xs text-soft hover:text-body flex items-center gap-1"
                         title={t('admin.clearAll')}
                       >
                         <Trash2 className="w-3 h-3" />
@@ -346,7 +376,7 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                   </div>
                   <div className="max-h-96 overflow-y-auto">
                     {notifications.length === 0 ? (
-                      <div className="px-4 py-8 text-center text-sm text-neutral-500 dark:text-neutral-400">
+                      <div className="px-4 py-8 text-center text-sm text-muted">
                         {t('admin.noNotificationsMessage')}
                       </div>
                     ) : (
@@ -355,7 +385,7 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                         return (
                           <div
                             key={notification.id}
-                            className={`px-4 py-3 hover:bg-neutral-50 dark:hover:bg-neutral-700 cursor-pointer border-l-4 ${
+                            className={`px-4 py-3 hover:bg-hover cursor-pointer border-l-4 ${
                               notification.isRead ? 'border-transparent opacity-75' : 'border-accent-dark'
                             }`}
                           >
@@ -367,10 +397,10 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                                 })()}
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="text-sm text-neutral-900 dark:text-neutral-100">
+                                <p className="text-sm text-heading">
                                   {notificationsService.formatNotificationMessage(notification)}
                                 </p>
-                                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                                <p className="text-xs text-muted mt-1">
                                   {formatDistanceToNow(notification.createdAt, { addSuffix: true })}
                                 </p>
                               </div>
@@ -381,7 +411,7 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                     )}
                   </div>
                   {notifications.length > 0 && (
-                    <div className="px-4 py-2 border-t border-neutral-100 dark:border-neutral-700 text-center">
+                    <div className="px-4 py-2 border-t border-line text-center">
                       <button
                         onClick={notificationsModal.close}
                         className="text-sm text-accent hover:opacity-80"
@@ -398,11 +428,11 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
             <div className="relative" ref={userMenuRef}>
               <button
                 onClick={userMenuModal.toggle}
-                className="flex items-center gap-3 p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                className="flex items-center gap-3 p-2 hover:bg-hover-soft rounded-lg transition-colors"
               >
                 <div className="text-right hidden sm:block">
-                  <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{user?.username}</p>
-                  <p className="text-xs text-neutral-500 dark:text-neutral-400">{user?.email}</p>
+                  <p className="text-sm font-medium text-heading">{user?.username}</p>
+                  <p className="text-xs text-muted">{user?.email}</p>
                 </div>
                 <div className="w-8 h-8 bg-accent-dark rounded-full flex items-center justify-center">
                   <User className="w-5 h-5 text-white" />
@@ -411,20 +441,23 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
 
               {/* User dropdown */}
               {userMenuModal.isOpen && (
-                <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-neutral-800 rounded-lg shadow-lg border border-neutral-200 dark:border-neutral-700 py-1">
-                  <div className="px-4 py-2 border-b border-neutral-100 dark:border-neutral-700 sm:hidden">
-                    <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">{user?.username}</p>
-                    <p className="text-xs text-neutral-500 dark:text-neutral-400">{user?.email}</p>
+                <div className="absolute right-0 mt-2 w-56 bg-panel rounded-lg shadow-lg border border-line py-1">
+                  <div className="px-4 py-2 border-b border-line sm:hidden">
+                    <p className="text-sm font-medium text-heading">{user?.username}</p>
+                    <p className="text-xs text-muted">{user?.email}</p>
                   </div>
                   {/* Language sub-section — phone-only (#523 follow-up).
                       Rekoo-PS asked for language to live inside the profile
-                      menu since it's a set-once preference; on sm+ it
-                      stays in the header cluster where it's been. Collapsible
-                      so the menu isn't 8 rows taller by default. */}
-                  <div className="sm:hidden border-b border-neutral-100 dark:border-neutral-700">
+                      menu since it's a set-once preference. It now shows at
+                      every width: the header selector is gone, and an admin
+                      who lands on a language they can't read must not have to
+                      navigate Settings in that language to get out. Settings >
+                      General > Language is the same preference, spelled out.
+                      Collapsible so the menu isn't 8 rows taller by default. */}
+                  <div className="border-b border-line">
                     <button
                       onClick={userMenuLangSectionModal.toggle}
-                      className="w-full px-4 py-2 text-left text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 flex items-center gap-3"
+                      className="w-full px-4 py-2 text-left text-sm text-body hover:bg-hover flex items-center gap-3"
                       aria-expanded={userMenuLangSectionModal.isOpen}
                     >
                       <Globe className="w-4 h-4" />
@@ -433,15 +466,15 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                       <ChevronDown className={`w-4 h-4 transition-transform ${userMenuLangSectionModal.isOpen ? 'rotate-180' : ''}`} />
                     </button>
                     {userMenuLangSectionModal.isOpen && (
-                      <div className="bg-neutral-50 dark:bg-neutral-900 py-1">
+                      <div className="bg-shell py-1">
                         {SUPPORTED_LANGUAGES.map((language) => (
                           <button
                             key={language.code}
                             onClick={() => handleUserMenuLangSelect(language.code)}
-                            className={`w-full pl-11 pr-4 py-2 text-left text-sm flex items-center gap-3 hover:bg-neutral-100 dark:hover:bg-neutral-700 ${
+                            className={`w-full pl-11 pr-4 py-2 text-left text-sm flex items-center gap-3 hover:bg-hover ${
                               language.code === i18n.language
                                 ? 'text-accent bg-accent-dark/15'
-                                : 'text-neutral-700 dark:text-neutral-300'
+                                : 'text-body'
                             }`}
                           >
                             <language.Flag className="w-4 h-4" />
@@ -451,29 +484,31 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({ onMenuClick }) => {
                       </div>
                     )}
                   </div>
+                  {hasVisibleSettings && (
                   <button
                     onClick={() => {
                       closeUserMenu();
-                      navigate('/admin/settings');
+                      void confirmLeave().then((ok) => { if (ok) navigate('/admin/settings'); });
                     }}
-                    className="w-full px-4 py-2 text-left text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 flex items-center gap-3"
+                    className="w-full px-4 py-2 text-left text-sm text-body hover:bg-hover flex items-center gap-3"
                   >
                     <Settings className="w-4 h-4" />
                     {t('navigation.settings')}
                   </button>
+                  )}
                   <button
                     onClick={() => {
                       closeUserMenu();
                       passwordModal.open();
                     }}
-                    className="w-full px-4 py-2 text-left text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 flex items-center gap-3"
+                    className="w-full px-4 py-2 text-left text-sm text-body hover:bg-hover flex items-center gap-3"
                   >
                     <Lock className="w-4 h-4" />
                     {t('admin.changePassword')}
                   </button>
                   <button
                     onClick={handleLogout}
-                    className="w-full px-4 py-2 text-left text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-700 flex items-center gap-3"
+                    className="w-full px-4 py-2 text-left text-sm text-body hover:bg-hover flex items-center gap-3"
                   >
                     <LogOut className="w-4 h-4" />
                     {t('common.logout')}

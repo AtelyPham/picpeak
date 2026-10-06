@@ -3,10 +3,11 @@ const fs = require('fs').promises;
 const { db } = require('../database/db');
 const { generateThumbnail, generateVideoPlaceholder, extractCaptureDate, withLocalCopy, withProcessableImage } = require('./imageProcessor');
 const { generatePhotoFilename } = require('../utils/filenameSanitizer');
-const { processUploadedVideo, extractVideoMetadata, isVideoMimeType } = require('./videoProcessor');
+const { processUploadedVideo, extractVideoMetadata, isVideoMimeType, posterFrameError } = require('./videoProcessor');
 const { getStorage } = require('./storage');
-const { resolvePhotoStorageKey } = require('./photoResolver');
+const { resolvePhotoStorageKey, resolvePhotoFilePath } = require('./photoResolver');
 const logger = require('../utils/logger');
+const { resolveCredit, creditOpenForExif, settleGuestCredit } = require('./photoCredit');
 
 function normalizeFiles(files) {
   // Handle null, undefined, or falsy values
@@ -52,7 +53,10 @@ function normalizeFiles(files) {
   return [];
 }
 
-async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categoryId = null) {
+// `placement` (issue 1786): photo columns resolved by uploadPlacement —
+// category_id, folder_id, first_look, pending_folder_request_id. Before it
+// existed this path dropped the category of a chunked upload entirely.
+async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categoryId = null, placement = {}) {
   const uploadedPhotos = [];
   const fileList = normalizeFiles(files);
 
@@ -66,6 +70,12 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
     throw new Error('Event not found');
   }
   
+  // Read the setting before any transaction opens: on SQLite the pool is one
+  // connection, and a read through `db` while `trx` holds it waits for the
+  // acquire timeout (isEnabled then logs and answers false). The value is
+  // cached for a minute, so once per batch is right.
+  const webCopyEnabled = await require('./videoRenditionService').isEnabled();
+
   // Process each file
   for (const file of fileList) {
     const trx = await db.transaction();
@@ -135,6 +145,10 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
       let thumbnailPath;
       let videoMetadata = null;
       let imageMetadata = null;
+      // A video that completes with the placeholder tile records why, so the
+      // admin grid can say so and offer a retry (issue 1430, item 6). The row
+      // still completes: the guest gallery lists only complete rows.
+      let processingError = null;
 
       if (isVideo) {
         const videoThumbnailKey = path.posix.join(
@@ -152,8 +166,10 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
           const result = await processUploadedVideo(tempPath, videoThumbnailKey);
           videoMetadata = result.metadata;
           thumbnailPath = result.thumbnailKey;
+          if (result.placeholder) processingError = posterFrameError(result.thumbnailError);
         } catch (videoErr) {
           logger.warn(`Video processing failed for ${file.originalname}, using placeholder thumbnail:`, videoErr.message);
+          processingError = posterFrameError(videoErr.message);
           try {
             videoMetadata = await extractVideoMetadata(tempPath);
           } catch (metaErr) {
@@ -186,6 +202,9 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
           await proc.cleanup();
         }
       }
+
+      // Credit (#1561), read from the temp file before it is moved.
+      const credit = await resolveCredit({ uploadedBy, localPath: tempPath, isVideo });
 
       // Now upload the original through the storage backend and remove the
       // local temp copy.
@@ -227,7 +246,13 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
         uploaded_by: uploadedBy,
         source_origin: 'managed',
         media_type: mediaType,
-        mime_type: file.mimetype
+        mime_type: file.mimetype,
+        // Browser-playable copy (issue 1430): queued only while the setting
+        // is on, so installs without it never write a web_status.
+        ...(isVideo && webCopyEnabled ? { web_status: 'pending' } : {}),
+        ...(processingError ? { processing_error: processingError } : {}),
+        ...placement,
+        ...credit
       };
 
       // Add video-specific metadata if applicable
@@ -352,15 +377,24 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
  *   - eventId           required
  *   - photoType         'individual' | 'collage' (default 'individual')
  *   - categoryId        numeric category id or null
+ *   - folderId          folder (issue 1786) or null for the gallery root
  *   - uploadId          optional pre-generated upload id (caller can
  *                       provide it for chunked uploads that span
  *                       multiple HTTP requests)
+ *   - uploadedBy        'admin' | 'guest' — who ran the upload (default 'admin')
+ *   - credit            credit columns resolved by the caller (#1561); for a
+ *                       guest upload that is the guest's name, and the
+ *                       worker then never reads EXIF for the row
  *
  * Returns: { uploadId, photos: [{id, filename, size, category_id}], errors: [{filename, error}] }
  */
 async function queueFilesForProcessing(files, options = {}) {
   const crypto = require('crypto');
-  const { eventId, photoType = 'individual', categoryId = null, uploadId: providedUploadId } = options;
+  const { countEventPhotos, insertPhotoWithinCap, photoCapError } = require('./photoCap');
+  const {
+    eventId, photoType = 'individual', categoryId = null, folderId = null, uploadId: providedUploadId, photoCap = null,
+    uploadedBy = 'admin', credit = {},
+  } = options;
   const uploadId = providedUploadId || crypto.randomBytes(16).toString('hex');
 
   const event = await db('events').where({ id: eventId }).first();
@@ -387,11 +421,20 @@ async function queueFilesForProcessing(files, options = {}) {
   const finalDestPathRel = path.posix.join('events/active', event.slug);
   const categoryName = photoType === 'collage' ? 'collages' : 'individual';
 
+  // Once the cap is hit, the rest of the batch is refused without storing it.
+  let capReached = false;
+  const capRefusal = () => Object.assign(new Error(photoCapError(photoCap).error), { code: 'PHOTO_CAP_REACHED' });
+
   for (const file of fileList) {
     const tempPath = file?.path || file?.filepath || file?.tempFilePath;
+    let storedKey = null;
     try {
       if (!tempPath) {
         throw new Error('Uploaded file is missing a temporary path');
+      }
+      if (photoCap && (capReached || (await countEventPhotos(eventId)) >= photoCap)) {
+        capReached = true;
+        throw capRefusal();
       }
       const tempStats = await fs.stat(tempPath);
       if (tempStats.size === 0) {
@@ -409,6 +452,7 @@ async function queueFilesForProcessing(files, options = {}) {
       // Move to storage first so the file is at its recorded path by the
       // time the worker picks up the row.
       await storage.putFromFile(finalKey, tempPath, { contentType: file.mimetype });
+      storedKey = finalKey;
       await fs.unlink(tempPath).catch(() => {});
 
       const stat = await storage.stat(finalKey);
@@ -416,24 +460,34 @@ async function queueFilesForProcessing(files, options = {}) {
         throw new Error(`Size mismatch after upload: expected ${tempStats.size}, got ${stat ? stat.size : 'null'}`);
       }
 
-      const inserted = await db('photos')
-        .insert({
-          event_id: parseInt(eventId, 10),
-          filename: newFilename,
-          original_filename: file.originalname,
-          path: relativePath,
-          thumbnail_path: null,
-          type: photoType,
-          category_id: categoryId,
-          size_bytes: tempStats.size,
-          captured_at: null,
-          media_type: isVideo ? 'video' : 'image',
-          mime_type: file.mimetype,
-          processing_status: 'pending',
-          upload_id: uploadId,
-        })
-        .returning('id');
+      // The count above is only a fast path; this insert is the binding
+      // check, so parallel uploads cannot overshoot the cap together.
+      const inserted = await insertPhotoWithinCap({
+        event_id: parseInt(eventId, 10),
+        filename: newFilename,
+        original_filename: file.originalname,
+        path: relativePath,
+        thumbnail_path: null,
+        type: photoType,
+        category_id: categoryId,
+        folder_id: folderId,
+        size_bytes: tempStats.size,
+        captured_at: null,
+        media_type: isVideo ? 'video' : 'image',
+        mime_type: file.mimetype,
+        processing_status: 'pending',
+        upload_id: uploadId,
+        // Written explicitly: the column defaults to 'admin', so a queued
+        // guest upload used to be recorded as the photographer's (#1561).
+        uploaded_by: uploadedBy,
+        ...credit,
+      }, photoCap);
+      if (!inserted) {
+        capReached = true;
+        throw capRefusal();
+      }
       const photoId = inserted[0]?.id || inserted[0];
+      await settleGuestCredit(photoId, credit);
 
       queued.push({
         id: photoId,
@@ -442,7 +496,15 @@ async function queueFilesForProcessing(files, options = {}) {
         category_id: categoryId,
       });
     } catch (err) {
-      errors.push({ filename: file?.originalname || 'unknown', error: err.message });
+      // An object with no photo row is invisible to every listing and every
+      // cleanup, so a failure after the upload removes what it stored.
+      if (storedKey) await storage.delete(storedKey).catch(() => {});
+      if (tempPath) await fs.unlink(tempPath).catch(() => {});
+      errors.push({
+        filename: file?.originalname || 'unknown',
+        error: err.message,
+        ...(err.code === 'PHOTO_CAP_REACHED' ? { code: err.code, limit: photoCap } : {}),
+      });
     }
   }
 
@@ -470,17 +532,34 @@ async function processPhoto(photoId) {
   const event = await db('events').where({ id: photo.event_id }).first();
   if (!event) throw new Error(`Event ${photo.event_id} not found for photo ${photoId}`);
 
+  // Null for an external row: those live on the mount, not in the managed
+  // backend. The import writes them complete without this worker, so the only
+  // way one gets here is the admin grid's Retry on a video whose poster frame
+  // failed — which used to hand this null to withLocalCopy.
   const sourceKey = resolvePhotoStorageKey(event, photo);
   const isVideo =
     photo.media_type === 'video' ||
     (typeof photo.mime_type === 'string' && photo.mime_type.startsWith('video/'));
 
   const updateData = {};
+  // Set when a video completes with the placeholder tile (issue 1430, item 6).
+  let posterError = null;
 
   // withLocalCopy materialises the original from the storage backend so
   // sharp/ffmpeg can read it. For local storage this is a free O(1) path
-  // resolution; for S3 it downloads to a tmpdir that's auto-cleaned.
-  await withLocalCopy(sourceKey, async (localPath) => {
+  // resolution; for S3 it downloads to a tmpdir that's auto-cleaned. An
+  // external source is read straight off the mount.
+  const withSource = sourceKey
+    ? (fn) => withLocalCopy(sourceKey, fn)
+    : (fn) => fn(resolvePhotoFilePath(event, photo));
+  let exifCredit = null;
+  await withSource(async (localPath) => {
+    // Credit (#1561): admin uploads only. A guest upload already carries the
+    // guest's name (or deliberately none), and a manual credit is final.
+    if (!isVideo && creditOpenForExif(photo)) {
+      exifCredit = (await resolveCredit({ localPath })).credit_name || null;
+    }
+
     if (!photo.captured_at && !isVideo) {
       try {
         const captured = await extractCaptureDate(localPath);
@@ -491,9 +570,16 @@ async function processPhoto(photoId) {
     }
 
     if (isVideo) {
+      // The external key carries the `ext<id>_` prefix regenerateVideoThumbnail
+      // uses, so a retried external video overwrites its import-time tile
+      // rather than writing a second one under a basename another event may
+      // share.
+      const thumbnailBasename = sourceKey
+        ? photo.filename
+        : `ext${photo.id}_${path.basename(photo.external_relpath || photo.filename)}`;
       const videoThumbnailKey = path.posix.join(
         'thumbnails',
-        `thumb_${photo.filename.replace(/\.[^.]+$/, '.jpg')}`
+        `thumb_${thumbnailBasename.replace(/\.[^.]+$/, '.jpg')}`
       );
       // A thumbnail/probe failure must not fail the row: processPhoto's caller
       // marks failed rows 'failed' and the guest gallery only lists 'complete',
@@ -506,15 +592,17 @@ async function processPhoto(photoId) {
       let videoResult = null;
       try {
         videoResult = await processUploadedVideo(localPath, videoThumbnailKey);
+        if (videoResult.placeholder) posterError = posterFrameError(videoResult.thumbnailError);
       } catch (videoErr) {
         logger.warn(`processPhoto: video processing failed for ${photoId}, using placeholder thumbnail`, { error: videoErr.message });
+        posterError = posterFrameError(videoErr.message);
         try {
           videoResult = { metadata: await extractVideoMetadata(localPath) };
         } catch (metaErr) {
           logger.warn(`processPhoto: video metadata extraction also failed for ${photoId}`, { error: metaErr.message });
         }
         // ffmpeg-free (sharp-rendered SVG); returns null on failure.
-        const placeholderKey = await generateVideoPlaceholder(photo.filename);
+        const placeholderKey = await generateVideoPlaceholder(thumbnailBasename);
         if (placeholderKey) videoResult = { ...(videoResult || {}), thumbnailKey: placeholderKey };
       }
       if (videoResult?.thumbnailKey) updateData.thumbnail_path = videoResult.thumbnailKey;
@@ -558,9 +646,10 @@ async function processPhoto(photoId) {
     }
   });
 
-  // Mark complete
+  // Mark complete. A video that got the placeholder completes with a note
+  // instead of a clean slate: the row is usable, the tile is not the video.
   updateData.processing_status = 'complete';
-  updateData.processing_error = null;
+  updateData.processing_error = posterError;
 
   // Face detection (#1074): this is the only correct place to enqueue.
   // Earlier and there is no preview rendition to scan; later and there is no
@@ -578,7 +667,28 @@ async function processPhoto(photoId) {
     logger.warn(`processPhoto: face enqueue check failed for ${photoId}`, { error: err.message });
   }
 
+  // Browser-playable copy (issue 1430, item 8): same UPDATE for the same
+  // reason as the face enqueue above, and only while the setting is on.
+  try {
+    if (isVideo && await require('./videoRenditionService').isEnabled()) {
+      updateData.web_status = 'pending';
+    }
+  } catch (err) {
+    logger.warn(`processPhoto: web rendition enqueue check failed for ${photoId}`, { error: err.message });
+  }
+
   await db('photos').where({ id: photoId }).update(updateData);
+
+  // Separate, fenced write: an admin who set a credit while this row was in
+  // the queue made the final call, and this must not overwrite it. Fenced on
+  // the file that was read too, as the backfill is: a replacement meanwhile
+  // swapped it, and this name describes the old one.
+  if (exifCredit) {
+    await db('photos')
+      .where({ id: photoId, path: photo.path, filename: photo.filename })
+      .whereNull('credit_source')
+      .update({ credit_name: exifCredit, credit_source: 'exif' });
+  }
 
   // Side effects (best-effort, never fail the photo if these break)
   if (!isVideo) {

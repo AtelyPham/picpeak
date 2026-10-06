@@ -1,14 +1,19 @@
 const { db } = require('../database/db');
-const { userHasAllPermissions } = require('../middleware/permissions');
+const { userHasAllPermissions, roleEventScope } = require('../middleware/permissions');
 const { canAccessEvent } = require('../middleware/ownership');
 const { assertGalleryAvailable, requiresGalleryPassword } = require('../utils/galleryLifecycle');
 const { isTokenBeforeCutoff } = require('../utils/sessionCutoff');
 const { AppError } = require('../utils/errors');
+const { assertGalleryCredentialCurrent } = require('../utils/galleryCredentialCutoff');
+const { isFeatureEnabled } = require('../middleware/requireFeatureFlag');
 const sessions = require('./sessionAccessService');
 
 // These claims identify a session for revocation; no raw JWT, IP or password
 // enters a media URL. Only use grants from this service or a verified signature.
-const CLAIMS = ['type', 'id', 'customerId', 'eventId', 'eventSlug', 'iat', 'exp', 'jti', 'via', 'accessLevel'];
+// parentIat/parentJti identify the portal session a gallery token was minted from.
+// showLink names the slideshow link a slideshow session was opened with.
+const CLAIMS = ['type', 'id', 'customerId', 'eventId', 'eventSlug', 'iat', 'exp', 'jti', 'via', 'accessLevel',
+  'parentIat', 'parentJti', 'showLink'];
 
 class GalleryAccessService {
   grant(event, kind, decoded) {
@@ -28,8 +33,25 @@ class GalleryAccessService {
     }
     const session = grant.session;
     if (grant.kind === 'admin') {
+      // adminAuth gates the whole admin API on must_change_password
+      // (middleware/auth.js:52), but the gallery preview never passes through
+      // adminAuth - it authorizes here - so without this an admin issued a
+      // temporary password was locked out of the admin API and could still
+      // list, view and download gallery photos through ?admin_preview=1. The
+      // flag exists to force a rotation; a path that ignores it makes the
+      // rotation optional.
+      //
+      // No includeProfile: sessionAccessService projects the flag
+      // unconditionally. Asking for the profile would also pull in
+      // roles.display_name, making this path fail - and fall back to a
+      // fabricated super_admin - on a schema missing only that column.
       const account = await sessions.admin(session);
-      const principal = { id: account.id, roleName: account.role_name };
+      if (account.must_change_password) {
+        throw new AppError('Password change required before continuing', 403, 'MUST_CHANGE_PASSWORD');
+      }
+      const principal = {
+        id: account.id, roleName: account.role_name, eventScope: await roleEventScope(account.role_name),
+      };
       if (!canAccessEvent(principal, event)
         || !await userHasAllPermissions(account.id, ['events.view', 'photos.view'])) {
         throw new AppError('Access denied', 403, 'FORBIDDEN');
@@ -38,6 +60,14 @@ class GalleryAccessService {
       await sessions.assertActive(session, 'gallery');
       if (Number(session.eventId) !== Number(event.id)) {
         throw new AppError('Token does not match requested gallery', 403, 'INVALID_GALLERY_GRANT');
+      }
+      assertGalleryCredentialCurrent(event, session);
+      // The slideshow feature flag is a master kill-switch for /show/ links;
+      // a session derived from one dies with it. Same carve-out as the link
+      // check for a session minted before the claim existed.
+      if (session.accessLevel === 'slideshow' && session.showLink !== undefined
+        && !(await isFeatureEnabled('slideshow'))) {
+        throw new AppError('Slideshow disabled', 401, 'SLIDESHOW_DISABLED');
       }
       if (session.via === 'customer') {
         await sessions.customer(session, { derived: true });

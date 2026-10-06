@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Button, Input } from '../common';
 import type { FilterType, FeedbackFilterType } from './GalleryFilter';
 import { ColorLabelFilterChips } from './ColorLabelFilterChips';
+import { MinRatingFilterChips } from './MinRatingFilterChips';
 import type { ColorLabel } from '../../services/feedback.service';
 
 interface PhotoCategory {
@@ -48,6 +49,12 @@ interface PhotoFilterBarProps {
   activeColorFilters?: ColorLabel[];
   onColorFilterChange?: (color: ColorLabel) => void;
   colorLabelCounts?: Partial<Record<ColorLabel, number>>;
+  // Minimum own-rating filter (issue 1733, A3c). Rendered only while ratings
+  // are on for the event — the same switch as the tile's star control.
+  ratingsEnabled?: boolean;
+  minRating?: number | null;
+  onMinRatingChange?: (minRating: number | null) => void;
+  minRatingCounts?: Partial<Record<number, number>>;
 }
 
 export const PhotoFilterBar: React.FC<PhotoFilterBarProps> = ({
@@ -71,7 +78,11 @@ export const PhotoFilterBar: React.FC<PhotoFilterBarProps> = ({
   colorLabelsEnabled = false,
   activeColorFilters = [],
   onColorFilterChange,
-  colorLabelCounts = {}
+  colorLabelCounts = {},
+  ratingsEnabled = false,
+  minRating = null,
+  onMinRatingChange,
+  minRatingCounts = {}
 }) => {
   const { t } = useTranslation();
   const [showSortMenu, setShowSortMenu] = useState(false);
@@ -213,7 +224,10 @@ export const PhotoFilterBar: React.FC<PhotoFilterBarProps> = ({
             no feedback filter at all on desktop (#802 — the lg:hidden
             fallback block below only covers mobile/tablet). */}
         {((categories && categories.length > 0) || (feedbackEnabled && !!onFilterChange)) && (
-          <div className="flex items-start lg:items-center justify-between flex-col lg:flex-row gap-3">
+          // lg:flex-wrap: with feedback, colour labels and five rating chips
+          // all on, the fixed-width groups exceed the container at 1024px, and
+          // the global overflow-x: hidden would clip them off-screen.
+          <div className="flex items-start lg:items-center justify-between flex-col lg:flex-row lg:flex-wrap gap-3">
             {/* Categories: keep in a horizontal scroll container */}
             {categories && categories.length > 0 && (
               <div className="w-full overflow-x-auto pb-2 lg:pb-0">
@@ -310,6 +324,16 @@ export const PhotoFilterBar: React.FC<PhotoFilterBarProps> = ({
                 activeColors={activeColorFilters}
                 onToggle={onColorFilterChange}
                 counts={colorLabelCounts}
+              />
+            )}
+
+            {/* Own-rating filter (issue 1733), desktop */}
+            {feedbackEnabled && ratingsEnabled && onMinRatingChange && (
+              <MinRatingFilterChips
+                className="hidden lg:flex"
+                minRating={minRating}
+                onChange={onMinRatingChange}
+                counts={minRatingCounts}
               />
             )}
 
@@ -419,6 +443,16 @@ export const PhotoFilterBar: React.FC<PhotoFilterBarProps> = ({
             activeColors={activeColorFilters}
             onToggle={onColorFilterChange}
             counts={colorLabelCounts}
+          />
+        )}
+
+        {/* Own-rating filter (issue 1733), mobile/tablet */}
+        {feedbackEnabled && ratingsEnabled && onMinRatingChange && (
+          <MinRatingFilterChips
+            className="flex lg:hidden"
+            minRating={minRating}
+            onChange={onMinRatingChange}
+            counts={minRatingCounts}
           />
         )}
       </div>

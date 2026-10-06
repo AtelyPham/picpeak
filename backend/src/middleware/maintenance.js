@@ -1,5 +1,6 @@
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
+const { isSocialCrawler } = require('../services/galleryOgService');
 
 // Cache maintenance mode status to avoid DB queries on every request
 let maintenanceMode = false;
@@ -122,6 +123,7 @@ async function maintenanceMiddleware(req, res, next) {
   // images, so leaving them open would publish gallery metadata from a site
   // that is supposed to be down.
   const BACKEND_RENDERED_PREFIXES = ['/api/', '/photos/', '/thumbnails/', '/fonts/', '/og/', '/s/'];
+  const CRAWLER_RENDERED_PREFIXES = ['/gallery/', '/transfer/', '/transfer-upload/'];
   const BACKEND_RENDERED_EXACT = [
     '/',
     '/robots.txt',
@@ -133,8 +135,15 @@ async function maintenanceMiddleware(req, res, next) {
   // API router; classify on the lowercased path or that spelling is treated
   // as the SPA shell and walks straight past the gate.
   const requestPath = String(req.path || '').toLowerCase();
+  // Crawler hits on share links are rewritten to /og/... by nginx, so compose
+  // gates them. Without nginx, server.js renders the same OG card in place on
+  // the share path itself — classify it the same way or the all-in-one image
+  // publishes gallery/transfer titles from a site that is supposed to be down.
+  const isCrawlerShareRender = CRAWLER_RENDERED_PREFIXES.some((prefix) => requestPath.startsWith(prefix))
+    && isSocialCrawler(req.headers?.['user-agent']);
   const isBackendRendered = BACKEND_RENDERED_EXACT.includes(requestPath)
-    || BACKEND_RENDERED_PREFIXES.some((prefix) => requestPath.startsWith(prefix));
+    || BACKEND_RENDERED_PREFIXES.some((prefix) => requestPath.startsWith(prefix))
+    || isCrawlerShareRender;
   const isSpaShell = req.method === 'GET' && !isBackendRendered;
   
   // Allow admin routes if admin is authenticated

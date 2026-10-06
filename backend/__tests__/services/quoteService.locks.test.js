@@ -19,7 +19,12 @@ function makeChain() {
     then: function (onResolve, onReject) {
       return Promise.resolve(this._selectResult).then(onResolve, onReject);
     },
-    where: jest.fn(function () { return this; }),
+    // Looking up the quote that reissued a quote (#1451) finds none:
+    // `first` after `where({ replaces_quote_id })` resolves to undefined.
+    where: jest.fn(function (arg) {
+      this._replacesLookup = !!(arg && typeof arg === 'object' && 'replaces_quote_id' in arg);
+      return this;
+    }),
     whereNotIn: jest.fn(function () { return this; }),
     whereIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
@@ -27,7 +32,13 @@ function makeChain() {
     orderBy: jest.fn(function () { return this; }),
     limit: jest.fn(function () { return this; }),
     select: jest.fn(function () { return Promise.resolve(this._selectResult); }),
-    first: jest.fn(function () { return Promise.resolve(this._firstValue); }),
+    first: jest.fn(function () {
+      if (this._replacesLookup) {
+        this._replacesLookup = false;
+        return Promise.resolve(undefined);
+      }
+      return Promise.resolve(this._firstValue);
+    }),
     update: jest.fn(function () { return Promise.resolve(this._updateResult); }),
     insert: jest.fn(function () { return this; }),
     returning: jest.fn(function () { return Promise.resolve(this._insertResult); }),
@@ -70,6 +81,14 @@ jest.mock('../../src/services/emailProcessor', () => ({
 }));
 jest.mock('../../src/utils/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(),
+}));
+
+// The change-history recorder reads and writes through knex in ways this chain
+// mock does not model; its behaviour is covered by the accountingHistory suites.
+jest.mock('../../src/services/accountingHistory', () => ({
+  auditedInsert: jest.fn(async () => [{ id: 999 }]),
+  auditedUpdate: jest.fn(async () => 1),
+  auditedDelete: jest.fn(async () => 1),
 }));
 
 const quoteService = require('../../src/services/quoteService');
@@ -192,7 +211,10 @@ describe('quoteService — quote status transition backstop', () => {
   beforeEach(() => resetChains());
 
   const respond = (quote, action = 'accept') => {
-    pickChainFor('quote_action_tokens')._firstValue = { id: 7, quote_id: quote.id, expires_at: null };
+    // A live token: recordResponse refuses one without an expiry.
+    pickChainFor('quote_action_tokens')._firstValue = {
+      id: 7, quote_id: quote.id, expires_at: new Date(Date.now() + 86400000).toISOString(),
+    };
     pickChainFor('quotes')._firstValue = quote;
     return quoteService.recordResponse({ token: 'tok', action, ip: '127.0.0.1' });
   };

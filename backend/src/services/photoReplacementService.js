@@ -18,6 +18,7 @@ const { generatePhotoFilename } = require('../utils/filenameSanitizer');
 const watermarkGeneratorService = require('./watermarkGeneratorService');
 const { getStorage } = require('./storage');
 const { resolvePhotoStorageKey } = require('./photoResolver');
+const { resolveCredit } = require('./photoCredit');
 const logger = require('../utils/logger');
 
 /**
@@ -153,6 +154,15 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
 
     const stats = await fsp.stat(newFileTempPath);
 
+    // Credit (#1561): an automatic one describes the file, so the new file's
+    // EXIF replaces it. Guest and manual credits are decisions about the
+    // photo and stay.
+    const isVideoReplacement = !!mimeType?.startsWith('video/');
+    const autoCredit = existingPhoto.uploaded_by !== 'guest'
+      && (!existingPhoto.credit_source || existingPhoto.credit_source === 'exif')
+      ? await resolveCredit({ localPath: newFileTempPath, isVideo: isVideoReplacement })
+      : null;
+
     // RAW/DNG isn't sharp-decodable — extract the embedded JPEG preview first
     // (pass-through for ordinary images), then measure + thumbnail that. Mirrors
     // the ingest paths (processPhoto / processUploadedPhotos).
@@ -188,6 +198,9 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
     if (existingPhoto.thumbnail_path && existingPhoto.thumbnail_path !== thumbnailPath) {
       await storage.delete(existingPhoto.thumbnail_path).catch(() => {});
     }
+    // The browser-playable copy (issue 1430) describes the old bytes.
+    const videoRendition = require('./videoRenditionService');
+    await videoRendition.deleteWebCopy(existingPhoto);
     // Responsive tiers, keyed off the OLD row (#1095 / #492). Their key embeds
     // the basename, which the update below replaces — so this is the last
     // moment they can be derived at all. Miss it and a later delete or archive
@@ -231,6 +244,12 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
       captured_at: capturedAt,
       mime_type: mimeType,
       media_type: mimeType?.startsWith('video/') ? 'video' : 'image',
+      // A replaced video is queued for a new copy while the setting is on;
+      // anything else starts over with none.
+      web_path: null,
+      web_status: isVideoReplacement && await videoRendition.isEnabled() ? 'pending' : null,
+      web_started_at: null,
+      web_error: null,
       // The replacement lives in the managed backend, so the row has to say
       // so. resolvePhotoStorageKey gives photo.source_origin precedence over
       // everything and returns null for 'reference'/'external' — so leaving
@@ -273,6 +292,14 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
     }
 
     await db('photos').where({ id: existingPhoto.id }).update(updates);
+    if (autoCredit) {
+      // Fenced like the upload worker: a manual credit set meanwhile wins,
+      // and so does a replacement that installed another file since.
+      await db('photos')
+        .where({ id: existingPhoto.id, path: updates.path, filename: updates.filename })
+        .where((q) => q.whereNull('credit_source').orWhere('credit_source', 'exif'))
+        .update({ credit_name: autoCredit.credit_name || null, credit_source: autoCredit.credit_source || null });
+    }
 
     const updatedPhoto = await db('photos').where({ id: existingPhoto.id }).first();
 

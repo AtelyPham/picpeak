@@ -22,7 +22,13 @@ const router = express.Router();
  * GET /admin/event-types
  * Get all event types (for admin management)
  */
-router.get('/', adminAuth, requirePermission(['settings.view', 'event_types.view', 'events.create', 'events.edit']), async (req, res) => {
+// `events.view` is on the list because the admin events list filters by type:
+// without it a read-only admin reaches a page whose type filter 403s and sits
+// there empty. What this returns is the type catalogue — name, emoji, slug,
+// display order — and the events list already renders each row's type, so it
+// exposes nothing that role cannot already see. Still tighter than the sibling
+// `/active` below, which carries no permission check at all.
+router.get('/', adminAuth, requirePermission(['settings.view', 'event_types.view', 'events.create', 'events.edit', 'events.view']), async (req, res) => {
   try {
     const includeInactive = req.query.includeInactive === 'true';
     const eventTypes = await eventTypeService.getAllEventTypes({
@@ -167,7 +173,7 @@ router.put('/:id', adminAuth, requirePermission('event_types.manage'), [
     const updates = req.body;
 
     const before = await eventTypeService.getEventTypeById(parseInt(id));
-    const eventType = await eventTypeService.updateEventType(parseInt(id), updates);
+    const eventType = await eventTypeService.updateEventType(parseInt(id), updates, req.admin?.id ?? null);
     changedEvidence(res, 'event_type_editing', before, eventType,
       ['name', 'slug_prefix', 'emoji', 'theme_preset', 'theme_config', 'display_order', 'is_active']);
 

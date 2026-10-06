@@ -1,9 +1,11 @@
 import React from 'react';
-import { Save, AlertCircle } from 'lucide-react';
-import { Button, Card } from '../../../components/common';
+import { AlertCircle } from 'lucide-react';
+import { Card } from '../../../components/common';
 import { useTranslation } from 'react-i18next';
+import { SettingsSaveBar } from '../../../components/admin/SettingsSaveBar';
 import type { EventSettings } from '../hooks/useSettingsState';
 import { COLOR_LABEL_SWATCHES, COLOR_LABELS } from '../../../services/feedback.service';
+import { UploaderNameSettings } from '../../../components/admin/UploaderNameSettings';
 
 interface EventsTabProps {
   eventSettings: EventSettings;
@@ -12,6 +14,8 @@ interface EventsTabProps {
     mutate: () => void;
     isPending: boolean;
   };
+  isDirty: boolean;
+  onDiscard: () => void;
 }
 
 /**
@@ -37,16 +41,30 @@ export const EventsTab: React.FC<EventsTabProps> = ({
   eventSettings,
   setEventSettings,
   saveEventSettingsMutation,
+  isDirty,
+  onDiscard,
 }) => {
   const { t } = useTranslation();
+  // The keyword field edits the raw text; the list is parsed from it on each
+  // change but the text is not re-joined, so Backspace can delete the space
+  // after a comma. Re-synced when the stored list changes elsewhere (load,
+  // discard).
+  const keywordList = eventSettings.first_look_folder_keywords.join(', ');
+  const [keywordText, setKeywordText] = React.useState(keywordList);
+  const lastSyncedKeywords = React.useRef(keywordList);
+  React.useEffect(() => {
+    const parsed = keywordText.split(',').map((k) => k.trim()).filter(Boolean).join(', ');
+    if (keywordList !== lastSyncedKeywords.current && keywordList !== parsed) setKeywordText(keywordList);
+    lastSyncedKeywords.current = keywordList;
+  }, [keywordList, keywordText]);
 
   return (
     <div className="space-y-6">
       <Card padding="md">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 mb-4">
+        <h2 className="text-lg font-semibold text-heading mb-4">
           {t('settings.events.requiredFields', 'Required Fields')}
         </h2>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4">
+        <p className="text-sm text-soft mb-4">
           {t('settings.events.requiredFieldsDescription', 'Configure which contact fields are required when creating new events.')}
         </p>
 
@@ -60,10 +78,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.requireCustomerName', 'Require customer name')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.requireCustomerNameHelp', 'Customer name must be provided for new events')}
                 </p>
               </div>
@@ -79,10 +97,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.requireCustomerEmail', 'Require customer email')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.requireCustomerEmailHelp', 'Customer email must be provided for new events')}
                 </p>
                 {!eventSettings.event_require_customer_email && (
@@ -104,10 +122,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.requireAdminEmail', 'Require admin email')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.requireAdminEmailHelp', 'Admin email must be provided for new events')}
                 </p>
                 {!eventSettings.event_require_admin_email && (
@@ -129,10 +147,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.requireEventDate', 'Require event date')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.requireEventDateHelp', 'Event date must be provided when creating events')}
                 </p>
                 {!eventSettings.event_require_event_date && (
@@ -154,10 +172,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.requireExpiration', 'Require expiration date')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.requireExpirationHelp', 'Galleries must have an expiration date')}
                 </p>
                 {!eventSettings.event_require_expiration && (
@@ -179,10 +197,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.defaultRequirePassword', 'Require password by default')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.defaultRequirePasswordHelp', 'Pre-check "Require password" when creating new events. Disable for quicker creation of public galleries.')}
                 </p>
               </div>
@@ -198,10 +216,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.defaultFeedbackEnabled', 'Enable Guest Feedback by default')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.defaultFeedbackEnabledHelp', 'Pre-check "Guest Feedback" when creating new events. Individual feedback options (likes, ratings, comments) can still be customised per event.')}
                 </p>
               </div>
@@ -214,11 +232,11 @@ export const EventsTab: React.FC<EventsTabProps> = ({
               is in the middle of. Greyed out rather than hidden while the
               master default is off, so the options stay discoverable. */}
           <div
-            className={`ml-7 pl-4 border-l border-neutral-200 dark:border-neutral-700 space-y-3 ${
+            className={`ml-7 pl-4 border-l border-line space-y-3 ${
               eventSettings.event_default_feedback_enabled ? '' : 'opacity-50'
             }`}
           >
-            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+            <p className="text-xs text-muted">
               {t(
                 'settings.events.feedbackTypeDefaultsHelp',
                 'Which feedback types new galleries start with. Existing galleries are not affected — each gallery can still be changed individually.'
@@ -234,7 +252,7 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                   onChange={(e) => setEventSettings(prev => ({ ...prev, [key]: e.target.checked }))}
                   className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
                 />
-                <span className="text-sm text-neutral-700 dark:text-neutral-300 flex items-center gap-2">
+                <span className="text-sm text-body flex items-center gap-2">
                   {t(label, fallback)}
                   {key === 'event_default_allow_color_labels' && (
                     <span className="flex items-center gap-1" aria-hidden="true">
@@ -256,7 +274,7 @@ export const EventsTab: React.FC<EventsTabProps> = ({
 
             <div>
               <label
-                className="block text-sm text-neutral-700 dark:text-neutral-300 mb-1"
+                className="block text-sm text-body mb-1"
                 htmlFor="event_default_keybind_mode"
               >
                 {t('settings.events.defaultKeybindMode', 'Default lightbox shortcuts')}
@@ -269,7 +287,7 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                   ...prev,
                   event_default_keybind_mode: e.target.value === 'lightroom' ? 'lightroom' : 'colors',
                 }))}
-                className="w-full max-w-sm px-3 py-2 border border-neutral-300 dark:border-neutral-600 rounded-lg bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 text-sm"
+                className="w-full max-w-sm px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading text-sm"
               >
                 <option value="colors">
                   {t('settings.events.keybindColors', 'Colors only — 1 green, 2 yellow, 3 red')}
@@ -281,6 +299,121 @@ export const EventsTab: React.FC<EventsTabProps> = ({
             </div>
           </div>
 
+          {/* Download limit default (issue 1560) */}
+          <div>
+            <label
+              className="block text-sm font-medium text-body mb-1"
+              htmlFor="event_default_download_limit"
+            >
+              {t('settings.events.defaultDownloadLimit', 'Default download limit')}
+            </label>
+            <input
+              id="event_default_download_limit"
+              type="number"
+              min={0}
+              max={2147483647}
+              value={eventSettings.event_default_download_limit}
+              onChange={(e) => setEventSettings(prev => ({
+                ...prev,
+                event_default_download_limit: Math.max(0, parseInt(e.target.value, 10) || 0),
+              }))}
+              className="w-32 px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading text-sm"
+            />
+            <p className="text-xs text-muted mt-1">
+              {t('settings.events.defaultDownloadLimitHelp', 'Pre-filled on new events: how many photos a client can download. 0 = unlimited.')}
+            </p>
+          </div>
+
+          {/* Folders + two-stage delivery (issues 1786, 1562): defaults for new
+              galleries, and the keyword folders that start a first look. */}
+          <div className="space-y-4 rounded-lg border border-line p-4">
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={eventSettings.event_default_folder_structure}
+                onChange={(e) => setEventSettings(prev => ({ ...prev, event_default_folder_structure: e.target.checked }))}
+                className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
+              />
+              <div>
+                <span className="text-sm font-medium text-body">
+                  {t('settings.events.defaultFolderStructure', 'Mirror folder structure in new galleries')}
+                </span>
+                <p className="text-xs text-muted mt-1">
+                  {t('settings.events.defaultFolderStructureHelp', 'Subfolders of uploads and external folders become nested gallery folders. Existing galleries keep their own setting.')}
+                </p>
+              </div>
+            </label>
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={eventSettings.first_look_keyword_detection}
+                onChange={(e) => setEventSettings(prev => ({ ...prev, first_look_keyword_detection: e.target.checked }))}
+                className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
+              />
+              <div>
+                <span className="text-sm font-medium text-body">
+                  {t('settings.events.firstLookDetection', 'Start a first look from keyword folders')}
+                </span>
+                <p className="text-xs text-muted mt-1">
+                  {t('settings.events.firstLookDetectionHelp', 'A top-level folder whose name contains one of these words (e.g. "Wedding (FirstLook)") is not created as a folder: its photos are badged and the gallery switches to two-stage delivery.')}
+                </p>
+              </div>
+            </label>
+            {eventSettings.first_look_keyword_detection && (
+              <div>
+                <label className="block text-sm font-medium text-body mb-1" htmlFor="first_look_folder_keywords">
+                  {t('settings.events.firstLookKeywords', 'Keywords')}
+                </label>
+                <input
+                  id="first_look_folder_keywords"
+                  type="text"
+                  value={keywordText}
+                  onChange={(e) => {
+                    setKeywordText(e.target.value);
+                    setEventSettings(prev => ({
+                      ...prev,
+                      first_look_folder_keywords: e.target.value.split(',').map((k) => k.trim()).filter(Boolean),
+                    }));
+                  }}
+                  className="w-full max-w-md px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading text-sm"
+                />
+                <p className="text-xs text-muted mt-1">
+                  {t('settings.events.firstLookKeywordsHelp', 'Comma-separated. Case, spaces, dashes and underscores are ignored, so "FirstLook" also matches "first-look".')}
+                </p>
+              </div>
+            )}
+            <div>
+              <label className="block text-sm font-medium text-body mb-1" htmlFor="event_default_delivery_days">
+                {t('settings.events.deliveryDays', 'Full gallery due after (days)')}
+              </label>
+              <input
+                id="event_default_delivery_days"
+                type="number"
+                min={1}
+                max={365}
+                value={eventSettings.event_default_delivery_days}
+                onChange={(e) => setEventSettings(prev => ({
+                  ...prev,
+                  event_default_delivery_days: Math.min(365, Math.max(1, parseInt(e.target.value, 10) || 1)),
+                }))}
+                className="w-32 px-3 py-2 border border-line-strong rounded-lg bg-panel text-heading text-sm"
+              />
+              <p className="text-xs text-muted mt-1">
+                {t('settings.events.deliveryDaysHelp', 'When a first look starts without a promised date, the full gallery is due this many days after the event date.')}
+              </p>
+            </div>
+          </div>
+
+          {/* Uploader names (#1561): defaults for new galleries only. */}
+          <UploaderNameSettings
+            className="max-w-sm"
+            idPrefix="event-default-uploader-names"
+            mode={eventSettings.event_default_guest_name_mode}
+            onModeChange={(mode) => setEventSettings(prev => ({ ...prev, event_default_guest_name_mode: mode }))}
+            showToGuests={eventSettings.event_default_show_credits_to_guests}
+            onShowToGuestsChange={(show) => setEventSettings(prev => ({ ...prev, event_default_show_credits_to_guests: show }))}
+          />
+
           <div>
             <label className="flex items-start gap-3">
               <input
@@ -290,10 +423,10 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.showGalleryFilterBar', 'Show filter bar in galleries')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.showGalleryFilterBarHelp', 'Display the search-by-filename and sort controls above grid-layout galleries. Disable for a cleaner layout.')}
                 </p>
               </div>
@@ -309,26 +442,15 @@ export const EventsTab: React.FC<EventsTabProps> = ({
                 className="mt-1 w-4 h-4 text-primary-600 rounded focus:ring-primary-500"
               />
               <div>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                <span className="text-sm font-medium text-body">
                   {t('settings.events.enablePhoneField', 'Enable phone number field')}
                 </span>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                <p className="text-xs text-muted mt-1">
                   {t('settings.events.enablePhoneFieldHelp', 'Adds an optional phone number input to the event form. Useful for downstream automations like WhatsApp delivery via n8n. Always optional even when enabled.')}
                 </p>
               </div>
             </label>
           </div>
-        </div>
-
-        <div className="mt-6">
-          <Button
-            variant="primary"
-            onClick={() => saveEventSettingsMutation.mutate()}
-            isLoading={saveEventSettingsMutation.isPending}
-            leftIcon={<Save className="w-5 h-5" />}
-          >
-            {t('settings.events.saveSettings', 'Save Event Settings')}
-          </Button>
         </div>
       </Card>
 
@@ -343,6 +465,18 @@ export const EventsTab: React.FC<EventsTabProps> = ({
           </div>
         </div>
       </Card>
+
+      <SettingsSaveBar
+
+        isDirty={isDirty}
+
+        isSaving={saveEventSettingsMutation.isPending}
+
+        onSave={() => saveEventSettingsMutation.mutate()}
+
+        onDiscard={onDiscard}
+
+      />
     </div>
   );
 };

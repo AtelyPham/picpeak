@@ -1,0 +1,129 @@
+name: Updater image
+
+# Builds ghcr.io/<owner>/<repo>/updater, the container packaging of
+# updater/picpeak-updater.sh (docs/self-update.md). It is versioned on its own,
+# separate from release-please:
+#
+#   - pull requests touching updater/ run the tests and build without pushing
+#   - a tag `updater-vX.Y.Z` publishes :X.Y.Z, :X.Y and :X
+#
+# docker-compose.production.yml follows the major tag (:1), so a breaking
+# change to the file contract ships as a new major, never as :1.
+#
+# Every container-variant install pulls :1 automatically, and that container
+# holds the Docker socket. So `publish` only pushes when the tagged commit is
+# already on main (reviewed), and it runs in the `updater-release` environment.
+# Those checks live in this file, and a tag-triggered run takes the workflow
+# from the tagged commit, so on their own they stop mistakes, not someone who
+# can push a tag. What enforces it is repository configuration: a tag ruleset
+# for `updater-v*` and required reviewers on the `updater-release` environment.
+# Third-party actions are pinned to commit SHAs for the same reason.
+#
+# The image only adds bash and the script to docker:cli, so both platforms are
+# built on one runner under QEMU instead of the native-runner matrix that
+# docker-build.yml needs for npm.
+
+on:
+  push:
+    tags: [ 'updater-v*.*.*' ]
+  pull_request:
+    branches: [ main, stable ]
+    paths:
+      - 'updater/**'
+      - '.github/workflows/updater-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Syntax-check and test the script
+        run: |
+          bash -n updater/picpeak-updater.sh
+          bash updater/tests/run-tests.sh
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build (no push)
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: ./updater
+          file: ./updater/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/updater-v')
+    runs-on: ubuntu-latest
+    environment: updater-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag
+        id: vars
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}/updater" >> "$GITHUB_OUTPUT"
+          script_version=$(sed -n 's/^readonly UPDATER_VERSION="\(.*\)"$/\1/p' updater/picpeak-updater.sh)
+          tag_version="${GITHUB_REF#refs/tags/updater-v}"
+          if [[ "$tag_version" != "$script_version" ]]; then
+            echo "::error::Tag updater-v$tag_version does not match UPDATER_VERSION=$script_version in updater/picpeak-updater.sh"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::updater-v$tag_version points at a commit that is not on main. Only reviewed code may publish the updater image."
+            exit 1
+          fi
+          echo "version=$script_version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=match,pattern=updater-v(\d+\.\d+\.\d+),group=1
+            type=match,pattern=updater-v(\d+\.\d+)\.\d+,group=1
+            type=match,pattern=updater-v(\d+)\.\d+\.\d+,group=1
+
+      - name: Build and push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: ./updater
+          file: ./updater/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}

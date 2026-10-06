@@ -3,11 +3,12 @@ const router = express.Router();
 const { verifyGalleryAccess, denySlideshowToken } = require('../middleware/gallery');
 const { guestBlockedByReveal, blockHiddenGallery } = require('../utils/revealMode');
 const { feedbackRateLimit, generateGuestIdentifier } = require('../middleware/feedbackRateLimit');
-const { resolveGuest } = require('../middleware/guestAuth');
+const { resolveGuest, scopeGuestToFeedback } = require('../middleware/guestAuth');
 const feedbackService = require('../services/feedbackService');
 const feedbackModeration = require('../services/feedbackModeration');
 const { db, logActivity } = require('../database/db');
 const logger = require('../utils/logger');
+const { isPhotoHiddenFromViewer, applyPhotoVisibilityFilter } = require('../utils/photoVisibility');
 const {
   validatePhotoId,
   validateFeedbackSubmission,
@@ -60,13 +61,14 @@ router.get('/:slug/photos/:photoId/feedback',
   // guests enumerate comments/stats.
   blockHiddenGallery,
   resolveGuest,
+  scopeGuestToFeedback,
   validatePhotoId,
   checkValidation,
   async (req, res) => {
     try {
       const { photoId } = req.params;
       const event = req.event;
-      const guestIdentifier = generateGuestIdentifier(req);
+      const guestIdentifier = await generateGuestIdentifier(req);
       
       // Get feedback settings
       const settings = await feedbackService.getEventFeedbackSettings(event.id);
@@ -80,7 +82,9 @@ router.get('/:slug/photos/:photoId/feedback',
         .where({ id: photoId, event_id: event.id })
         .first();
       
-      if (!photo) {
+      // A client-hidden photo does not exist for a viewer who cannot see it:
+      // no reading its comments and counts, no adding to them.
+      if (!photo || isPhotoHiddenFromViewer(photo, req.accessLevel)) {
         return res.status(404).json({ error: 'Photo not found' });
       }
       
@@ -97,6 +101,9 @@ router.get('/:slug/photos/:photoId/feedback',
       
       // Get guest's own feedback separately
       const guestFeedback = await feedbackService.getPhotoFeedback(photoId, {
+        // Older merges updated guest_id without rewriting guest_identifier.
+        // Use the verified identity, as /my-feedback and submissions do.
+        guest_id: req.guest?.id,
         guest_identifier: guestIdentifier,
         identity_mode: settings.identity_mode,
       });
@@ -121,31 +128,37 @@ router.get('/:slug/photos/:photoId/feedback',
       const visibleFeedback = settings.show_feedback_to_guests ? allFeedback : 
         allFeedback.filter(f => f.is_mine);
       
+      // Every aggregate is other guests' feedback, so all of them are gated
+      // on show_feedback_to_guests — the photo list already hides like_count
+      // this way. The viewer's own choices stay in my_feedback below.
+      const shareAggregates = Boolean(settings.show_feedback_to_guests);
       res.json({
         feedback: visibleFeedback,
         summary: {
-          average_rating: photo.average_rating || 0,
-          total_ratings: await db('photo_feedback')
-            .where({ photo_id: photoId, feedback_type: 'rating', is_hidden: false })
-            .count('id as count')
-            .first()
-            .then(r => r.count),
-          like_count: photo.like_count || 0,
-          favorite_count: photo.favorite_count || 0,
-          // Gated like the per-emoji map below — aggregate reaction data is
-          // a new surface, kept fully hidden while sharing is off.
-          reaction_count: settings.show_feedback_to_guests ? (photo.reaction_count || 0) : 0,
-          color_label_count: settings.show_feedback_to_guests ? (photo.color_label_count || 0) : 0,
-          comment_count: await db('photo_feedback')
-            .where({ 
-              photo_id: photoId, 
-              feedback_type: 'comment', 
-              is_approved: true,
-              is_hidden: false 
-            })
-            .count('id as count')
-            .first()
-            .then(r => r.count)
+          average_rating: shareAggregates ? (photo.average_rating || 0) : 0,
+          total_ratings: shareAggregates
+            ? await db('photo_feedback')
+              .where({ photo_id: photoId, feedback_type: 'rating', is_hidden: false })
+              .count('id as count')
+              .first()
+              .then(r => r.count)
+            : 0,
+          like_count: shareAggregates ? (photo.like_count || 0) : 0,
+          favorite_count: shareAggregates ? (photo.favorite_count || 0) : 0,
+          reaction_count: shareAggregates ? (photo.reaction_count || 0) : 0,
+          color_label_count: shareAggregates ? (photo.color_label_count || 0) : 0,
+          comment_count: shareAggregates
+            ? await db('photo_feedback')
+              .where({
+                photo_id: photoId,
+                feedback_type: 'comment',
+                is_approved: true,
+                is_hidden: false
+              })
+              .count('id as count')
+              .first()
+              .then(r => r.count)
+            : 0
         },
         // Per-emoji tallies for the reaction bar (#839). Gated on
         // show_feedback_to_guests: with sharing off a guest sees only their
@@ -190,6 +203,7 @@ router.post('/:slug/photos/:photoId/feedback',
   // Reveal-gated (#838): no interacting with photos you cannot see.
   blockHiddenGallery,
   resolveGuest,
+  scopeGuestToFeedback,
   validatePhotoId,
   validateFeedbackSubmission,
   checkValidation,
@@ -217,7 +231,7 @@ router.post('/:slug/photos/:photoId/feedback',
         }
       }
 
-      const guestIdentifier = generateGuestIdentifier(req);
+      const guestIdentifier = await generateGuestIdentifier(req);
 
       // Check if specific feedback type is allowed
       const feedbackType = req.body.feedback_type;
@@ -239,7 +253,9 @@ router.post('/:slug/photos/:photoId/feedback',
         .where({ id: photoId, event_id: event.id })
         .first();
 
-      if (!photo) {
+      // A client-hidden photo does not exist for a viewer who cannot see it:
+      // no reading its comments and counts, no adding to them.
+      if (!photo || isPhotoHiddenFromViewer(photo, req.accessLevel)) {
         return res.status(404).json({ error: 'Photo not found' });
       }
 
@@ -257,12 +273,8 @@ router.post('/:slug/photos/:photoId/feedback',
 
       // Apply rate limiting based on feedback type
       const rateLimitMiddleware = feedbackRateLimit(feedbackType);
-      await new Promise((resolve, reject) => {
-        rateLimitMiddleware(req, res, (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
+      // Await the middleware itself: a rejected response does not call next().
+      await rateLimitMiddleware(req, res, (err) => { if (err) throw err; });
 
       // If we got here and response was sent (rate limited), return
       if (res.headersSent) return;
@@ -334,6 +346,15 @@ router.post('/:slug/photos/:photoId/feedback',
         guestIdentifier
       );
 
+      // The guest was merged away or deleted while this request was running.
+      // Same answer resolveGuest gives the next request from that token.
+      if (result && result.guest_missing) {
+        return res.status(401).json({
+          error: 'Guest identity required',
+          code: 'GUEST_IDENTITY_REQUIRED'
+        });
+      }
+
       // Per-guest cap reached (#655). Surface as a structured 403 so the
       // frontend can show an explicit popup with the actual cap value and
       // remaining-slots count, rather than a generic toast. Code is the
@@ -397,12 +418,16 @@ router.get('/:slug/feedback-summary',
         });
       }
       
-      const summary = await feedbackService.getEventFeedbackSummary(event.id);
-      
+      // Totals scoped like the list below: feedback on photos this viewer
+      // cannot see is not counted either.
+      const summary = await feedbackService.getEventFeedbackSummary(event.id, { viewerAccessLevel: req.accessLevel });
+
       // Filter data based on what guests should see
       const guestSummary = {
         stats: summary.stats,
         top_rated: summary.photos
+          // No filenames or ratings of photos this viewer cannot see.
+          .filter(p => !isPhotoHiddenFromViewer(p, req.accessLevel))
           .filter(p => p.average_rating > 0)
           .slice(0, 5)
           .map(p => ({
@@ -437,6 +462,7 @@ router.get('/:slug/feedback-summary',
 router.get('/:slug/my-feedback',
   verifyGalleryAccess,
   resolveGuest,
+  scopeGuestToFeedback,
   async (req, res) => {
     try {
       const event = req.event;
@@ -448,31 +474,49 @@ router.get('/:slug/my-feedback',
         return res.json([]);
       }
 
-      const query = db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
-        .where('photo_feedback.event_id', event.id)
-        // Hidden rows are absent for the guest who left them too (#1150). In
-        // guest identity mode GalleryView builds its Liked/Favorited/Rated
-        // chips and their filters from THIS array rather than from is_liked,
-        // so without this a hidden like left an empty heart while the Liked
-        // chip still counted it and still surfaced the photo. Unapproved rows
-        // stay: a comment in the moderation queue is still the guest's own.
-        .where('photo_feedback.is_hidden', false);
+      const query = applyPhotoVisibilityFilter(
+        db('photo_feedback')
+          .join('photos', 'photo_feedback.photo_id', 'photos.id')
+          .where('photo_feedback.event_id', event.id)
+          // Hidden rows are absent for the guest who left them too (#1150). In
+          // guest identity mode GalleryView builds its Liked/Favorited/Rated
+          // chips and their filters from THIS array rather than from is_liked,
+          // so without this a hidden like left an empty heart while the Liked
+          // chip still counted it and still surfaced the photo. Unapproved rows
+          // stay: a comment in the moderation queue is still the guest's own.
+          .where('photo_feedback.is_hidden', false),
+        // A photo the client has since hidden is gone for this viewer, its id
+        // and filename included.
+        req.accessLevel
+      );
 
       // Prefer guest_id lookup when a verified guest token is present
       // (per-person identity). Fall back to the device hash otherwise.
       if (req.guest?.id) {
         query.where('photo_feedback.guest_id', req.guest.id);
       } else {
-        const guestIdentifier = generateGuestIdentifier(req);
+        const guestIdentifier = await generateGuestIdentifier(req);
         query.where('photo_feedback.guest_identifier', guestIdentifier);
       }
 
+      // Name the columns rather than photo_feedback.*: the row also carries
+      // guest_email, guest_name, ip_address and user_agent. After an admin
+      // merges two guest identities those still describe the source guest,
+      // so the survivor's token would receive another person's email and IP.
+      // GalleryView reads photo_id and feedback_type from this list.
       const myFeedback = await query
         .select(
-          'photo_feedback.*',
-          'photos.filename',
-          'photos.path'
+          'photo_feedback.id',
+          'photo_feedback.photo_id',
+          'photo_feedback.feedback_type',
+          'photo_feedback.rating',
+          'photo_feedback.comment_text',
+          'photo_feedback.reaction',
+          'photo_feedback.color_label',
+          'photo_feedback.is_approved',
+          'photo_feedback.created_at',
+          'photo_feedback.updated_at',
+          'photos.filename'
         )
         .orderBy('photo_feedback.created_at', 'desc');
 

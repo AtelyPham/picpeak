@@ -2,7 +2,6 @@
 // module-level overview. Do not add behavior here without updating the entry re-exports.
 
 const { db, logActivity } = require('../../database/db');
-const { getStoragePath } = require('../../config/storage');
 const { getAppSetting } = require('../../utils/appSettings');
 const { AppError } = require('../../utils/errors');
 const { formatShortDate } = require('../../utils/dateFormatter');
@@ -14,6 +13,8 @@ const { hasColumnCached } = require('../../utils/schemaCache');
 const { formatMajor } = require('./helpers');
 const { getInvoiceById } = require('./queries');
 const { buildInvoiceRenderContext } = require('./render');
+const { auditedUpdate } = require('../accountingHistory');
+const { invoicePdfFile } = require('../../utils/storedDocumentPdf');
 
 
 /**
@@ -70,7 +71,8 @@ async function resolvePerReminderFeeMinor(invoice) {
   return rate > 0 ? net + Math.round(net * rate / 100) : net;
 }
 
-async function applyReminder(invoice, lineItems, level, adminId) {
+// `actor` names who triggered the reminder in the accounting change history.
+async function applyReminder(invoice, lineItems, level, adminId, actor = adminId) {
   const customer = await db('customer_accounts').where({ id: invoice.customer_account_id }).first();
 
   // Per fee-bearing reminder (levels 2..level): 2nd = 1×, 3rd = 2×, computed
@@ -96,7 +98,15 @@ async function applyReminder(invoice, lineItems, level, adminId) {
     updated_at: new Date(),
   };
   if (await hasColumnCached('invoices', 'late_fee_vat_minor')) update.late_fee_vat_minor = lateFeeVat;
-  await db('invoices').where({ id: invoice.id }).update(update);
+  // Conditional on the row still waiting on the customer: every caller
+  // checked that, but from a snapshot. A payment or a Storno landing in
+  // between must not be overwritten with `overdue`, a fee and a Mahnung.
+  const applied = await auditedUpdate(db, 'invoices',
+    (q) => q.where({ id: invoice.id }).whereIn('status', ['sent', 'overdue']),
+    update, { actor, source: 'invoice.reminder' });
+  if (!applied) {
+    throw new AppError('The invoice is no longer awaiting payment; no reminder was sent.', 409, 'INVOICE_NOT_ACTIONABLE');
+  }
 
   // Fire invoice.overdue at the status→overdue flip. Deduped per (workflow,
   // invoice), so across the reminder ladder it triggers a flow at most once.
@@ -131,12 +141,18 @@ async function applyReminder(invoice, lineItems, level, adminId) {
   ctx.totals.lateFeeAmountMinor = lateFeeGross;
   const buffer = await pdfService.renderInvoiceToBuffer(ctx);
   const fs = require('fs');
-  const path = require('path');
-  const year = new Date(fresh.issue_date).getFullYear();
-  const root = path.join(getStoragePath(), 'business-docs', 'mahnung', String(year));
-  fs.mkdirSync(root, { recursive: true });
-  const mahnungPath = path.join(root, `${fresh.invoice_number}_mahnung_L${level}.pdf`);
-  fs.writeFileSync(mahnungPath, buffer);
+  // Stored under business-docs/mahnung as before, and recorded (#1445).
+  const { path: mahnungPath } = await require('../documentArtifactService').persist({
+    docType: 'invoice',
+    docId: fresh.id,
+    kind: 'reminder',
+    folder: 'mahnung',
+    buffer,
+    fileName: `${fresh.invoice_number}_mahnung_L${level}.pdf`,
+    year: new Date(fresh.issue_date).getFullYear(),
+    theme: ctx.theme,
+    issuer: ctx.issuer,
+  });
 
   // days_overdue floors at 1 (a "0 days overdue" reminder reads as broken).
   const rawDaysOverdue = Math.floor((Date.now() - new Date(invoice.due_date).getTime()) / 86400000);
@@ -147,8 +163,9 @@ async function applyReminder(invoice, lineItems, level, adminId) {
 
   // Attach the (unchanged) original invoice PDF + the new Mahnung.
   const attachments = [];
-  if (invoice.pdf_path && fs.existsSync(invoice.pdf_path)) {
-    attachments.push({ filename: `${invoice.invoice_number}.pdf`, contentPath: invoice.pdf_path, contentType: 'application/pdf' });
+  const invoicePdf = invoicePdfFile(invoice.pdf_path);
+  if (invoicePdf) {
+    attachments.push({ filename: `${invoice.invoice_number}.pdf`, contentPath: invoicePdf, contentType: 'application/pdf' });
   }
   attachments.push({ filename: `${fresh.invoice_number}_Mahnung.pdf`, contentPath: mahnungPath, contentType: 'application/pdf' });
 

@@ -42,9 +42,12 @@ jest.mock('../../src/utils/logger', () => ({
 // Maintenance state is cached for a minute; each case starts from a clean read.
 const { clearMaintenanceCache } = require('../../src/middleware/maintenance');
 
-async function run(path, { method = 'GET', authorization } = {}) {
+async function run(path, { method = 'GET', authorization, userAgent } = {}) {
   clearMaintenanceCache();
-  const req = { path, method, headers: authorization ? { authorization } : {} };
+  const headers = {};
+  if (authorization) headers.authorization = authorization;
+  if (userAgent) headers['user-agent'] = userAgent;
+  const req = { path, method, headers };
   const res = {
     statusCode: null,
     body: null,
@@ -90,6 +93,24 @@ describe('maintenanceMiddleware — SPA shell vs API split', () => {
       expect(passed).toBe(false);
       expect(status).toBe(503);
       expect(body).toMatchObject({ maintenance: true });
+    });
+
+    // Without nginx, server.js renders the crawler OG card on the share path
+    // itself instead of a rewritten /og/... path — same data, same gate.
+    it.each([
+      ['/gallery/some-event'],
+      ['/gallery/some-event/show/tok'],
+      ['/transfer/' + 'a'.repeat(64)],
+      ['/transfer-upload/' + 'a'.repeat(64)],
+    ])('%s with a crawler UA returns 503', async (path) => {
+      const { passed, status } = await run(path, { userAgent: 'WhatsApp/2.23.20.0' });
+      expect(passed).toBe(false);
+      expect(status).toBe(503);
+    });
+
+    it('a browser on a transfer link still gets the shell', async () => {
+      const { passed } = await run('/transfer/' + 'a'.repeat(64), { userAgent: 'Mozilla/5.0 (iPhone)' });
+      expect(passed).toBe(true);
     });
 
     it('does not let a non-GET request masquerade as a shell load', async () => {

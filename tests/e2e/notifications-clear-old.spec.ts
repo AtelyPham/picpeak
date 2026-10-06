@@ -1,17 +1,10 @@
 import { test, expect } from '@playwright/test';
+import { adminApiToken } from './_helpers/admin';
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Admin!234';
 
-test('clearing old notifications removes read entries', async ({ request }) => {
-  const loginResponse = await request.post('/api/auth/admin/login', {
-    data: {
-      username: ADMIN_EMAIL,
-      password: ADMIN_PASSWORD,
-    },
-  });
-  expect(loginResponse.ok()).toBeTruthy();
-  const { token } = await loginResponse.json();
+test('clearing notifications dismisses entries from this admin\'s bell without deleting the audit log @smoke', async ({ request }) => {
+  const token = await adminApiToken(request);
 
   const authHeaders = {
     Authorization: `Bearer ${token}`,
@@ -42,10 +35,10 @@ test('clearing old notifications removes read entries', async ({ request }) => {
   const createdEvent = await createEventResponse.json();
   const eventId = createdEvent.id;
 
-  const collectedNotifications = async () => {
+  const collectedNotifications = async (includeRead = true) => {
     const notificationsResponse = await request.get('/api/admin/notifications', {
       headers: authHeaders,
-      params: { includeRead: true, limit: 200 },
+      params: { includeRead, limit: 200 },
     });
     expect(notificationsResponse.ok()).toBeTruthy();
     return notificationsResponse.json();
@@ -77,17 +70,23 @@ test('clearing old notifications removes read entries', async ({ request }) => {
     .map((notification: any) => notification.id);
   expect(readNotificationIds.length).toBeGreaterThan(0);
 
-  const clearResponse = await request.delete('/api/admin/notifications/clear-old', {
+  // Clear all records a dismissal per visible row for this admin; the
+  // activity_logs rows themselves (the audit trail) are never deleted, see
+  // backend/src/routes/adminNotifications.js and migration 261.
+  const clearResponse = await request.delete('/api/admin/notifications/clear-all', {
     headers: { Authorization: `Bearer ${token}` },
   });
   expect(clearResponse.ok()).toBeTruthy();
   const clearPayload = await clearResponse.json();
-  expect(clearPayload.deletedCount).toBeGreaterThanOrEqual(0);
+  expect(clearPayload.deletedCount).toBeGreaterThanOrEqual(readNotificationIds.length);
 
-  const afterClearPayload = await collectedNotifications();
-  expect(Array.isArray(afterClearPayload.notifications)).toBe(true);
-  const remainingIds = new Set(afterClearPayload.notifications.map((notification: any) => notification.id));
-  readNotificationIds.forEach((id) => {
-    expect(remainingIds.has(id)).toBe(false);
-  });
+  // Gone from this admin's bell, in both the unread and the includeRead view.
+  for (const includeRead of [false, true]) {
+    const afterClear = await collectedNotifications(includeRead);
+    expect(Array.isArray(afterClear.notifications)).toBe(true);
+    const remainingIds = new Set(afterClear.notifications.map((notification: any) => notification.id));
+    readNotificationIds.forEach((id) => {
+      expect(remainingIds.has(id)).toBe(false);
+    });
+  }
 });

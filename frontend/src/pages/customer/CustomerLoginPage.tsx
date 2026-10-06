@@ -17,6 +17,21 @@ import { usePublicSettings } from '../../hooks/usePublicSettings';
 import { usePublicDarkMode } from '../../hooks/usePublicDarkMode';
 import { resolveLoginLogoClasses } from '../../utils/loginLogoSize';
 
+/**
+ * Where to go after login. Only paths inside the authenticated customer
+ * surface are followed — never another origin (`//host`, `/\host`) and never
+ * back to the public login / invite / reset pages. The target page re-checks
+ * access on its own, so this only decides where to land.
+ */
+export function safeCustomerReturnTo(value: string | null): string {
+  const fallback = '/customer/dashboard';
+  if (!value || !value.startsWith('/customer/') || value.startsWith('//') || value.includes('\\')) {
+    return fallback;
+  }
+  if (/^\/customer\/(login|invite|reset-password)(\/|\?|$)/.test(value)) return fallback;
+  return value;
+}
+
 export const CustomerLoginPage: React.FC = () => {
   const { t } = useTranslation();
   const { isAuthenticated, setSession } = useCustomerAuth();
@@ -51,7 +66,7 @@ export const CustomerLoginPage: React.FC = () => {
   }, [searchParams, t]);
 
   if (isAuthenticated) {
-    return <Navigate to="/customer/dashboard" replace />;
+    return <Navigate to={safeCustomerReturnTo(searchParams.get('returnTo'))} replace />;
   }
 
   const validateForm = (): boolean => {
@@ -172,7 +187,7 @@ export const CustomerLoginPage: React.FC = () => {
                   backgroundColor: 'var(--color-elevated, rgba(220, 38, 38, 0.05))',
                 }}
               >
-                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0 text-red-600" />
+                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0 text-status hue-danger" />
                 <span className="text-sm">{errors.form}</span>
               </div>
             )}
@@ -244,23 +259,25 @@ export const CustomerLoginPage: React.FC = () => {
           </form>
         </Card>
 
-        {/* Footer — mirrors AdminLoginPage. Support email links to
-            mailto: with the address from Branding settings; falls back
-            to a placeholder so the link is never broken. The
-            "admin hint" line that used to live here is gone — admins
-            who land here on purpose can navigate to /admin/login on
-            their own. */}
+        {/* Footer — mirrors AdminLoginPage. The support line only
+            renders once Branding has a support email (publicSettings
+            returns '' until then); a placeholder address would send
+            visitors nowhere. The "admin hint" line that used to live
+            here is gone — admins who land here on purpose can navigate
+            to /admin/login on their own. */}
         <div className="text-center mt-8">
-          <p className="text-sm" style={{ color: 'var(--color-text, #171717)', opacity: 0.7 }}>
-            {t('customer.login.needHelp', 'Need help?')}{' '}
-            <a
-              href={`mailto:${settingsData?.branding_support_email || 'support@example.com'}`}
-              className="hover:underline"
-              style={{ color: 'var(--color-primary, #5C8762)' }}
-            >
-              {settingsData?.branding_support_email || 'support@example.com'}
-            </a>
-          </p>
+          {settingsData?.branding_support_email && (
+            <p className="text-sm" style={{ color: 'var(--color-text, #171717)', opacity: 0.7 }}>
+              {t('customer.login.needHelp', 'Need help?')}{' '}
+              <a
+                href={`mailto:${settingsData.branding_support_email}`}
+                className="hover:underline"
+                style={{ color: 'var(--color-primary, #5C8762)' }}
+              >
+                {settingsData.branding_support_email}
+              </a>
+            </p>
+          )}
           <PoweredBy className="text-xs mt-2" style={{ color: 'var(--color-text, #171717)', opacity: 0.5 }} />
         </div>
       </div>

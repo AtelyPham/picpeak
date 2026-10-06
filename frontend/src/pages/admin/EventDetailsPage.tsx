@@ -3,30 +3,39 @@ import { useExpiryRefresh } from '../../hooks/useExpiryRefresh';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-toastify';
-import { useLocalizedDate } from '../../hooks/useLocalizedDate';
 
 import { Button, Card, Loading } from '../../components/common';
 import { PasswordResetModal, PublishGalleryDialog, SendGalleryEmailDialog, DuplicateEventDialog, EventRenameDialog, AdminGuestsList } from '../../components/admin';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { eventsService } from '../../services/events.service';
 import { usePublicSettings } from '../../hooks/usePublicSettings';
-import { isGalleryPublic, normalizeRequirePassword } from '../../utils/accessControl';
+import { useLeaveGuard, useUnsavedChanges } from '../../contexts/UnsavedChangesContext';
+import { isGalleryPublic } from '../../utils/accessControl';
+import { splitMediaCount } from '../../utils/mediaCounts';
 import { photosService, AdminPhoto, type PhotoFilters as PhotoFilterParams, type FeedbackFilters } from '../../services/photos.service';
-import { feedbackService, FeedbackSettings as FeedbackSettingsType } from '../../services/feedback.service';
-import { cssTemplatesService, type EnabledTemplate } from '../../services/cssTemplates.service';
-import { ThemeConfig, GALLERY_THEME_PRESETS } from '../../types/theme.types';
-import { safeParseDate } from './event-details/utils';
-import { INITIAL_EDIT_FORM, type EditFormState, type EventDetailsTab } from './event-details/types';
+import { feedbackService, type FeedbackSettings } from '../../services/feedback.service';
+import type { Event } from '../../types';
+import type { ThemeConfig } from '../../types/theme.types';
+import { safeParseDate, eventHasGuests } from './event-details/utils';
+import type { EventDetailsTab } from './event-details/types';
 import { EventDetailsHeader } from './event-details/EventDetailsHeader';
 import { EventTabs } from './event-details/EventTabs';
 import { OverviewTab } from './event-details/OverviewTab';
 import { PhotosTab } from './event-details/PhotosTab';
-import { CategoriesTab } from './event-details/CategoriesTab';
+import { EventSettingsTab } from './event-details/settings/EventSettingsTab';
+import { useEventSettingsDraft } from './event-details/settings/useEventSettingsDraft';
+import type { SettingsSectionKey } from './event-details/settings/draft';
+import { EventFeedbackPanel } from './EventFeedbackPage';
 
-const ALL_TAB_KEYS: EventDetailsTab[] = ['overview', 'photos', 'categories', 'guests'];
+const ALL_TAB_KEYS: EventDetailsTab[] = ['overview', 'photos', 'guests', 'settings'];
+const SECTION_KEYS: SettingsSectionKey[] = ['general', 'access', 'downloads', 'guests', 'appearance', 'source', 'delivery', 'reminder', 'slideshow', 'faces', 'danger'];
 
 function isValidTab(value: string | null): value is EventDetailsTab {
   return value !== null && (ALL_TAB_KEYS as string[]).includes(value);
+}
+
+function isValidSection(value: string | null): value is SettingsSectionKey {
+  return value !== null && (SECTION_KEYS as string[]).includes(value);
 }
 
 export const EventDetailsPage: React.FC = () => {
@@ -35,84 +44,73 @@ export const EventDetailsPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const { t } = useTranslation();
-  const { format } = useLocalizedDate();
+  const { confirmLeave } = useLeaveGuard();
 
-  // Validate ID parameter
   React.useEffect(() => {
     if (!id || isNaN(parseInt(id))) {
       navigate('/admin/events');
     }
   }, [id, navigate]);
 
-  const [isEditing, setIsEditing] = useState(false);
-  const [editForm, setEditForm] = useState<EditFormState>(INITIAL_EDIT_FORM);
-  const [feedbackSettings, setFeedbackSettings] = useState<FeedbackSettingsType>({
-    feedback_enabled: false,
-    allow_ratings: true,
-    allow_likes: true,
-    allow_comments: true,
-    allow_favorites: true,
-    allow_reactions: true,
-    allow_color_labels: false,
-    keybind_mode: 'colors',
-    require_name_email: false,
-    moderate_comments: true,
-    show_feedback_to_guests: true,
-    enable_rate_limiting: false,
-    rate_limit_window_minutes: 15,
-    rate_limit_max_requests: 10,
-  });
-  // Read ?tab=… on mount, same shape as SettingsPage so both surfaces answer
-  // deep links identically; an unknown value falls back to the default tab and
-  // the sync effect below rewrites the URL to match (QA follow-up).
+  // ?tab=… and ?section=… are read on mount and kept in sync, so a copied
+  // address lands on the same tab and Settings section. The retired
+  // ?tab=categories opens Photos with the categories panel.
+  const initialTabParam = searchParams.get('tab');
+  const [openCategoriesOnMount] = useState(initialTabParam === 'categories');
   const [activeTab, setActiveTab] = useState<EventDetailsTab>(
-    isValidTab(searchParams.get('tab')) ? (searchParams.get('tab') as EventDetailsTab) : 'overview'
+    isValidTab(initialTabParam) ? initialTabParam : initialTabParam === 'categories' ? 'photos' : 'overview'
+  );
+  // The Settings section someone opened, or null when none was: the desktop
+  // then shows General, a phone shows the section overview. It lives in the
+  // URL so a link to any section (General included) opens it.
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionKey | null>(
+    isValidSection(searchParams.get('section')) ? (searchParams.get('section') as SettingsSectionKey) : null
   );
 
-  // Keep the URL in sync when the user clicks tabs, so copy-pasting the address
-  // lands the recipient on the same tab.
   useEffect(() => {
-    if (searchParams.get('tab') === activeTab) return;
     const next = new URLSearchParams(searchParams);
     next.set('tab', activeTab);
-    setSearchParams(next, { replace: true });
+    if (activeTab === 'settings' && settingsSection) next.set('section', settingsSection);
+    else next.delete('section');
+    if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab]);
+  }, [activeTab, settingsSection]);
 
   // Reflect external URL changes (back/forward) back into local state.
   useEffect(() => {
     const urlTab = searchParams.get('tab');
-    if (isValidTab(urlTab) && urlTab !== activeTab) {
-      setActiveTab(urlTab);
-    }
+    if (isValidTab(urlTab) && urlTab !== activeTab) setActiveTab(urlTab);
+    const urlSection = searchParams.get('section');
+    const nextSection = isValidSection(urlSection) ? urlSection : null;
+    if (nextSection !== settingsSection) setSettingsSection(nextSection);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
+
+  const openSettings = useCallback((section: SettingsSectionKey) => {
+    setSettingsSection(section);
+    setActiveTab('settings');
+  }, []);
+
+  // Opening or closing a section from the Settings tab. `push` adds a history
+  // entry, so on a phone (where a section replaces the overview) Back returns
+  // to the overview instead of leaving the gallery. Only the URL changes here;
+  // the effect above takes the state from it. Setting both at once let the
+  // sync effect run against the old URL and replace the pushed entry.
+  const changeSettingsSection = useCallback((section: SettingsSectionKey | null, { push = false } = {}) => {
+    const next = new URLSearchParams(searchParams);
+    if (section) next.set('section', section);
+    else next.delete('section');
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, push ? { state: { settingsSectionPushed: true } } : { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
   const [showPasswordReset, setShowPasswordReset] = useState(false);
-  const [showNewPassword, setShowNewPassword] = useState(false);
   const [showRenameDialog, setShowRenameDialog] = useState(false);
   const [showPublishDialog, setShowPublishDialog] = useState(false);
   const [showSendEmailDialog, setShowSendEmailDialog] = useState(false);
   const [showDuplicateDialog, setShowDuplicateDialog] = useState(false);
-  const [currentTheme, setCurrentTheme] = useState<ThemeConfig | null>(null);
-  const [currentPresetName, setCurrentPresetName] = useState<string>('default');
-  // Tracks whether the admin actually interacted with the theme picker
-  // during this edit session. Prevents the save handler from writing the
-  // initial display state back to `events.color_theme`, which silently
-  // overwrote branding inheritance on events with a NULL color_theme
-  // (API-created events — #550 follow-up).
-  const [themeChanged, setThemeChanged] = useState(false);
-  const [cssTemplates, setCssTemplates] = useState<EnabledTemplate[]>([]);
 
-  // Fetch CSS templates when component mounts or editing starts
-  useEffect(() => {
-    if (isEditing) {
-      cssTemplatesService.getEnabledTemplates()
-        .then(setCssTemplates)
-        .catch(err => console.error('Failed to load CSS templates:', err));
-    }
-  }, [isEditing]);
-
-  // Photo filters state
   const [photoFilters, setPhotoFilters] = useState<PhotoFilterParams>({
     category_id: undefined as number | null | undefined,
     search: '',
@@ -120,7 +118,6 @@ export const EventDetailsPage: React.FC = () => {
     order: 'desc' as 'asc' | 'desc'
   });
 
-  // Feedback filters state for export
   const [feedbackFilters, setFeedbackFilters] = useState<FeedbackFilters>({
     minRating: null,
     hasLikes: false,
@@ -131,52 +128,37 @@ export const EventDetailsPage: React.FC = () => {
     logic: 'AND'
   });
 
-  // Fetch event details
   // dataUpdatedAt doubles as the "password may have changed" signal for the
-  // share card (#1271): every successful (re)fetch — after an edit, a PIN
-  // change, a publish, a reset — drops a revealed copy, even when the event
-  // comes back structurally equal and therefore reference-equal.
-  const { data: event, isLoading: eventLoading, isError: eventError, refetch: refetchEvent, dataUpdatedAt: eventUpdatedAt } = useQuery({
+  // share card (#1271).
+  const { data: event, isLoading: eventLoading, refetch: refetchEvent, dataUpdatedAt: eventUpdatedAt } = useQuery({
     queryKey: ['admin-event', id],
     queryFn: () => eventsService.getEvent(parseInt(id!)),
     enabled: !!id,
   });
 
-  // Flip the expiry banner live when the timestamp passes with the page open
-  // (#909 review) — isExpired further down is computed inline from Date.now().
-  // Kept here with the other hooks, above the loading early-return.
+  // Flip the expiry banner live when the timestamp passes with the page open (#909).
   const [, setExpiryTick] = useState(0);
   const bumpExpiryTick = useCallback(() => setExpiryTick((n) => n + 1), []);
   useExpiryRefresh([event?.expires_at], bumpExpiryTick);
 
-  // Fetch feedback settings
   const { data: eventFeedbackSettings, isLoading: feedbackSettingsLoading } = useQuery({
     queryKey: ['admin-event-feedback-settings', id],
     queryFn: () => feedbackService.getEventFeedbackSettings(id!),
     enabled: !!id,
   });
 
-  // Guests is only rendered in guest identity mode, so a ?tab=guests deep link
-  // on any other event would show an empty content area. Snap back once the
-  // settings have actually loaded — not while they're still undefined.
+  // Guests & Feedback: guests exist in guest identity mode and with uploader
+  // names (#1561); feedback when it is switched on. Reading needs only
+  // events.view, as the old feedback page did; the panels gate their actions.
+  const hasGuests = eventHasGuests(event, eventFeedbackSettings);
+  const showGuestsTab = hasGuests || !!eventFeedbackSettings?.feedback_enabled;
+
   useEffect(() => {
-    if (feedbackSettingsLoading) return;
-    if (activeTab === 'guests' && eventFeedbackSettings?.identity_mode !== 'guest') {
-      setActiveTab('overview');
-    }
-  }, [feedbackSettingsLoading, eventFeedbackSettings?.identity_mode, activeTab]);
+    if (feedbackSettingsLoading || eventLoading) return;
+    if (activeTab === 'guests' && !showGuestsTab) setActiveTab('overview');
+  }, [feedbackSettingsLoading, eventLoading, showGuestsTab, activeTab]);
 
-  // Update local feedback settings when fetched from server
-  useEffect(() => {
-    if (eventFeedbackSettings) {
-      setFeedbackSettings(eventFeedbackSettings);
-    }
-  }, [eventFeedbackSettings]);
-
-  // Statistics are now fetched with the event details from the admin API
-
-  // Merge feedback filters into photo query params so the grid reflects
-  // the Has Likes / Has Favorites / Has Comments / min rating checkboxes.
+  // Merge feedback filters into the photo query so the grid follows them.
   const combinedPhotoFilters: PhotoFilterParams = useMemo(() => ({
     ...photoFilters,
     hasLikes: feedbackFilters.hasLikes || undefined,
@@ -188,14 +170,12 @@ export const EventDetailsPage: React.FC = () => {
     logic: feedbackFilters.logic,
   }), [photoFilters, feedbackFilters]);
 
-  // Fetch photos (needed for both photos tab and hero photo selector).
-  // While any photo is still in pending/processing state we poll every
-  // 2s so the admin grid auto-updates as the background worker drains
-  // the queue. Once everything is complete/failed the polling stops.
+  // Photos for the Photos tab and the Settings hero picker. Polls every 2s
+  // while any photo is still being processed.
   const { data: photos = [], isLoading: photosLoading, isError: photosError, refetch: refetchPhotos } = useQuery({
     queryKey: ['admin-event-photos', id, combinedPhotoFilters],
     queryFn: () => photosService.getEventPhotos(parseInt(id!), combinedPhotoFilters),
-    enabled: !!id && (activeTab === 'photos' || isEditing),
+    enabled: !!id && (activeTab === 'photos' || activeTab === 'settings'),
     refetchInterval: (query) => {
       const data = query.state.data as AdminPhoto[] | undefined;
       if (!Array.isArray(data)) return false;
@@ -206,26 +186,19 @@ export const EventDetailsPage: React.FC = () => {
     },
   });
 
-  // Fetch filter summary for feedback filters
   const { data: filterSummary } = useQuery({
     queryKey: ['admin-event-filter-summary', id],
     queryFn: () => photosService.getFilterSummary(parseInt(id!)),
     enabled: !!id && activeTab === 'photos',
   });
 
-  const mediaTypes = useMemo(() => {
-    const types = new Set<'photo' | 'video'>();
-    photos.forEach((p) => {
-      const mediaType = (p.media_type as 'photo' | 'video' | undefined)
-        || ((p.mime_type && String(p.mime_type).startsWith('video/')) || p.type === 'video' ? 'video' : 'photo');
-      if (mediaType === 'video' || mediaType === 'photo') {
-        types.add(mediaType);
-      }
-    });
-    return types;
-  }, [photos]);
-
-  const showMediaFilter = mediaTypes.has('photo') && mediaTypes.has('video');
+  // The photo / video select is offered when the event holds both. Read from
+  // the event's counts, not from the rows on screen: those are what the select
+  // filters, so an answer derived from them would hide the select the moment a
+  // type is chosen. (The old derivation also never matched: the API reports a
+  // photo as 'image', and it looked for 'photo'.)
+  const eventMedia = splitMediaCount(event?.photo_count, event?.video_count);
+  const showMediaFilter = eventMedia.photos > 0 && eventMedia.videos > 0;
 
   useEffect(() => {
     if (!showMediaFilter && photoFilters.media_type) {
@@ -236,45 +209,19 @@ export const EventDetailsPage: React.FC = () => {
   const { data: publicSettings } = usePublicSettings();
   const phoneFieldEnabled = publicSettings?.event_phone_field_enabled === true;
 
-  // Fetch categories for the event
   const { data: categories = [] } = useQuery({
     queryKey: ['admin-event-categories', id],
-    queryFn: async () => {
-      const response = await eventsService.getEventCategories(parseInt(id!));
-      return response || [];
-    },
+    queryFn: async () => (await eventsService.getEventCategories(parseInt(id!))) || [],
     enabled: !!id,
   });
 
-  // Update mutation
-  const updateMutation = useMutation({
-    mutationFn: (data: any) => eventsService.updateEvent(parseInt(id!), data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
-      toast.success(t('toast.eventUpdated'));
-      setIsEditing(false);
-    },
-    onError: (error: any) => {
-      if (error.response?.data?.errors) {
-        const errorMessage = error.response.data.errors[0].msg + ' (field: ' + error.response.data.errors[0].path + ')';
-        toast.error(errorMessage);
-      } else {
-        toast.error(error.response?.data?.error || t('toast.saveError'));
-      }
-    },
-  });
-
-  // Archive mutation
-  // Reveal now (#838)
   const revealMutation = useMutation({
     mutationFn: () => eventsService.revealEvent(Number(id)),
     onSuccess: () => {
       toast.success(t('events.revealedToast', 'Gallery revealed — guests can see the photos now'));
       refetchEvent();
     },
-    onError: () => {
-      toast.error(t('events.revealError', 'Failed to reveal the gallery'));
-    },
+    onError: () => toast.error(t('events.revealError', 'Failed to reveal the gallery')),
   });
 
   const archiveMutation = useMutation({
@@ -283,25 +230,27 @@ export const EventDetailsPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
       toast.success(t('toast.eventArchived'));
     },
-    onError: () => {
-      toast.error(t('errors.somethingWentWrong'));
-    },
+    onError: () => toast.error(t('errors.somethingWentWrong')),
   });
 
-  // Publish mutation (Draft mode). Accepts the admin-typed password so the
+  const deleteMutation = useMutation({
+    mutationFn: () => eventsService.deleteEvent(parseInt(id!)),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+      toast.success(t('events.settingsTab.deleted', 'Gallery deleted'));
+      navigate('/admin/events');
+    },
+    onError: () => toast.error(t('errors.somethingWentWrong')),
+  });
+
+  // Publish (Draft mode). Takes the admin-typed password so the
   // gallery_created email can carry the real plaintext (#627).
   const publishMutation = useMutation({
     mutationFn: (vars: { password?: string; notifyCustomer?: boolean }) =>
-      eventsService.publishEvent(parseInt(id!), {
-        password: vars.password,
-        notifyCustomer: vars.notifyCustomer,
-      }),
+      eventsService.publishEvent(parseInt(id!), { password: vars.password, notifyCustomer: vars.notifyCustomer }),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
       queryClient.invalidateQueries({ queryKey: ['admin-events'] });
-      // Say which of the two happened — "published" and "published and
-      // emailed your customer" are different enough that a single message
-      // would leave the admin unsure whether anything went out (#1235).
       toast.success(
         result?.notified_customer === false
           ? t('events.publishQuietSuccess', 'Gallery published. No email was sent.')
@@ -309,19 +258,15 @@ export const EventDetailsPage: React.FC = () => {
       );
       setShowPublishDialog(false);
     },
-    onError: () => {
-      toast.error(t('errors.somethingWentWrong'));
-    },
+    onError: () => toast.error(t('errors.somethingWentWrong')),
   });
 
-  // Send the gallery email after the fact (#1235). Pairs with publishing
-  // quietly: the address usually arrives later than the gallery does.
+  // Send the gallery email after the fact (#1235).
   const sendGalleryEmailMutation = useMutation({
     mutationFn: (password?: string) =>
       eventsService.sendGalleryEmail(parseInt(id!), password ? { password } : undefined),
     onSuccess: (result) => {
-      // #1262 — queueing is not delivery, and a queue nobody is working
-      // reports no failure at all. Point at where the queue is visible.
+      // #1262 — queueing is not delivery; point at where the queue is visible.
       toast.success(
         `${t('events.sendGalleryEmail.success', {
           recipient: result.recipient,
@@ -329,25 +274,16 @@ export const EventDetailsPage: React.FC = () => {
         })} ${t('events.emailQueuedHint', 'The queue processor sends it — check System health if it does not arrive.')}`,
       );
       setShowSendEmailDialog(false);
-      // The send may have replaced the password (#627); a refetch bumps the
-      // version the share card keys its revealed copy on (#1271).
+      // The send may have replaced the password (#627); refetch for #1271.
       queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
     },
-    onError: () => {
-      toast.error(t('errors.somethingWentWrong'));
-    },
+    onError: () => toast.error(t('errors.somethingWentWrong')),
   });
 
-  // Duplicate mutation (#626). Backend creates a draft inheriting branding +
-  // behaviour + categories from the source; we navigate to the new event so
-  // the admin can finish configuring + publish.
+  // Duplicate (#626): a draft inheriting this gallery's configuration.
   const duplicateMutation = useMutation({
-    mutationFn: (data: {
-      event_name: string;
-      event_date?: string;
-      customer_name?: string;
-      customer_email?: string;
-    }) => eventsService.duplicateEvent(parseInt(id!), data),
+    mutationFn: (data: { event_name: string; event_date?: string; customer_name?: string; customer_email?: string }) =>
+      eventsService.duplicateEvent(parseInt(id!), data),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['admin-events'] });
       toast.success(t('events.duplicateDialog.successToast', 'Gallery duplicated.'));
@@ -360,18 +296,13 @@ export const EventDetailsPage: React.FC = () => {
     },
   });
 
-  // Extend expiration mutation
   const extendMutation = useMutation({
-    mutationFn: (days: number) => {
-      return eventsService.extendExpiration(parseInt(id!), days);
-    },
+    mutationFn: (days: number) => eventsService.extendExpiration(parseInt(id!), days),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
       toast.success(t('toast.saveSuccess'));
     },
-    onError: () => {
-      toast.error(t('toast.saveError'));
-    },
+    onError: () => toast.error(t('toast.saveError')),
   });
 
   if (eventLoading) {
@@ -382,12 +313,12 @@ export const EventDetailsPage: React.FC = () => {
     );
   }
 
-  // A 404 (or any settled failure) leaves `event` undefined forever — without
-  // this branch the spinner above never resolved (QA 7.02).
-  if (eventError || !event) {
+  // A 404 (or any settled failure) leaves `event` undefined forever (QA 7.02).
+  // A failed background refetch keeps the loaded event (and the draft).
+  if (!event) {
     return (
       <Card padding="lg">
-        <p className="text-neutral-900 dark:text-neutral-100">{t('events.notFound', 'Event not found')}</p>
+        <p className="text-heading">{t('events.notFound', 'Event not found')}</p>
         <Button variant="outline" className="mt-4" onClick={() => navigate('/admin/events')}>
           {t('events.backToEvents')}
         </Button>
@@ -396,468 +327,202 @@ export const EventDetailsPage: React.FC = () => {
   }
 
   const expiresAtDate = safeParseDate(event.expires_at);
-  // Timestamp comparison, not truncated whole days (#909): the old
-  // differenceInDays <= 0 marked events "expired" up to 24h early.
-  // Ceiling keeps the countdown at "1 day" through the final day.
+  // Timestamp comparison, not truncated whole days (#909).
   const isExpired = expiresAtDate !== null && expiresAtDate.getTime() <= Date.now();
   const daysUntilExpiration = expiresAtDate
     ? Math.ceil((expiresAtDate.getTime() - Date.now()) / 86400000)
     : null;
   const isExpiring = !isExpired && daysUntilExpiration !== null && daysUntilExpiration > 0 && daysUntilExpiration <= 7;
 
-  const handleStartEdit = () => {
-    setEditForm({
-      welcome_message: event.welcome_message || '',
-      color_theme: event.color_theme || '',
-      css_template_id: event.css_template_id || null,
-      expires_at: expiresAtDate ? format(expiresAtDate, 'yyyy-MM-dd') : '',
-      allow_user_uploads: event.allow_user_uploads || false,
-      reveal_mode: event.reveal_mode || false,
-      // datetime-local wants local "YYYY-MM-DDTHH:mm"
-      reveal_at: event.reveal_at
-        ? (() => { const d = new Date(event.reveal_at); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); })()
-        : '',
-      upload_category_id: event.upload_category_id || null,
-      hero_photo_id: event.hero_photo_id || null,
-      customer_name: event.customer_name || '',
-      customer_email: event.customer_email || '',
-      customer_phone: event.customer_phone || '',
-      source_mode: event.source_mode === 'reference' ? 'reference' : 'managed',
-      external_path: event.external_path || '',
-      external_watch: Boolean(event.external_watch),
-      require_password: normalizeRequirePassword(event.require_password),
-      new_password: '',
-      confirm_new_password: '',
-      // Load protection settings from event
-      protection_level: event.protection_level || 'standard',
-      disable_right_click: event.disable_right_click ?? true,
-      allow_downloads: event.allow_downloads ?? true,
-      watermark_downloads: event.watermark_downloads ?? false,
-      enable_devtools_protection: event.enable_devtools_protection ?? true,
-      use_canvas_rendering: event.use_canvas_rendering ?? false,
-      // Load hero logo settings from event. Preserve null = "inherit global"
-      // (#756) — don't collapse it to true, or saving would snapshot an override.
-      hero_logo_visible: event.hero_logo_visible ?? null,
-      // Preserve null = "inherit global size" (#756) — don't collapse to medium.
-      hero_logo_size: event.hero_logo_size ?? null,
-      hero_logo_position: event.hero_logo_position || 'top',
-      // #894: null = default (show); only false hides the password-page logo.
-      // Boolean() folds SQLite's 0/1 into real booleans so the edit form's
-      // strict `=== false` check reads a persisted hide correctly.
-      login_logo_visible: event.login_logo_visible == null ? null : Boolean(event.login_logo_visible),
-      // Hero image anchor position (#162)
-      hero_image_anchor: event.hero_image_anchor || 'center',
-      // Photo cap
-      photo_cap: event.photo_cap || 0,
-      // Default photo sort
-      default_photo_sort: event.default_photo_sort || 'upload_date_desc',
-      // Per-event promotional override (#440)
-      promo_mode: ((event as { promo_mode?: 'inherit' | 'custom' | 'off' }).promo_mode) || 'inherit',
-      info_mode: ((event as { info_mode?: 'inherit' | 'custom' | 'off' }).info_mode) || 'inherit',
-      promo_markdown: (event as { promo_markdown?: string }).promo_markdown || '',
-      info_markdown: (event as { info_markdown?: string }).info_markdown || '',
-      // Customer accounts (#354). The backend returns
-      // `customer_accounts: [{ id, email, display_name, ... }]`; map to
-      // the picker's shape.
-      customer_accounts: ((event as { customer_accounts?: Array<{ id: number; email: string; display_name?: string | null }> }).customer_accounts || [])
-        .map((c) => ({ id: c.id, email: c.email, displayName: c.display_name ?? null })),
-      // Per-event social-share opt-in (#474). Coerce explicitly so
-      // SQLite's 0/1 and Postgres's true/false both render the switch
-      // in the right state on first paint.
-      og_image_share_enabled: event.og_image_share_enabled === true,
-    });
-
-    setShowNewPassword(false);
-
-    // Set feedback settings if available
-    if (eventFeedbackSettings) {
-      setFeedbackSettings(eventFeedbackSettings);
-    }
-
-    // Parse theme configuration
-    if (event.color_theme) {
-      try {
-        if (event.color_theme.startsWith('{')) {
-          const parsedTheme = JSON.parse(event.color_theme);
-          setCurrentTheme(parsedTheme);
-          // Try to find matching preset
-          const matchingPreset = Object.entries(GALLERY_THEME_PRESETS).find(
-            ([_, preset]) => JSON.stringify(preset.config) === JSON.stringify(parsedTheme)
-          );
-          setCurrentPresetName(matchingPreset ? matchingPreset[0] : 'custom');
-        } else {
-          // Legacy theme name
-          const preset = GALLERY_THEME_PRESETS[event.color_theme];
-          if (preset) {
-            setCurrentTheme(preset.config);
-            setCurrentPresetName(event.color_theme);
-          }
-        }
-      } catch {
-        setCurrentTheme(GALLERY_THEME_PRESETS.default.config);
-        setCurrentPresetName('default');
-      }
-    } else {
-      // No color_theme stored — the gallery renders with the site
-      // branding theme as a fallback. Mirror that here so the picker
-      // shows the same palette the admin sees on the gallery, rather
-      // than the hardcoded Classic Grid preset that has nothing to do
-      // with their branding (#550 follow-up). currentPresetName=custom
-      // because the inherited config isn't a named preset; combined
-      // with themeChanged=false below, saving without touching the
-      // picker leaves color_theme NULL and preserves inheritance.
-      const branding = publicSettings?.theme_config as ThemeConfig | undefined;
-      setCurrentTheme(branding ?? GALLERY_THEME_PRESETS.default.config);
-      setCurrentPresetName(branding ? 'custom' : 'default');
-    }
-    setThemeChanged(false);
-
-    setIsEditing(true);
-  };
-
-  const handleSaveEdit = async () => {
-    // Prepare color_theme - if we have a custom theme, serialize it
-    let themeToSave = editForm.color_theme;
-    if (currentTheme && currentPresetName === 'custom') {
-      themeToSave = JSON.stringify(currentTheme);
-    } else if (currentPresetName && currentPresetName !== 'custom') {
-      // Use preset name for non-custom themes
-      themeToSave = currentPresetName;
-    }
-
-    const externalPathToSave = editForm.external_path?.trim() || '';
-
-    const currentRequirePassword = normalizeRequirePassword(event.require_password);
-    const requirePasswordChanged = editForm.require_password !== currentRequirePassword;
-
-    if (editForm.require_password) {
-      if (requirePasswordChanged && !editForm.new_password) {
-        toast.error(t('events.newPasswordRequired', 'Please set a password before enabling protection.'));
-        return;
-      }
-      if (editForm.new_password) {
-        if (editForm.new_password.length < 6) {
-          toast.error(t('validation.passwordMinLength'));
-          return;
-        }
-        if (editForm.new_password !== editForm.confirm_new_password) {
-          toast.error(t('validation.passwordsDoNotMatch'));
-          return;
-        }
-      }
-    }
-
-    if (editForm.source_mode === 'reference' && !externalPathToSave) {
-      toast.error(t('events.externalFolderRequired', 'Please select an external folder before saving.'));
-      return;
-    }
-
-    // No expiration-required validation on edit (#426). The global
-    // `event_require_expiration` setting only enforces a default at
-    // create-time — once an event exists, an admin can clear the
-    // expiration via this form. The matching backend gate was dropped
-    // in adminEvents.js.
-
-    // Clean up the data - remove undefined values
-    const updateData: any = {
-      expires_at: editForm.expires_at || null,
-      allow_user_uploads: editForm.allow_user_uploads,
-      reveal_mode: editForm.allow_user_uploads && editForm.reveal_mode,
-      reveal_at: editForm.allow_user_uploads && editForm.reveal_mode && editForm.reveal_at
-        ? new Date(editForm.reveal_at).toISOString()
-        : null,
-      require_password: editForm.require_password,
-      css_template_id: editForm.css_template_id,
-      // Download protection settings
-      protection_level: editForm.protection_level,
-      disable_right_click: editForm.disable_right_click,
-      allow_downloads: editForm.allow_downloads,
-      watermark_downloads: editForm.watermark_downloads,
-      enable_devtools_protection: editForm.enable_devtools_protection,
-      use_canvas_rendering: editForm.use_canvas_rendering,
-      // Hero logo settings
-      hero_logo_visible: editForm.hero_logo_visible,
-      hero_logo_size: editForm.hero_logo_size,
-      hero_logo_position: editForm.hero_logo_position,
-      login_logo_visible: editForm.login_logo_visible,
-      // Hero image anchor position (#162)
-      hero_image_anchor: editForm.hero_image_anchor,
-      // Photo cap
-      photo_cap: editForm.photo_cap > 0 ? editForm.photo_cap : null,
-      // Default photo sort
-      default_photo_sort: editForm.default_photo_sort,
-      // Header style settings (decoupled from layout, #158)
-      header_style: currentTheme?.headerStyle || 'standard',
-      hero_divider_style: currentTheme?.heroDividerStyle || 'wave',
-      // Per-event promotional override (#440). Backend nulls
-      // promo_markdown automatically when mode != 'custom'.
-      promo_mode: editForm.promo_mode,
-      promo_markdown: editForm.promo_mode === 'custom' ? editForm.promo_markdown : null,
-      info_mode: editForm.info_mode,
-      info_markdown: editForm.info_mode === 'custom' ? editForm.info_markdown : null,
-      // Customer accounts (#354) — flat array of ids. Backend diffs
-      // against existing assignments in one transaction.
-      customer_account_ids: editForm.customer_accounts.map((c) => c.id),
-    };
-
-    // Only include fields that have defined values
-    if (editForm.welcome_message !== undefined && editForm.welcome_message !== null) {
-      updateData.welcome_message = editForm.welcome_message;
-    }
-    // Only persist color_theme when the admin actually interacted with
-    // the picker. Writing the initial display state back to the row
-    // silently overwrote NULL (= "inherit branding") with the picker's
-    // default preset on any save (#550 follow-up).
-    if (themeChanged && themeToSave) {
-      updateData.color_theme = themeToSave;
-    }
-    if (editForm.upload_category_id !== undefined) {
-      updateData.upload_category_id = editForm.upload_category_id;
-    }
-    if (editForm.hero_photo_id !== undefined) {
-      updateData.hero_photo_id = editForm.hero_photo_id;
-    }
-    // Per-event hero-photo OG share opt-in (#474). Always send the
-    // current state — the backend writes through formatBoolean either
-    // way, so an explicit save can flip the value back to false.
-    updateData.og_image_share_enabled = editForm.og_image_share_enabled;
-    updateData.source_mode = editForm.source_mode;
-    updateData.external_path = editForm.source_mode === 'reference'
-      ? externalPathToSave
-      : null;
-    // Always sent, like og_image_share_enabled: the backend writes through
-    // formatBoolean, so a save can switch the watcher off again.
-    updateData.external_watch = editForm.source_mode === 'reference' && editForm.external_watch;
-    if (editForm.customer_name !== undefined && editForm.customer_name !== null) {
-      updateData.customer_name = editForm.customer_name;
-    }
-    if (editForm.customer_email !== undefined && editForm.customer_email !== null && editForm.customer_email.trim()) {
-      updateData.customer_email = editForm.customer_email;
-    }
-    if (editForm.customer_phone !== undefined) {
-      // Send empty string as null so an admin can clear the field. Backend
-      // strips this entirely if the global phone-field toggle is off.
-      updateData.customer_phone = editForm.customer_phone.trim() || null;
-    }
-
-    if (editForm.new_password) {
-      updateData.password = editForm.new_password;
-    }
-
-    // Remove any keys with undefined values
-    Object.keys(updateData).forEach(key => {
-      if (updateData[key] === undefined) {
-        delete updateData[key];
-      }
-    });
-
-    // Event update with validation
-
-    // Update event details
-    updateMutation.mutate(updateData);
-
-    // Update feedback settings separately. This is its own request, so a
-    // failure here is NOT covered by updateMutation's onError (#1030) — the
-    // old bare catch left the admin looking at "Event updated successfully"
-    // while the Guest Feedback toggle silently never persisted.
-    try {
-      await feedbackService.updateEventFeedbackSettings(id!, feedbackSettings);
-      queryClient.invalidateQueries({ queryKey: ['admin-event-feedback-settings', id] });
-    } catch (error: any) {
-      toast.error(
-        error?.response?.data?.error
-        || t('feedback.settingsUpdateError', 'Failed to update settings')
-      );
-    }
-  };
-
   return (
-    <div>
-      {/* Page Header + Draft Banner + Expiration Warning */}
-      <EventDetailsHeader
-        event={event}
-        id={id}
-        isEditing={isEditing}
-        setIsEditing={setIsEditing}
-        handleStartEdit={handleStartEdit}
-        handleSaveEdit={handleSaveEdit}
-        isSaving={updateMutation.isPending}
-        feedbackSettings={feedbackSettings}
-        setShowRenameDialog={setShowRenameDialog}
-        setShowPublishDialog={setShowPublishDialog}
-        isPublishing={publishMutation.isPending}
-        onExtendExpiration={(days) => extendMutation.mutate(days)}
-        daysUntilExpiration={daysUntilExpiration}
-        isExpired={isExpired}
-        isExpiring={isExpiring}
-      />
+    <EventDetailsLoaded
+      event={event}
+      eventFeedbackSettings={eventFeedbackSettings}
+      branding={(publicSettings?.theme_config as ThemeConfig | undefined) ?? null}
+    >
+      {(settings) => (
+        <div>
+          <EventDetailsHeader
+            event={event}
+            setShowRenameDialog={setShowRenameDialog}
+            setShowPublishDialog={setShowPublishDialog}
+            setShowDuplicateDialog={async (show) => {
+              // Duplicating opens the new gallery; ask before dropping edits.
+              if (show && !(await confirmLeave())) return;
+              setShowDuplicateDialog(show);
+            }}
+            onSendGalleryEmail={() => setShowSendEmailDialog(true)}
+            isSendingGalleryEmail={sendGalleryEmailMutation.isPending}
+            onArchive={() => archiveMutation.mutate()}
+            isPublishing={publishMutation.isPending}
+            onExtendExpiration={(days) => extendMutation.mutate(days)}
+            daysUntilExpiration={daysUntilExpiration}
+            isExpired={isExpired}
+            isExpiring={isExpiring}
+          />
 
-      {/* Tabs */}
-      <EventTabs
-        event={event}
-        eventFeedbackSettings={eventFeedbackSettings}
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-      />
+          <EventTabs
+            event={event}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            showGuestsTab={showGuestsTab}
+            settingsDirty={settings.isDirty}
+          />
 
-      {/* Tab Content */}
-      {activeTab === 'overview' && (
-        <OverviewTab
-          event={event}
-          id={id}
-          passwordVersion={eventUpdatedAt}
-          isEditing={isEditing}
-          editForm={editForm}
-          setEditForm={setEditForm}
-          showNewPassword={showNewPassword}
-          setShowNewPassword={setShowNewPassword}
-          feedbackSettings={feedbackSettings}
-          setFeedbackSettings={setFeedbackSettings}
-          categories={categories}
-          photos={photos}
-          phoneFieldEnabled={phoneFieldEnabled}
-          daysUntilExpiration={daysUntilExpiration}
-          onRevealNow={() => revealMutation.mutate()}
-          refetchEvent={refetchEvent}
-          setActiveTab={setActiveTab}
-          setShowPasswordReset={setShowPasswordReset}
-          setShowPublishDialog={setShowPublishDialog}
-          setShowDuplicateDialog={setShowDuplicateDialog}
-          onSendGalleryEmail={() => setShowSendEmailDialog(true)}
-          isSendingGalleryEmail={sendGalleryEmailMutation.isPending}
-          onArchive={() => archiveMutation.mutate()}
-          isArchiving={archiveMutation.isPending}
-          isPublishing={publishMutation.isPending}
-          isDuplicating={duplicateMutation.isPending}
-          currentTheme={currentTheme}
-          setCurrentTheme={setCurrentTheme}
-          currentPresetName={currentPresetName}
-          setCurrentPresetName={setCurrentPresetName}
-          setThemeChanged={setThemeChanged}
-          cssTemplates={cssTemplates}
-        />
+          {activeTab === 'overview' && (
+            <OverviewTab
+              event={event}
+              id={id}
+              passwordVersion={eventUpdatedAt}
+              feedbackSettings={eventFeedbackSettings}
+              categories={categories}
+              daysUntilExpiration={daysUntilExpiration}
+              refetchEvent={refetchEvent}
+              setActiveTab={setActiveTab}
+              openSettings={openSettings}
+              setShowPasswordReset={setShowPasswordReset}
+              onSendGalleryEmail={() => setShowSendEmailDialog(true)}
+              isSendingGalleryEmail={sendGalleryEmailMutation.isPending}
+              onExtendExpiration={(days) => extendMutation.mutate(days)}
+              isExtending={extendMutation.isPending}
+              onRevealNow={() => revealMutation.mutate()}
+            />
+          )}
+
+          {activeTab === 'photos' && (
+            <PhotosTab
+              event={event}
+              id={id}
+              photos={photos}
+              photosLoading={photosLoading}
+              photosError={photosError}
+              refetchPhotos={refetchPhotos}
+              categories={categories}
+              photoFilters={photoFilters}
+              setPhotoFilters={setPhotoFilters}
+              feedbackFilters={feedbackFilters}
+              setFeedbackFilters={setFeedbackFilters}
+              filterSummary={filterSummary}
+              showMediaFilter={showMediaFilter}
+              hasVideos={eventMedia.hasVideos}
+              initialCategoriesOpen={openCategoriesOnMount}
+              onChangeFolder={() => openSettings('source')}
+            />
+          )}
+
+          {activeTab === 'guests' && showGuestsTab && (
+            <div className="space-y-8">
+              {hasGuests && <AdminGuestsList eventId={parseInt(id!)} eventName={event.event_name} />}
+              {eventFeedbackSettings?.feedback_enabled && <EventFeedbackPanel eventId={id!} />}
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <EventSettingsTab
+              event={event}
+              settings={settings}
+              section={settingsSection}
+              setSection={changeSettingsSection}
+              categories={categories}
+              photos={photos}
+              phoneFieldEnabled={phoneFieldEnabled}
+              onArchive={() => archiveMutation.mutate()}
+              isArchiving={archiveMutation.isPending}
+              onDelete={() => deleteMutation.mutate()}
+              isDeleting={deleteMutation.isPending}
+              refetchEvent={refetchEvent}
+            />
+          )}
+
+          {showPasswordReset && (
+            <PasswordResetModal
+              eventName={event.event_name}
+              eventDate={event.event_date ?? undefined}
+              eventType={event.event_type}
+              onConfirm={async (sendEmail, password) => {
+                const result = await eventsService.resetPassword(event.id, sendEmail, password);
+                // refetch so the share card drops a revealed password (#1271)
+                queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
+                return result;
+              }}
+              onClose={() => setShowPasswordReset(false)}
+            />
+          )}
+
+          <EventRenameDialog
+            isOpen={showRenameDialog}
+            eventName={event.event_name}
+            eventId={event.id}
+            customerEmail={event.customer_email}
+            onClose={() => setShowRenameDialog(false)}
+            onRename={async (newName, resendEmail) => {
+              const result = await eventsService.renameEvent(event.id, newName, resendEmail);
+              if (result.success) {
+                queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
+                queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+                toast.success(t('events.rename.success', 'Event renamed successfully!'));
+              }
+              return result;
+            }}
+            onValidate={(newName) => eventsService.validateRename(event.id, newName)}
+          />
+
+          {/* Publish (#627) — asks for the password so the gallery_created
+              email carries the real plaintext. */}
+          {showPublishDialog && (
+            <PublishGalleryDialog
+              eventName={event.event_name}
+              requirePassword={!isGalleryPublic(event.require_password)}
+              customerEmail={event.customer_email}
+              customerPhone={event.customer_phone}
+              assignedCustomerCount={((event as { customer_accounts?: Array<{ id: number }> }).customer_accounts || []).length}
+              isPublishing={publishMutation.isPending}
+              onConfirm={(password, notifyCustomer) => publishMutation.mutate({ password, notifyCustomer })}
+              onClose={() => { if (!publishMutation.isPending) setShowPublishDialog(false); }}
+            />
+          )}
+
+          {/* Send gallery email (#1235). Only the inline-email path carries
+              the password; the account fallback sends a portal link. */}
+          {showSendEmailDialog && (
+            <SendGalleryEmailDialog
+              eventName={event.event_name}
+              recipient={event.customer_email}
+              requirePassword={!!event.customer_email && !isGalleryPublic(event.require_password)}
+              isSending={sendGalleryEmailMutation.isPending}
+              onConfirm={(password) => sendGalleryEmailMutation.mutate(password)}
+              onClose={() => { if (!sendGalleryEmailMutation.isPending) setShowSendEmailDialog(false); }}
+            />
+          )}
+
+          {showDuplicateDialog && (
+            <DuplicateEventDialog
+              sourceEventName={event.event_name}
+              isDuplicating={duplicateMutation.isPending}
+              onConfirm={(data) => duplicateMutation.mutate(data)}
+              onClose={() => { if (!duplicateMutation.isPending) setShowDuplicateDialog(false); }}
+            />
+          )}
+        </div>
       )}
-
-      {/* Photos Tab */}
-      {activeTab === 'photos' && (
-        <PhotosTab
-          event={event}
-          id={id}
-          photos={photos}
-          photosLoading={photosLoading}
-          photosError={photosError}
-          refetchPhotos={refetchPhotos}
-          categories={categories}
-          photoFilters={photoFilters}
-          setPhotoFilters={setPhotoFilters}
-          feedbackFilters={feedbackFilters}
-          setFeedbackFilters={setFeedbackFilters}
-          filterSummary={filterSummary}
-          showMediaFilter={showMediaFilter}
-        />
-      )}
-
-      {/* Categories Tab */}
-      {activeTab === 'categories' && (
-        <CategoriesTab id={id} />
-      )}
-
-      {/* Guests Tab (only visible when identity_mode === 'guest') */}
-      {activeTab === 'guests' && eventFeedbackSettings?.identity_mode === 'guest' && (
-        <AdminGuestsList eventId={parseInt(id!)} eventName={event.event_name} />
-      )}
-
-      {/* Password Reset Modal */}
-      {showPasswordReset && (
-        <PasswordResetModal
-          eventName={event.event_name}
-          eventDate={event.event_date ?? undefined}
-          eventType={event.event_type}
-          onConfirm={async (sendEmail, password) => {
-            const result = await eventsService.resetPassword(event.id, sendEmail, password);
-            // refetch so the share card drops a revealed password (#1271)
-            queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
-            return result;
-          }}
-          onClose={() => setShowPasswordReset(false)}
-        />
-      )}
-
-      {/* Event Rename Dialog */}
-      <EventRenameDialog
-        isOpen={showRenameDialog}
-        eventName={event.event_name}
-        eventId={event.id}
-        customerEmail={event.customer_email}
-        onClose={() => setShowRenameDialog(false)}
-        onRename={async (newName, resendEmail) => {
-          const result = await eventsService.renameEvent(event.id, newName, resendEmail);
-          if (result.success) {
-            queryClient.invalidateQueries({ queryKey: ['admin-event', id] });
-            queryClient.invalidateQueries({ queryKey: ['admin-events'] });
-            toast.success(t('events.rename.success', 'Event renamed successfully!'));
-          }
-          return result;
-        }}
-        onValidate={(newName) => eventsService.validateRename(event.id, newName)}
-      />
-
-      {/* Publish Gallery Dialog (#627) — prompts for the password so the
-          gallery_created email carries the real plaintext, not the sentinel. */}
-      {showPublishDialog && (
-        <PublishGalleryDialog
-          eventName={event.event_name}
-          requirePassword={!isGalleryPublic(event.require_password)}
-          customerEmail={event.customer_email}
-          customerPhone={event.customer_phone}
-          assignedCustomerCount={((event as { customer_accounts?: Array<{ id: number }> }).customer_accounts || []).length}
-          isPublishing={publishMutation.isPending}
-          onConfirm={(password, notifyCustomer) => publishMutation.mutate({ password, notifyCustomer })}
-          onClose={() => {
-            if (!publishMutation.isPending) setShowPublishDialog(false);
-          }}
-        />
-      )}
-
-      {/* Send Gallery Email Dialog (#1235) — asks for the password for the
-          same reason publish does: the plaintext only exists in this request,
-          and this action is most useful right after a quiet publish, which
-          never collected one. */}
-      {showSendEmailDialog && (
-        <SendGalleryEmailDialog
-          eventName={event.event_name}
-          recipient={event.customer_email}
-          // Only the inline-email path carries the password. With no
-          // customer_email the backend takes the account fallback, which sends
-          // customer_gallery_assigned — a portal link that never mentions a
-          // password — and deliberately skips the rehash (crud.js). Asking for
-          // one there blocks the send behind a value nothing consumes, and the
-          // dialog's promise that it will be rehashed would be false.
-          requirePassword={!!event.customer_email && !isGalleryPublic(event.require_password)}
-          isSending={sendGalleryEmailMutation.isPending}
-          onConfirm={(password) => sendGalleryEmailMutation.mutate(password)}
-          onClose={() => {
-            if (!sendGalleryEmailMutation.isPending) setShowSendEmailDialog(false);
-          }}
-        />
-      )}
-
-      {/* Duplicate Event Dialog (#626) — admin types a new event name/date
-          (+ optional customer); backend clones the source gallery's config
-          and we navigate to the new draft. */}
-      {showDuplicateDialog && (
-        <DuplicateEventDialog
-          sourceEventName={event.event_name}
-          isDuplicating={duplicateMutation.isPending}
-          onConfirm={(data) => duplicateMutation.mutate(data)}
-          onClose={() => {
-            if (!duplicateMutation.isPending) setShowDuplicateDialog(false);
-          }}
-        />
-      )}
-
-    </div>
+    </EventDetailsLoaded>
   );
 };
 
 EventDetailsPage.displayName = 'EventDetailsPage';
+
+/**
+ * Holds the Settings draft once the gallery has loaded, at page level so
+ * switching tabs never drops it, and arms the leave guard for the whole page
+ * — not only while the Settings tab (and its save bar) is on screen.
+ */
+const EventDetailsLoaded: React.FC<{
+  event: Event;
+  eventFeedbackSettings: FeedbackSettings | undefined;
+  branding: ThemeConfig | null;
+  children: (settings: ReturnType<typeof useEventSettingsDraft>) => React.ReactNode;
+}> = ({ event, eventFeedbackSettings, branding, children }) => {
+  const settings = useEventSettingsDraft({ event, feedbackSettings: eventFeedbackSettings, branding });
+  useUnsavedChanges(settings.isDirty, settings.discard);
+  return <>{children(settings)}</>;
+};

@@ -35,12 +35,20 @@ jest.mock('dns', () => {
 });
 
 let capturedConfig;
+// Restore downloads go through getMetadata() (HeadObject size check) and
+// downloadStream() (bounded body); download() is no longer called.
 jest.mock('../../src/services/storage/s3Storage', () =>
   jest.fn().mockImplementation((config) => {
     capturedConfig = config;
-    return { download: jest.fn().mockResolvedValue(undefined) };
+    const { Readable } = require('stream');
+    return {
+      getMetadata: jest.fn().mockResolvedValue({ ContentLength: 2 }),
+      downloadStream: jest.fn().mockImplementation(async () => Readable.from([Buffer.from('{}')])),
+      testConnection: jest.fn().mockResolvedValue(true),
+    };
   })
 );
+const manifestScratch = fs.mkdtempSync(path.join(os.tmpdir(), 'picpeak-restores3pin-manifest-'));
 
 const dns = require('dns');
 const promiseLookup = dns.promises.lookup;
@@ -72,7 +80,7 @@ describe('downloadFileFromS3 DNS-rebinding pinning', () => {
 
     await restoreService.downloadFileFromS3(
       's3://backups/manifest.json',
-      '/tmp/whatever/manifest.json',
+      path.join(manifestScratch, 'manifest.json'),
       { endpoint: 'rebind.example.com', accessKeyId: 'k', secretAccessKey: 's' }
     );
 
@@ -93,7 +101,7 @@ describe('downloadFileFromS3 DNS-rebinding pinning', () => {
 
     await restoreService.downloadFileFromS3(
       's3://backups/manifest.json',
-      '/tmp/whatever/manifest.json',
+      path.join(manifestScratch, 'manifest.json'),
       { endpoint: 'rebind.example.com', accessKeyId: 'k', secretAccessKey: 's' }
     );
 
@@ -118,7 +126,7 @@ describe('downloadFileFromS3 DNS-rebinding pinning', () => {
 
     await restoreService.downloadFileFromS3(
       's3://backups/manifest.json',
-      '/tmp/whatever/manifest.json',
+      path.join(manifestScratch, 'manifest.json'),
       { endpoint: 'rebind.example.com', accessKeyId: 'k', secretAccessKey: 's' }
     );
 
@@ -135,12 +143,67 @@ describe('downloadFileFromS3 DNS-rebinding pinning', () => {
   it('does not pin agents when no custom endpoint is configured (default AWS, no rebinding surface)', async () => {
     await restoreService.downloadFileFromS3(
       's3://backups/manifest.json',
-      '/tmp/whatever/manifest.json',
+      path.join(manifestScratch, 'manifest.json'),
       { accessKeyId: 'k', secretAccessKey: 's' }
     );
 
     expect(promiseLookup).not.toHaveBeenCalled();
     expect(capturedConfig.httpAgent).toBeUndefined();
     expect(capturedConfig.httpsAgent).toBeUndefined();
+  });
+});
+
+describe('downloadFromS3 pins the client used for the restore downloads', () => {
+  let restoreService;
+  let originalNodeEnv;
+  const manifest = { database: { backup_file: 'picpeak.sqlite.gz' }, files: { manifest: [] } };
+  const options = (endpoint) => ({
+    restoreType: 'database',
+    s3Config: { endpoint, accessKeyId: 'k', secretAccessKey: 's' },
+  });
+
+  beforeEach(() => {
+    restoreService = new RestoreService();
+    restoreService.tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'picpeak-restores3pin-dl-'));
+    capturedConfig = undefined;
+    promiseLookup.mockReset();
+    dns.lookup.mockReset();
+    S3StorageAdapter.mockClear();
+    originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+  });
+
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+    capturedConfig?.httpAgent?.destroy();
+    capturedConfig?.httpsAgent?.destroy();
+  });
+
+  it('builds the client, whose connection check and downloads share it, with agents pinned to the validated address', async () => {
+    promiseLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    // A second, real lookup would now answer with the metadata address.
+    dns.lookup.mockImplementation((_hostname, opts, callback) => {
+      if (typeof opts === 'function') { callback = opts; opts = {}; }
+      callback(null, ...(opts?.all ? [[{ address: '169.254.169.254', family: 4 }]] : ['169.254.169.254', 4]));
+    });
+
+    await restoreService.downloadFromS3('s3://backups/2026-09-15', manifest, options('rebind.example.com'));
+
+    expect(S3StorageAdapter).toHaveBeenCalledTimes(1);
+    expect(capturedConfig.httpsAgent).toBeInstanceOf(require('https').Agent);
+    const pinnedLookup = capturedConfig.httpsAgent.options.lookup;
+    const result = await new Promise((resolve, reject) => {
+      pinnedLookup('rebind.example.com', {}, (err, address, family) => (err ? reject(err) : resolve({ address, family })));
+    });
+    expect(result).toEqual({ address: '93.184.216.34', family: 4 });
+    expect(dns.lookup).not.toHaveBeenCalled();
+  });
+
+  it('refuses an endpoint that resolves to a private address before building any client', async () => {
+    promiseLookup.mockResolvedValue([{ address: '10.0.0.5', family: 4 }]);
+
+    await expect(restoreService.downloadFromS3('s3://backups/2026-09-15', manifest, options('internal.example.com')))
+      .rejects.toThrow(/private or internal network address/i);
+    expect(S3StorageAdapter).not.toHaveBeenCalled();
   });
 });
