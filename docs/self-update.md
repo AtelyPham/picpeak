@@ -4,7 +4,6 @@ PicPeak can update itself when an admin asks for it, with no terminal or SSH ses
 
 It is **off by default** and only works with the prebuilt images from `docker-compose.production.yml`.
 
-> This document covers the updater and its file contract. The admin button that sends the request (backend routes and UI) is a separate change.
 
 ## What it does
 
@@ -21,6 +20,27 @@ An update always goes to the newest image of the channel the install already fol
    - When it does ship new migrations, they may already have run, and the old code against a migrated database is worse than a stopped update. The updater stops and reports `migrations_may_have_run`; see [Recovering](#recovering-after-migrations_may_have_run).
 
 The **backup** is not the updater's job. The backend takes it with the existing backup service before it files the request, so the updater needs no database credentials.
+
+## Updating from the admin UI
+
+When in-app updates are enabled and the updater is reachable, the **Update PicPeak** dialog (from the update notice) and the **Update available** dialog (from the version link in the sidebar) start with an **Update from here** section:
+
+1. A **super admin who signs in with a password** confirms with that password. SSO-only accounts have no usable local password, so they are told to use a password-based super admin instead. Other admins see that a super admin can do it, and only the phase and state of a running update, not who asked or why something failed.
+2. The backend takes a **database dump** (the same one as Settings → Backup, written to the database backup destination). If the dump fails, nothing is requested and nothing changes.
+3. The backend files the request and the updater takes over. The dialog follows its steps through the restart, during which the site is unavailable for a minute or two, and ends on the result with the updater's own explanation.
+
+**A request does not wait forever.** While it waits for the updater, the dialog offers **Cancel request**. If nothing takes it within **10 minutes** (`PICPEAK_SELF_UPDATE_REQUEST_TTL_MINUTES`), the backend withdraws it. If the updater still finds a request older than **15 minutes** (`PICPEAK_UPDATER_REQUEST_MAX_AGE`, for example after being stopped for days), it discards it with `refused`/`request_expired` instead of updating unattended with a backup that old.
+
+Failed attempts (a wrong password, or a request refused because an update is running or the feature is unavailable) are limited to five per admin per 15 minutes. The limit is kept in memory, so a backend restart resets it. Every request, refusal, cancellation, expiry and the updater's final result is recorded in the activity log.
+
+The manual commands stay available under **Update manually instead**. Their checklist ("I have backed up my database", …) belongs to that path only: the one-click path takes the backup itself.
+
+What the backend needs, all in `docker-compose.production.yml`:
+
+- `PICPEAK_SELF_UPDATE=true` in `.env`. Anything else, including unset, keeps the feature off and the dialogs unchanged.
+- `update/request` mounted read-write at `/app/update/request` and `update/status` mounted **read-only** at `/app/update/status`. The entrypoint hands `request/` to UID 1001 (shallowly) so the backend can write there; if it cannot, the dialog says so before any dump is taken.
+
+> **Upgrade note.** These two bind mounts are part of every production install from this version on. On the next `docker compose up -d`, Docker creates a root-owned `./update/` with `request/` and `status/` in the install directory, even where `PICPEAK_SELF_UPDATE` stays unset. Nothing reads them while the feature is off.
 
 ## Enabling it
 
@@ -131,6 +151,7 @@ A request that arrives while another updater is *running an update* is removed w
 | `migrations_may_have_run` | failed | The new version did not start and was left in place (see below) |
 | `rollback_failed` | failed | The new version did not start and neither did the old one |
 | `internal_error` | failed | A Docker command failed unexpectedly; `step` says where |
+| `request_expired` | refused | The request was older than `PICPEAK_UPDATER_REQUEST_MAX_AGE` minutes when the updater saw it; nothing was changed |
 | `interrupted` | failed | The run was stopped mid-way (reboot or shutdown, `systemctl stop`, a stopped or killed container) |
 
 The contract number changes only for incompatible changes. The container image's major version follows it.

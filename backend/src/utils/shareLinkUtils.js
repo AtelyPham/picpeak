@@ -1,4 +1,10 @@
-const SHARE_TOKEN_REGEX = /^[0-9a-fA-F]{32}$/;
+// What a bare share token looks like. 32 hex is what every gallery gets now;
+// 64 hex comes from galleries converted from a quote or a contract before
+// that path minted a normal token (their links stay as they are). An exact
+// share_token match never depended on this; it gates the case-insensitive
+// fallback in resolveShareIdentifier and the OG preview's token lookup.
+// The gallery page's own check is frontend/src/utils/shareToken.ts.
+const SHARE_TOKEN_REGEX = /^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{64})$/;
 
 /**
  * Extracts the share token portion from a stored share link.

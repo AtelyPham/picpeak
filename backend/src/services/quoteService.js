@@ -27,6 +27,7 @@
  */
 
 const crypto = require('crypto');
+const { buildShareLinkVariants } = require('./shareLinkService');
 const { db, withRetry, logActivity } = require('../database/db');
 const logger = require('../utils/logger');
 const { getAppSetting } = require('../utils/appSettings');
@@ -2368,6 +2369,16 @@ async function convertToEvent(quoteId, adminId, options = {}) {
   // Lazy import to avoid the circular dep.
   const invoiceService = require('./invoiceService');
 
+  // The gallery's slug and share link, built like every other gallery's
+  // (eventCreationService): a 32-hex token and /gallery/<slug>/<token>, or
+  // /gallery/<token> with short URLs on. Before the transaction, because the
+  // short-URL setting is read through the global db handle. This used to be
+  // a bare 64-hex token, which the gallery page does not take for a token,
+  // so "View gallery" and a short guest link opened "Gallery not found".
+  const slug = `quote-${quote.quote_number.toLowerCase()}-${crypto.randomBytes(3).toString('hex')}`;
+  const shareToken = crypto.randomBytes(16).toString('hex');
+  const { shareLinkToStore } = await buildShareLinkVariants({ slug, shareToken });
+
   const result = await db.transaction(async (trx) => {
     // The events table schema has drifted across migrations:
     // installs that ran the original 060 series have
@@ -2379,7 +2390,6 @@ async function convertToEvent(quoteId, adminId, options = {}) {
     const oneYearAfterEvent = new Date(quote.event_date || quote.issue_date);
     oneYearAfterEvent.setFullYear(oneYearAfterEvent.getFullYear() + 1);
     const placeholder = crypto.randomBytes(32).toString('hex');
-    const shareLink = crypto.randomBytes(32).toString('hex');
     const fullName = [customer.first_name, customer.last_name].filter(Boolean).join(' ')
       || customer.display_name || customer.company_name || quote.quote_number;
     const customerEmail = customer.email || `${quote.quote_number.toLowerCase()}@picpeak.local`;
@@ -2399,7 +2409,7 @@ async function convertToEvent(quoteId, adminId, options = {}) {
     const { getImageSecurityDefaults, resolveImageSecurityColumns } = require('../routes/adminEvents/helpers');
     const imageSecurityColumns = resolveImageSecurityColumns({}, await getImageSecurityDefaults(trx));
     const candidate = {
-      slug: `quote-${quote.quote_number.toLowerCase()}-${crypto.randomBytes(3).toString('hex')}`,
+      slug,
       event_name: quote.event_name || `Event ${quote.quote_number}`,
       event_date: quote.event_date || quote.issue_date,
       host_name: fullName,
@@ -2410,8 +2420,8 @@ async function convertToEvent(quoteId, adminId, options = {}) {
       admin_email: adminEmail,
       event_type: eventType,
       password_hash: placeholder,
-      share_link: shareLink,
-      share_token: shareLink,
+      share_link: shareLinkToStore,
+      share_token: shareToken,
       expires_at: oneYearAfterEvent,
       is_active: true,
       is_archived: false,

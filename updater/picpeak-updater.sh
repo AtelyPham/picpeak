@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-readonly UPDATER_VERSION="1.0.0"
+readonly UPDATER_VERSION="1.0.1"
 readonly CONTRACT_VERSION=1
 readonly AUTO_FROM_LABEL="io.picpeak.update.auto-from"
 
@@ -43,6 +43,11 @@ HEALTH_TIMEOUT="${PICPEAK_UPDATER_HEALTH_TIMEOUT:-600}"
 PULL_ATTEMPTS="${PICPEAK_UPDATER_PULL_ATTEMPTS:-5}"
 PULL_BACKOFF="${PICPEAK_UPDATER_PULL_BACKOFF:-15}"
 POLL_INTERVAL="${PICPEAK_UPDATER_POLL_INTERVAL:-5}"
+# Minutes a request may wait before it is discarded instead of run. The backend
+# withdraws its own unclaimed request after 10 minutes; this is the backstop
+# for one it could not withdraw (it was down, or a stopped updater comes back
+# days later and must not update unattended with a backup that old).
+REQUEST_MAX_AGE="${PICPEAK_UPDATER_REQUEST_MAX_AGE:-15}"
 
 REQUEST_DIR=""
 REQUEST_FILE=""
@@ -317,9 +322,12 @@ retry_pull() {
 }
 
 # Every service is running, and healthy where it has a healthcheck.
+# Checks before it looks at the clock: on a loaded host the deadline can pass
+# before the first check, and giving up without one leaves LAST_ERROR naming
+# whatever failed earlier.
 wait_healthy() {
     local deadline=$(( $(date +%s) + HEALTH_TIMEOUT )) svc cids cid state health all_ok
-    while (( $(date +%s) < deadline )); do
+    while :; do
         all_ok=true
         for svc in "${SERVICES[@]}"; do
             # -a: a crash-looping container is not "running" and would vanish
@@ -341,9 +349,9 @@ wait_healthy() {
             done
         done
         $all_ok && return 0
+        (( $(date +%s) < deadline )) || return 1
         sleep 5
     done
-    return 1
 }
 
 ################################################################################
@@ -607,11 +615,30 @@ claim_request() {
 # The lock is only ever taken in an `if` condition and the work runs in its
 # body: a function called from a condition runs with `set -e` suspended, which
 # would silently disable the internal_error reporting in do_update.
+# True when the marker is older than REQUEST_MAX_AGE minutes. find looks at
+# the entry itself (it does not follow links by default), in GNU, BSD and
+# busybox alike. Checked before claiming, because claiming removes it.
+request_is_stale() {
+    [[ -n "$(find "$REQUEST_FILE" -maxdepth 0 -mmin "+$REQUEST_MAX_AGE" 2>/dev/null)" ]]
+}
+
+refuse_stale_request() {
+    ST_STATE="running"; ST_REASON=""; ST_STEP=""; ST_FROM=""; ST_TO=""; ST_IMAGE=""; ST_FINISHED=""
+    ST_STARTED="$(now)"
+    finish refused request_expired "The update request was more than $REQUEST_MAX_AGE minutes old when the updater saw it, so it was discarded instead of run. Request the update again."
+}
+
 handle_request() {
     if flock -n 9; then
+        local stale=false
+        if request_is_stale; then stale=true; fi
         if claim_request; then
-            log "update requested"
-            do_update
+            if $stale; then
+                refuse_stale_request
+            else
+                log "update requested"
+                do_update
+            fi
         fi
         flock -u 9
         return 0
@@ -677,6 +704,7 @@ Environment:
   PICPEAK_UPDATER_PACKAGING       host | container (default: host)
   PICPEAK_UPDATER_HEALTH_TIMEOUT  Seconds to wait for a healthy stack (default: 600)
   PICPEAK_UPDATER_PULL_ATTEMPTS   Pull attempts before giving up (default: 5)
+  PICPEAK_UPDATER_REQUEST_MAX_AGE Minutes a request may wait before it is discarded (default: 15)
 EOF
 }
 

@@ -166,6 +166,12 @@ services:
       # include itself.
       - ${APP_BACKUP:-./backup}:/backup
       - picpeak-secrets:/run/secrets:ro
+      # In-app updates (docs/self-update.md): the backend writes its request
+      # here and only reads the updater's status, hence the separate read-only
+      # mount. Both directories are created on first start even when the
+      # feature stays off (PICPEAK_SELF_UPDATE unset); nothing reads them then.
+      - ${APP_UPDATE:-./update}/request:/app/update/request
+      - ${APP_UPDATE:-./update}/status:/app/update/status:ro
     ports:
       - "${BACKEND_PORT:-3001}:3000"
     networks:

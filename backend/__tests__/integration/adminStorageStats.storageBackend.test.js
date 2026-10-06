@@ -26,6 +26,8 @@ describe('storage accounting reads archives through the storage backend', () => 
     }));
     jest.doMock('../../src/middleware/permissions', () => ({
       requirePermission: () => (_req, _res, next) => next(),
+      // adminSystem.js builds the self-update routes with it at load time.
+      requireSuperAdmin: () => (_req, _res, next) => next(),
     }));
 
     ({ db, cleanup } = await require('./helpers/crmDb').bootCrmDb());

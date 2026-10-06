@@ -203,6 +203,20 @@ if [ "$(id -u)" = "0" ]; then
     echo "  See https://docs.picpeak.app/deployment/docker#permissions" >&2
     exit 1
   fi
+  # In-app updates (docs/self-update.md): the backend files its request in
+  # update/request. Docker creates a missing bind-mount source as root, so
+  # adopt the directory itself, shallowly, and never fail boot over it: the
+  # feature is opt-in and most installs never use it. Not status/, which is
+  # mounted read-only and belongs to the updater.
+  _req_dir="${PICPEAK_UPDATE_DIR:-/app/update}/request"
+  if [ -d "$_req_dir" ] && [ ! -L "$_req_dir" ]; then
+    # Only worth a warning where the feature is on: an NFS mount with root
+    # squash fails this on every boot, also for installs that never opted in.
+    if ! chown nodejs:nodejs "$_req_dir" 2>/dev/null && [ "${PICPEAK_SELF_UPDATE:-}" = "true" ]; then
+      echo "WARNING: could not chown $_req_dir to nodejs (UID 1001); in-app updates cannot be requested." >&2
+    fi
+  fi
+  unset _req_dir
   exec su-exec nodejs:nodejs "$0" "$@"
 fi
 

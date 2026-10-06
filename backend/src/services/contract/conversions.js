@@ -2,6 +2,7 @@
 // module-level overview. Do not add behavior here without updating the entry re-exports.
 
 const crypto = require('crypto');
+const { buildShareLinkVariants } = require('../shareLinkService');
 const { db, logActivity } = require('../../database/db');
 const logger = require('../../utils/logger');
 const { getAppSetting } = require('../../utils/appSettings');
@@ -223,7 +224,9 @@ async function convertToEvent(contractId, adminId) {
   const customerEmail = customer.email || `${contract.contract_number.toLowerCase()}@picpeak.local`;
   const adminEmail = adminRow?.email || customer.email || 'admin@picpeak.local';
   const placeholderHash = crypto.randomBytes(32).toString('hex');
-  const shareToken = crypto.randomBytes(32).toString('hex');
+  // A 32-hex token and a /gallery/... link like every other gallery
+  // (eventCreationService); see quoteService.convertToEvent.
+  const shareToken = crypto.randomBytes(16).toString('hex');
 
   // Event type: the configurable org default, else the resolved catch-all —
   // same chain as quoteService.convertToEvent. Never a hardcoded slug: the
@@ -234,8 +237,10 @@ async function convertToEvent(contractId, adminId) {
   const eventCols = await db('events').columnInfo();
   const { getImageSecurityDefaults, resolveImageSecurityColumns } = require('../../routes/adminEvents/helpers');
   const imageSecurityColumns = resolveImageSecurityColumns({}, await getImageSecurityDefaults());
+  const slug = `contract-${contract.contract_number.toLowerCase()}-${crypto.randomBytes(3).toString('hex')}`;
+  const { shareLinkToStore } = await buildShareLinkVariants({ slug, shareToken });
   const candidate = {
-    slug: `contract-${contract.contract_number.toLowerCase()}-${crypto.randomBytes(3).toString('hex')}`,
+    slug,
     // Prefer the contract's event_name snapshot (set on the contract
     // editor or inherited from the source quote) over the contract
     // title. Falls back to a deterministic placeholder so the event
@@ -250,7 +255,7 @@ async function convertToEvent(contractId, adminId) {
     admin_email: adminEmail,
     event_type: eventType,
     password_hash: placeholderHash,
-    share_link: shareToken,
+    share_link: shareLinkToStore,
     share_token: shareToken,
     expires_at: oneYearFromNow,
     is_active: true,

@@ -13,6 +13,7 @@ import {
   Circle
 } from 'lucide-react';
 import { api } from '../../config/api';
+import { SelfUpdatePanel, ManualUpdateSteps, useSelfUpdateActive } from './SelfUpdatePanel';
 
 interface UpdateStep {
   description: string;
@@ -76,6 +77,8 @@ export const UpdateInstructionsDialog: React.FC<UpdateInstructionsDialogProps> =
   const { t } = useTranslation();
   const [checkedItems, setCheckedItems] = useState<Set<string>>(new Set());
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  // Mounted closed on every admin page; only ask while it is open.
+  const selfUpdateActive = useSelfUpdateActive(isOpen);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['update-instructions'],
@@ -157,6 +160,11 @@ export const UpdateInstructionsDialog: React.FC<UpdateInstructionsDialogProps> =
 
           {/* Content */}
           <div className="px-6 py-4 max-h-[70vh] overflow-y-auto">
+            {/* Renders nothing unless in-app updates are enabled; the manual
+                steps below stay as the fallback either way. */}
+            <div className="mb-6 empty:hidden">
+              <SelfUpdatePanel />
+            </div>
             {isLoading && (
               <div className="flex items-center justify-center py-8">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
@@ -182,6 +190,7 @@ export const UpdateInstructionsDialog: React.FC<UpdateInstructionsDialogProps> =
             )}
 
             {data?.instructions && (
+              <ManualUpdateSteps active={selfUpdateActive}>
               <div className="space-y-6">
                 {/* Environment Info */}
                 <div className="flex items-center p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
@@ -313,13 +322,14 @@ export const UpdateInstructionsDialog: React.FC<UpdateInstructionsDialogProps> =
                   </a>
                 )}
               </div>
+              </ManualUpdateSteps>
             )}
           </div>
 
           {/* Footer */}
           <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
             <div className="text-xs text-gray-500 dark:text-gray-400">
-              {!allRequiredChecked && data?.instructions && (
+              {!allRequiredChecked && data?.instructions && !selfUpdateActive && (
                 <span className="text-amber-600 dark:text-amber-400">
                   {t('admin.updates.updateDialog.completeChecklist', 'Complete the checklist before updating')}
                 </span>

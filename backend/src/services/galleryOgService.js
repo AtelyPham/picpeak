@@ -4,6 +4,7 @@ const { ensureThumbnail } = require('./imageProcessor');
 const { getStorage } = require('./storage');
 const { getAbsoluteFrontendUrl } = require('../utils/frontendUrl');
 const { isGalleryAvailable } = require('../utils/galleryLifecycle');
+const { isPotentialShareToken } = require('../utils/shareLinkUtils');
 
 const SOCIAL_CRAWLER_PATTERNS = [
   /facebookexternalhit/i,
@@ -123,7 +124,9 @@ async function resolveSlug(slug) {
   // would otherwise route here with `slug=<token>`, fail the slug
   // lookup, and serve the fallback site-wide OG — which is what
   // alex hit when he ran the Cloudflare Worker as a workaround.
-  if (/^[a-f0-9]{32}$/i.test(slug)) {
+  // Same token shape as everywhere else (32 hex, or 64 from an older quote
+  // or contract conversion): shareLinkUtils.isPotentialShareToken.
+  if (isPotentialShareToken(slug)) {
     event = await db('events').where('share_token', slug).first();
     if (event) return event;
   }

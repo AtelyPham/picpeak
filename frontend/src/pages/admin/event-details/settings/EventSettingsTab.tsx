@@ -195,7 +195,7 @@ export const EventSettingsTab: React.FC<EventSettingsTabProps> = ({
       case 'appearance':
         return <AppearanceSection f={draft.event} set={set} event={event} photos={photos} readOnly={!canEdit} />;
       case 'source':
-        return <SourceSection f={draft.event} set={set} event={event} />;
+        return <SourceSection f={draft.event} set={set} event={event} canEdit={canEdit} />;
       case 'delivery':
         return <DeliverySection f={draft.event} set={set} event={event} onChanged={refetchEvent} />;
       case 'reminder':

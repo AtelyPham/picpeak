@@ -19,6 +19,7 @@ import { buildResourceUrl } from '../utils/url';
 import { isGalleryPublic, normalizeRequirePassword } from '../utils/accessControl';
 import { detectInAppBrowser } from '../utils/inAppBrowser';
 import { isAdminSessionExpired, isPasswordChangeRequired } from '../utils/passwordChangeRequired';
+import { isShareToken } from '../utils/shareToken';
 
 export const GalleryPage: React.FC = () => {
   const { slug: rawSlug, token: rawToken } = useParams<{ slug: string; token?: string }>();
@@ -54,14 +55,14 @@ export const GalleryPage: React.FC = () => {
   const [linkCopied, setLinkCopied] = useState(false);
   const iabBlocked = iabDetection.app === 'instagram' && !iabOverride;
   const [resolvedSlug, setResolvedSlug] = useState<string | null>(() => {
-    if (rawSlug && !rawToken && /^[0-9a-fA-F]{32}$/.test(rawSlug)) {
+    if (rawSlug && !rawToken && isShareToken(rawSlug)) {
       return null;
     }
     return rawSlug || null;
   });
   const [resolvedToken, setResolvedToken] = useState<string | undefined>(rawToken);
   const [isResolvingIdentifier, setIsResolvingIdentifier] = useState<boolean>(() =>
-    Boolean(rawSlug && !rawToken && /^[0-9a-fA-F]{32}$/.test(rawSlug))
+    Boolean(rawSlug && !rawToken && isShareToken(rawSlug))
   );
   const [identifierError, setIdentifierError] = useState<string | null>(null);
   const [identifierNeedsPasswordChange, setIdentifierNeedsPasswordChange] = useState(false);
@@ -71,7 +72,7 @@ export const GalleryPage: React.FC = () => {
   React.useEffect(() => {
     let cancelled = false;
 
-    const looksLikeToken = Boolean(rawSlug && !rawToken && /^[0-9a-fA-F]{32}$/.test(rawSlug));
+    const looksLikeToken = Boolean(rawSlug && !rawToken && isShareToken(rawSlug));
 
     if (!rawSlug) {
       lastResolvedIdentifier.current = null;

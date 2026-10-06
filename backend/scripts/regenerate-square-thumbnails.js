@@ -8,7 +8,7 @@
 const path = require('path');
 const fs = require('fs').promises;
 const { db } = require('../src/database/db');
-const { generateThumbnail } = require('../src/services/imageProcessor');
+const { generateThumbnail, withProcessableImage } = require('../src/services/imageProcessor');
 const logger = require('../src/utils/logger');
 
 const getStoragePath = () => process.env.STORAGE_PATH || path.join(__dirname, '../../storage');
@@ -41,7 +41,7 @@ async function regenerateAllThumbnails() {
     
     // Get all photos
     const photos = await db('photos')
-      .select('id', 'event_id', 'path', 'filename')
+      .select('id', 'event_id', 'path', 'filename', 'original_filename')
       .orderBy('id');
     
     console.log(`Found ${photos.length} photos to process`);
@@ -67,8 +67,30 @@ async function regenerateAllThumbnails() {
           continue;
         }
         
-        // Regenerate thumbnail with new square dimensions
-        const thumbnailPath = await generateThumbnail(originalPath, { regenerate: true });
+        // Regenerate thumbnail with new square dimensions.
+        // Through the RAW extraction: sharp cannot open a RAW original, so
+        // without this every RAW in the library is counted as an error and
+        // keeps whatever thumbnail it had, at the old dimensions.
+        //
+        // Named off the stored path, the way regenerateThumbnail does it, for
+        // two reasons. Without an outputBasename a RAW thumbnail is named
+        // after the random temp file the preview was extracted to, which is a
+        // key nothing else in the system will ever look for: the old
+        // thumbnail is orphaned, a fresh one is orphaned on the next run, and
+        // every lazy repair path misses its cache and regenerates. And the
+        // stored name is unique per gallery where the client-supplied camera
+        // name is not, so two galleries holding the same filename cannot
+        // overwrite each other's thumbnail.
+        const proc = await withProcessableImage(originalPath, photo.path);
+        let thumbnailPath;
+        try {
+          thumbnailPath = await generateThumbnail(proc.path, {
+            regenerate: true,
+            outputBasename: proc.outputBasename,
+          });
+        } finally {
+          await proc.cleanup();
+        }
         
         if (thumbnailPath) {
           // Update database with new thumbnail path

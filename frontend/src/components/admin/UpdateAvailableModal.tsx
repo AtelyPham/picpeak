@@ -8,6 +8,7 @@ import { api } from '../../config/api';
 import { Button, Card } from '../common';
 import { MarkdownContent } from '../common/MarkdownContent';
 import { githubReleaseUrl } from '../../utils/githubReleaseUrl';
+import { SelfUpdatePanel, ManualUpdateSteps, useSelfUpdateActive } from './SelfUpdatePanel';
 
 /**
  * Update-available modal (#567).
@@ -92,6 +93,7 @@ export const UpdateAvailableModal: React.FC<UpdateAvailableModalProps> = ({
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState<Set<string>>(new Set([latestVersion]));
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const selfUpdateActive = useSelfUpdateActive();
 
   const { data: changelog, isLoading: changelogLoading, isError: changelogError } = useQuery({
     queryKey: ['update-changelog'],
@@ -166,10 +168,16 @@ export const UpdateAvailableModal: React.FC<UpdateAvailableModalProps> = ({
             <h3 className="text-sm font-semibold text-heading mb-2">
               {t('admin.updates.howToUpgrade', 'How to upgrade')}
             </h3>
+            {/* Renders nothing unless in-app updates are enabled; the manual
+                steps below stay as the fallback either way. */}
+            <div className="mb-3 empty:hidden">
+              <SelfUpdatePanel />
+            </div>
             {instructionsLoading && (
               <p className="text-sm text-neutral-500">{t('common.loading', 'Loading…')}</p>
             )}
             {!instructionsLoading && instructions?.instructions && (
+              <ManualUpdateSteps active={selfUpdateActive}>
               <div className="space-y-3">
                 {instructions.environment?.description && (
                   <p className="text-xs text-muted">
@@ -212,6 +220,7 @@ export const UpdateAvailableModal: React.FC<UpdateAvailableModalProps> = ({
                   </ul>
                 )}
               </div>
+              </ManualUpdateSteps>
             )}
           </section>
 

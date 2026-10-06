@@ -2114,7 +2114,8 @@
       "reminderWhenTo": "Goes out on {{date}} to {{recipient}}",
       "sections": "Settings sections",
       "source": "Photo source",
-      "sourceImportHint": "Saving a new folder imports nothing by itself. After saving, use Import now on the Photos tab.",
+      "sourceImportHelp": "Imports new photos from this folder now. It runs in the background; they appear on the Photos tab.",
+      "sourceImportSaveFirst": "Save the new folder first, then import it here.",
       "sourceManagedHelp": "Photos are uploaded on the Photos tab and stored by PicPeak.",
       "sourceReferenceHelp": "Photos stay in your folder; PicPeak links to them.",
       "summary": {
@@ -4022,7 +4023,62 @@
       "noReleases": "No release notes available.",
       "viewOnGitHub": "View on GitHub",
       "noNotes": "No release notes provided.",
-      "dismissUntilNext": "Dismiss until next version"
+      "dismissUntilNext": "Dismiss until next version",
+      "selfUpdate": {
+        "title": "Update from here",
+        "description": "PicPeak backs up its database, then installs the latest version of its release channel. The site is unavailable for a minute or two while it restarts.",
+        "password": "Confirm with your password",
+        "submit": "Update now",
+        "submitting": "Starting…",
+        "onlySuperAdmin": "A super admin can update PicPeak from here.",
+        "noAgent": "In-app updates are enabled, but the updater is not installed or not reachable. Use the commands below, or set it up as described in docs/self-update.md.",
+        "unsupportedContract": "The installed updater does not match this version of PicPeak. Refresh it with picpeak-setup.sh --update, or update the updater container.",
+        "busyOther": "An update is already in progress.",
+        "keepOpen": "You can keep this window open. The site is unavailable for a minute or two while the new version starts.",
+        "reload": "Reload PicPeak",
+        "manualInstead": "Update manually instead",
+        "phase": {
+          "backingUp": "Backing up the database…",
+          "waiting": "Waiting for the updater to start…",
+          "waitingLong": "The updater has not picked up the request yet. Check that it is running on the server (journalctl -u picpeak-updater, or the updater container).",
+          "restarting": "PicPeak is restarting…"
+        },
+        "step": {
+          "discover": "Checking the installation…",
+          "pull": "Downloading the new version…",
+          "verify": "Checking the new version…",
+          "recreate": "Installing the new version…",
+          "health": "Waiting for PicPeak to start…",
+          "rollback": "The new version did not start. Bringing back the previous one…",
+          "working": "Updating…"
+        },
+        "result": {
+          "succeeded": "PicPeak was updated.",
+          "upToDate": "PicPeak is already on the latest version of its channel.",
+          "refused": "The update was not installed. Nothing was changed.",
+          "failed": "The update failed.",
+          "rolledBack": "The new version did not start, so the previous version was brought back.",
+          "backupFailed": "The database backup failed, so the update was not started. Nothing was changed.",
+          "requestFailed": "The backup was taken, but the update request could not be filed. Nothing was changed.",
+          "withdrawn": "The update request was cancelled. Nothing was changed.",
+          "expired": "The updater did not pick up the request in time, so it was withdrawn. Nothing was changed. Check that the updater is running, then try again.",
+          "lost": "The update request did not reach the updater (PicPeak restarted, or the request was withdrawn). Nothing was changed."
+        },
+        "error": {
+          "badPassword": "The password is incorrect.",
+          "rateLimited": "Too many attempts. Try again in a few minutes.",
+          "busy": "An update is already in progress.",
+          "generic": "The update could not be started.",
+          "disabled": "In-app updates are not enabled on this installation.",
+          "noAgent": "The updater is not installed or not reachable.",
+          "unsupportedContract": "The installed updater does not match this version of PicPeak.",
+          "requestDirNotWritable": "PicPeak cannot write to its update request directory.",
+          "noLocalPassword": "In-app updates need a super admin who signs in with a password."
+        },
+        "cancel": "Cancel request",
+        "requestDirNotWritable": "PicPeak cannot write to its update request directory (update/request), so it cannot ask for an update. It has to be writable by UID 1001; see docs/self-update.md.",
+        "noLocalPassword": "In-app updates need a super admin who signs in with a password. Your account signs in through SSO only."
+      }
     },
     "notifications": "Notifications",
     "markAllRead": "Mark all read",
@@ -4577,7 +4633,14 @@
       "delivery_first_look_started": "First look started for {{eventName}}",
       "delivery_completed": "Full gallery delivered: {{eventName}}",
       "delivery_due_soon": "Full gallery for {{eventName}} is due soon",
-      "delivery_overdue": "Full gallery for {{eventName}} is overdue"
+      "delivery_overdue": "Full gallery for {{eventName}} is overdue",
+      "self_update_requested": "In-app update requested (from v{{from_version}})",
+      "self_update_refused": "In-app update refused ({{code}})",
+      "self_update_backup_failed": "In-app update not started: the database backup failed",
+      "self_update_request_failed": "In-app update not started: the request could not be filed",
+      "self_update_expired": "In-app update request withdrawn: the updater did not pick it up",
+      "self_update_withdrawn": "In-app update request cancelled",
+      "self_update_finished": "In-app update finished: {{state}} ({{from_version}} → {{to_version}})"
     },
     "people": {
       "title": "People in this gallery",

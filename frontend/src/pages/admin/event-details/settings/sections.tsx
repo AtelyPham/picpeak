@@ -5,9 +5,9 @@
  */
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Eye, EyeOff, Lock } from 'lucide-react';
+import { Eye, EyeOff, Lock, RefreshCw } from 'lucide-react';
 import type { Event } from '../../../../types';
-import { Input, LocalizedDateInput } from '../../../../components/common';
+import { Button, Input, LocalizedDateInput } from '../../../../components/common';
 import { FeedbackSettings } from '../../../../components/admin';
 import { CustomerAccountPicker } from '../../../../components/admin/CustomerAccountPicker';
 import { UploaderNameSettings } from '../../../../components/admin/UploaderNameSettings';
@@ -15,6 +15,7 @@ import { useLocalizedDate } from '../../../../hooks/useLocalizedDate';
 import { usePermission } from '../../../../hooks/usePermission';
 import type { FeedbackSettings as FeedbackSettingsType } from '../../../../services/feedback.service';
 import { ExternalFolderPicker } from '../ExternalFolderPicker';
+import { useExternalImport } from '../useExternalImport';
 import type { EventFields } from './draft';
 
 export interface FieldsProps {
@@ -275,7 +276,50 @@ export const GuestsSection: React.FC<FieldsProps & {
   );
 };
 
-export const SourceSection: React.FC<FieldsProps & { event: Event }> = ({ f, set, event }) => {
+/**
+ * Import now / Rescan for the saved folder, the same action and status as
+ * the Photos tab's source line (useExternalImport). A folder picked but not
+ * saved yet cannot be imported: the server imports from the saved one.
+ */
+const SourceImport: React.FC<{ event: Event; unsaved: boolean; canEdit: boolean }> = ({ event, unsaved, canEdit }) => {
+  const { t } = useTranslation();
+  // Hidden, not disabled, where the settings are read-only (a role without
+  // events.edit, an archived gallery): the section's fieldset would disable
+  // the button with no reason given. The Photos tab keeps its Rescan for a
+  // role that may upload photos but not edit the gallery.
+  const imp = useExternalImport(event, { enabled: canEdit });
+  if (!imp.canImport || !canEdit) return null;
+  const savedFolder = event.source_mode === 'reference' && !!event.external_path;
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg bg-accent-dark/10 px-3 py-2">
+      <div className="flex-1 basis-64 min-w-0 text-xs">
+        {unsaved || !savedFolder ? (
+          <p className="text-body">{t('events.settingsTab.sourceImportSaveFirst', 'Save the new folder first, then import it here.')}</p>
+        ) : (
+          <>
+            <p className="text-body">{t('events.settingsTab.sourceImportHelp', 'Imports new photos from this folder now. It runs in the background; they appear on the Photos tab.')}</p>
+            {imp.failed ? (
+              <p className="mt-0.5 text-red-700 dark:text-red-400" role="alert">{imp.failureText}</p>
+            ) : (
+              <p className="mt-0.5 text-soft" role="status">{imp.statusText}</p>
+            )}
+          </>
+        )}
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        leftIcon={<RefreshCw className={`w-4 h-4 ${imp.running ? 'animate-spin' : ''}`} />}
+        onClick={imp.run}
+        disabled={unsaved || !savedFolder || !imp.canRun}
+      >
+        {imp.buttonLabel}
+      </Button>
+    </div>
+  );
+};
+
+export const SourceSection: React.FC<FieldsProps & { event: Event; canEdit?: boolean }> = ({ f, set, event, canEdit = true }) => {
   const { t } = useTranslation();
   // Watching makes the server import on the admin's behalf, which the backend
   // gates on photos.upload like the Rescan button.
@@ -339,9 +383,13 @@ export const SourceSection: React.FC<FieldsProps & { event: Event }> = ({ f, set
               )}
             </span>
           </label>
-          <p className="text-xs rounded-lg bg-accent-dark/10 text-body px-3 py-2">
-            {t('events.settingsTab.sourceImportHint', 'Saving a new folder imports nothing by itself. After saving, use Import now on the Photos tab.')}
-          </p>
+          {/* Normalised like the draft (draft.ts): a missing mode is managed. */}
+          <SourceImport
+            event={event}
+            canEdit={canEdit}
+            unsaved={(event.source_mode === 'reference' ? 'reference' : 'managed') !== f.source_mode
+              || (event.external_path || '') !== f.external_path.trim()}
+          />
         </>
       )}
     </SectionCard>

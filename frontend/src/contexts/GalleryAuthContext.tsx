@@ -13,6 +13,7 @@ import {
 } from '../utils/galleryAuthStorage';
 import { clearGuestIdentity } from '../utils/guestIdentityStorage';
 import type { GalleryAccessLevel } from '../types';
+import { isShareToken } from '../utils/shareToken';
 
 interface GalleryEvent {
   id: number;
@@ -114,7 +115,7 @@ export const GalleryAuthProvider: React.FC<GalleryAuthProviderProps> = ({ childr
         return;
       }
 
-      const looksLikeToken = /^[0-9a-fA-F]{32}$/.test(identifier) && !tokenSegment;
+      const looksLikeToken = isShareToken(identifier) && !tokenSegment;
 
       if (looksLikeToken) {
         if (lastResolvedIdentifier.current === identifier) {

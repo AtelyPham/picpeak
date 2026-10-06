@@ -2652,7 +2652,8 @@
       "reminderWhenTo": "Wird am {{date}} an {{recipient}} gesendet",
       "sections": "Einstellungsbereiche",
       "source": "Fotoquelle",
-      "sourceImportHint": "Das Speichern eines neuen Ordners importiert noch nichts. Danach im Tab Fotos „Jetzt importieren“ nutzen.",
+      "sourceImportHelp": "Importiert jetzt neue Fotos aus diesem Ordner. Läuft im Hintergrund; die Fotos erscheinen im Tab Fotos.",
+      "sourceImportSaveFirst": "Zuerst den neuen Ordner speichern, dann hier importieren.",
       "sourceManagedHelp": "Fotos werden im Tab Fotos hochgeladen und von PicPeak gespeichert.",
       "sourceReferenceHelp": "Fotos bleiben in deinem Ordner; PicPeak verlinkt sie.",
       "summary": {
@@ -4493,7 +4494,62 @@
       "noReleases": "Keine Versionshinweise verfügbar.",
       "viewOnGitHub": "Auf GitHub ansehen",
       "noNotes": "Keine Versionshinweise hinterlegt.",
-      "dismissUntilNext": "Bis zur nächsten Version ausblenden"
+      "dismissUntilNext": "Bis zur nächsten Version ausblenden",
+      "selfUpdate": {
+        "title": "Direkt hier aktualisieren",
+        "description": "PicPeak sichert zuerst seine Datenbank und installiert dann die neueste Version seines Release-Kanals. Während des Neustarts ist die Seite ein bis zwei Minuten nicht erreichbar.",
+        "password": "Mit Ihrem Passwort bestätigen",
+        "submit": "Jetzt aktualisieren",
+        "submitting": "Wird gestartet…",
+        "onlySuperAdmin": "Ein Super-Admin kann PicPeak hier aktualisieren.",
+        "noAgent": "In-App-Updates sind aktiviert, aber der Updater ist nicht installiert oder nicht erreichbar. Nutzen Sie die Befehle unten oder richten Sie ihn wie in docs/self-update.md beschrieben ein.",
+        "unsupportedContract": "Der installierte Updater passt nicht zu dieser PicPeak-Version. Aktualisieren Sie ihn mit picpeak-setup.sh --update oder aktualisieren Sie den Updater-Container.",
+        "busyOther": "Es läuft bereits ein Update.",
+        "keepOpen": "Sie können dieses Fenster offen lassen. Die Seite ist ein bis zwei Minuten nicht erreichbar, während die neue Version startet.",
+        "reload": "PicPeak neu laden",
+        "manualInstead": "Stattdessen manuell aktualisieren",
+        "phase": {
+          "backingUp": "Datenbank wird gesichert…",
+          "waiting": "Warte darauf, dass der Updater startet…",
+          "waitingLong": "Der Updater hat die Anfrage noch nicht übernommen. Prüfen Sie, ob er auf dem Server läuft (journalctl -u picpeak-updater oder der Updater-Container).",
+          "restarting": "PicPeak startet neu…"
+        },
+        "step": {
+          "discover": "Installation wird geprüft…",
+          "pull": "Neue Version wird heruntergeladen…",
+          "verify": "Neue Version wird geprüft…",
+          "recreate": "Neue Version wird installiert…",
+          "health": "Warte, bis PicPeak gestartet ist…",
+          "rollback": "Die neue Version ist nicht gestartet. Die vorherige wird wiederhergestellt…",
+          "working": "Wird aktualisiert…"
+        },
+        "result": {
+          "succeeded": "PicPeak wurde aktualisiert.",
+          "upToDate": "PicPeak ist bereits auf der neuesten Version seines Kanals.",
+          "refused": "Das Update wurde nicht installiert. Es wurde nichts verändert.",
+          "failed": "Das Update ist fehlgeschlagen.",
+          "rolledBack": "Die neue Version ist nicht gestartet, deshalb wurde die vorherige Version wiederhergestellt.",
+          "backupFailed": "Die Datenbanksicherung ist fehlgeschlagen, deshalb wurde das Update nicht gestartet. Es wurde nichts verändert.",
+          "requestFailed": "Die Sicherung wurde erstellt, aber die Update-Anfrage konnte nicht abgelegt werden. Es wurde nichts verändert.",
+          "withdrawn": "Die Update-Anfrage wurde abgebrochen. Es wurde nichts verändert.",
+          "expired": "Der Updater hat die Anfrage nicht rechtzeitig übernommen, deshalb wurde sie zurückgezogen. Es wurde nichts verändert. Prüfen Sie, ob der Updater läuft, und versuchen Sie es erneut.",
+          "lost": "Die Update-Anfrage hat den Updater nicht erreicht (PicPeak wurde neu gestartet oder die Anfrage zurückgezogen). Es wurde nichts verändert."
+        },
+        "error": {
+          "badPassword": "Das Passwort ist falsch.",
+          "rateLimited": "Zu viele Versuche. Versuchen Sie es in ein paar Minuten erneut.",
+          "busy": "Es läuft bereits ein Update.",
+          "generic": "Das Update konnte nicht gestartet werden.",
+          "disabled": "In-App-Updates sind auf dieser Installation nicht aktiviert.",
+          "noAgent": "Der Updater ist nicht installiert oder nicht erreichbar.",
+          "unsupportedContract": "Der installierte Updater passt nicht zu dieser PicPeak-Version.",
+          "requestDirNotWritable": "PicPeak kann nicht in sein Update-Anfrageverzeichnis schreiben.",
+          "noLocalPassword": "In-App-Updates brauchen einen Super-Admin, der sich mit Passwort anmeldet."
+        },
+        "cancel": "Anfrage abbrechen",
+        "requestDirNotWritable": "PicPeak kann nicht in sein Update-Anfrageverzeichnis (update/request) schreiben und deshalb kein Update anfordern. Es muss für UID 1001 beschreibbar sein; siehe docs/self-update.md.",
+        "noLocalPassword": "In-App-Updates brauchen einen Super-Admin, der sich mit Passwort anmeldet. Ihr Konto meldet sich nur über SSO an."
+      }
     },
     "notifications": "Benachrichtigungen",
     "markAllRead": "Alle als gelesen markieren",
@@ -5046,7 +5102,14 @@
       "delivery_first_look_started": "Erste Auswahl für {{eventName}} gestartet",
       "delivery_completed": "Vollständige Galerie ausgeliefert: {{eventName}}",
       "delivery_due_soon": "Vollständige Galerie für {{eventName}} ist bald fällig",
-      "delivery_overdue": "Vollständige Galerie für {{eventName}} ist überfällig"
+      "delivery_overdue": "Vollständige Galerie für {{eventName}} ist überfällig",
+      "self_update_requested": "In-App-Update angefordert (von v{{from_version}})",
+      "self_update_refused": "In-App-Update abgelehnt ({{code}})",
+      "self_update_backup_failed": "In-App-Update nicht gestartet: Die Datenbanksicherung ist fehlgeschlagen",
+      "self_update_request_failed": "In-App-Update nicht gestartet: Die Anfrage konnte nicht abgelegt werden",
+      "self_update_expired": "In-App-Update-Anfrage zurückgezogen: Der Updater hat sie nicht übernommen",
+      "self_update_withdrawn": "In-App-Update-Anfrage abgebrochen",
+      "self_update_finished": "In-App-Update beendet: {{state}} ({{from_version}} → {{to_version}})"
     },
     "people": {
       "title": "Personen in dieser Galerie",

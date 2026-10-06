@@ -115,6 +115,22 @@ expect_eq "frontend runs new" "$(running frontend)" fe-new
 [[ ! -e "$PROJECT/update/request/update-requested" ]] && pass "request consumed" || fail "request consumed"
 expect_eq "contract" "$(sed -n 's/^  "contract": \([0-9]*\),$/\1/p' "$PROJECT/update/status/status.json")" 1
 
+scenario "a healthy stack counts even when the deadline passed before the first check"
+
+PATH="$ROOT/bin:$PATH" PICPEAK_PROJECT_DIR="$PROJECT" PICPEAK_UPDATE_DIR="$PROJECT/update" \
+    PICPEAK_UPDATER_HEALTH_TIMEOUT=0 bash "$UPDATER" run 2>"$PROJECT.log"
+expect_eq "state" "$(status_field state)" succeeded
+
+scenario "a request older than the limit is discarded, not run"
+# A fixed old date: touch -t works the same in GNU, BSD and busybox.
+touch -t 202001010000 "$PROJECT/update/request/update-requested"
+run_updater
+expect_eq "state" "$(status_field state)" refused
+expect_eq "reason" "$(status_field reason)" request_expired
+expect_eq "backend untouched" "$(running backend)" old
+[[ ! -e "$PROJECT/update/request/update-requested" ]] && pass "stale request removed" || fail "stale request removed"
+grep -q ' pull ' "$FAKE_STATE/calls" && fail "nothing pulled" || pass "nothing pulled"
+
 scenario "no request does nothing"
 rm "$PROJECT/update/request/update-requested"
 run_updater

@@ -279,6 +279,32 @@ describe('buildOgMetadata — share-token fallback', () => {
     expect(meta.url).toBe('https://gallery.example.com/gallery/senior-2026-06-05');
   });
 
+  it('resolves a 64-char hex token too (a gallery converted from a quote or a contract)', async () => {
+    // Those conversions minted 64-hex tokens until 1834; their short links
+    // are out there and should still get the gallery's own preview.
+    const token = `${'0'.repeat(63)}3`;
+    const event = {
+      id: 11,
+      is_active: true,
+      slug: 'quote-q-2026-001-abc123',
+      share_token: token,
+      event_name: 'Converted Gallery',
+      event_date: '2026-10-03',
+      welcome_message: null,
+      hero_photo_id: null,
+      og_image_share_enabled: false,
+    };
+    db.mockImplementationOnce(() => chain({ first: null }));
+    db.schema = { hasTable: jest.fn().mockResolvedValue(false) };
+    db.mockImplementationOnce(() => chain({ first: event }));
+    mockBranding();
+
+    const meta = await buildOgMetadata(token, `/gallery/${token}`);
+
+    expect(meta.eventName).toBe('Converted Gallery');
+    expect(meta.url).toBe('https://gallery.example.com/gallery/quote-q-2026-001-abc123');
+  });
+
   it('returns the site-wide fallback when the 32-hex slug matches NO event at all', async () => {
     // Defensive: a malformed/expired token shouldn't 500 or leak any
     // event info — it must look identical to the generic fallback path.
