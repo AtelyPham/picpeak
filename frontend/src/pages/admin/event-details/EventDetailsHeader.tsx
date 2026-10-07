@@ -368,7 +368,7 @@ export const EventDetailsHeader: React.FC<EventDetailsHeaderProps> = ({
 
       {delivery && (
         <CompleteDeliveryDialog
-          eventId={event.id}
+          event={event}
           state={delivery}
           isOpen={completeOpen}
           onClose={() => setCompleteOpen(false)}
