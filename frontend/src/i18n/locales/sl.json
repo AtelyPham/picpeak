@@ -2036,7 +2036,6 @@
     },
     "recipients": {
       "andMore": "{{names}} +{{count}} več",
-      "customerAccounts": "Računi strank",
       "galleryEmail": "E-pošta galerije",
       "portalEmail": "E-pošta portala za stranke",
       "previewTitle": "Obveščeni ob objavi galerije:",
