@@ -5,6 +5,56 @@ All notable changes to PicPeak will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.167.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.166.0-beta.0...v3.167.0-beta.0) (2026-10-08)
+
+
+### Features
+
+* **events:** gallery team members, review of their uploads, and per-photo approve / reject ([#1858](https://github.com/PicPeak/picpeak/issues/1858)) ([ca8cd5b](https://github.com/PicPeak/picpeak/commit/ca8cd5b288b5e8362daf867a73d5e14be8a28d18))
+
+## [3.166.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.165.3-beta.0...v3.166.0-beta.0) (2026-10-07)
+
+
+### Features
+
+* **delivery:** "your complete gallery is ready" also reaches assigned customer accounts ([#1837](https://github.com/PicPeak/picpeak/issues/1837)) ([be10fd4](https://github.com/PicPeak/picpeak/commit/be10fd494b6eadd5fb6df2809fe7e74810e82d84))
+
+## [3.165.3-beta.0](https://github.com/PicPeak/picpeak/compare/v3.165.2-beta.0...v3.165.3-beta.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **admin:** gallery page — settings panes scroll on their own, header actions reordered, customer accounts on the Overview ([#1833](https://github.com/PicPeak/picpeak/issues/1833)) ([b1d8669](https://github.com/PicPeak/picpeak/commit/b1d86692c0cb8bb36c40edd3040fcb8a39f7f7d7))
+
+## [3.165.2-beta.0](https://github.com/PicPeak/picpeak/compare/v3.165.1-beta.0...v3.165.2-beta.0) (2026-10-06)
+
+
+### Bug Fixes
+
+* **email:** keep info panel text readable on any email palette ([#1835](https://github.com/PicPeak/picpeak/issues/1835)) ([d223e00](https://github.com/PicPeak/picpeak/commit/d223e00cc11503df0398ca30acffa8d4e371b9d1))
+
+## [3.165.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.165.0-beta.0...v3.165.1-beta.0) (2026-10-06)
+
+
+### Bug Fixes
+
+* **backup:** do not back up the local backup's own destination ([#1827](https://github.com/PicPeak/picpeak/issues/1827)) ([2014d3b](https://github.com/PicPeak/picpeak/commit/2014d3bd11c1ee970ff74868d9962aaae412e1be))
+* **storage:** do not read an unreachable storage backend as a broken rendition ([#1825](https://github.com/PicPeak/picpeak/issues/1825)) ([3367279](https://github.com/PicPeak/picpeak/commit/33672794124f796304f5e765f04653d6ed559e8b))
+
+## [3.165.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.164.0-beta.0...v3.165.0-beta.0) (2026-10-06)
+
+
+### Features
+
+* **events:** announce galleries to the customer email and every assigned customer account ([#1819](https://github.com/PicPeak/picpeak/issues/1819)) ([30e7e30](https://github.com/PicPeak/picpeak/commit/30e7e30d42884fac756248221aee447e40e089c2))
+* **updater:** request in-app updates from the admin UI ([#1818](https://github.com/PicPeak/picpeak/issues/1818)) ([9170f2c](https://github.com/PicPeak/picpeak/commit/9170f2c0d9fda5d65f6ad71dc297e6a9b11e55c6))
+
+
+### Bug Fixes
+
+* **gallery:** galleries made from a quote or contract open from their share link; import from Settings › Photo source ([#1834](https://github.com/PicPeak/picpeak/issues/1834)) ([1fbba12](https://github.com/PicPeak/picpeak/commit/1fbba12bd13501b71bba4d5a6928fd71148fe474))
+* **gallery:** show camera RAW with its largest preview and the camera's rotation ([#1784](https://github.com/PicPeak/picpeak/issues/1784)) ([5698166](https://github.com/PicPeak/picpeak/commit/56981666e4090d08bde89ecf35c3cb70d1566c5d))
+
 ## [3.164.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.163.0-beta.0...v3.164.0-beta.0) (2026-10-06)
 
 

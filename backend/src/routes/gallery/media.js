@@ -15,6 +15,7 @@ const { errorResponse } = require('../../utils/routeHelpers');
 const { blockHiddenGallery } = require('../../utils/revealMode');
 const { isPhotoHiddenFromViewer } = require('../../utils/photoVisibility');
 const { ensureThumbnail, ensureHeroImage, ensurePreviewImage, withLocalCopy } = require('../../services/imageProcessor');
+const { isStorageUnavailableError } = require('../../services/storage/storageErrors');
 const { heroQueryRedirect } = require('../../utils/heroAnchor');
 const { getStorage } = require('../../services/storage');
 const fs = require('fs');
@@ -81,7 +82,7 @@ router.post('/:slug/photo/:photoId/view',
     try {
       const photo = await db('photos')
         .where({ id: req.params.photoId, event_id: req.event.id })
-        .first('id', 'visibility', 'category_id');
+        .first('id', 'visibility', 'moderation_status', 'category_id');
       if (!photo) {
         return res.status(404).json({ error: 'Photo not found' });
       }
@@ -634,17 +635,37 @@ router.get('/:slug/hero/:photoId',
         photoId: req.params.photoId,
         eventId: req.event?.id
       });
-      // Fall back to original photo on any error
+      // Fall back to original photo on any error. Unlike the preview route
+      // this one keeps redirecting when storage cannot be reached (issue
+      // 1785): the hero is loaded as a CSS background by the Premium layout
+      // and with the original as fallbackSrc by HeroHeader, and neither can
+      // retry a 503. What changed is upstream: an unreachable backend no
+      // longer makes ensureHeroImage regenerate a healthy rendition.
       res.redirect(withPreview(req, `/api/gallery/${req.params.slug}/photo/${req.params.photoId}`));
     }
   }
 );
 
+// Storage that cannot be reached is not a broken rendition (issue 1785). The
+// original sits behind the same backend and is many times the size, so
+// redirecting there only adds load to whatever is already failing. A 503 lets
+// the client retry the small file instead. The headers staged for the image
+// go first: Express keeps a Content-Type that is already set, and the JSON
+// would leave as image/jpeg.
+function answerStorageUnavailable(res) {
+  res.removeHeader('ETag');
+  res.removeHeader('Content-Type');
+  res.removeHeader('Content-Length');
+  res.set({ 'Retry-After': '5', 'Cache-Control': 'no-store' });
+  return res.status(503).json({ error: 'Storage temporarily unavailable', code: 'STORAGE_UNAVAILABLE' });
+}
+
 // Lightbox preview tier (#492). Aspect-preserved JPEG capped at 1920px
 // long edge — admin-controlled opt-in via app_settings.lightbox_preview_enabled.
 // Mirrors the hero route shape: same auth, ETag from preview mtime,
-// fall back to original on any failure so the lightbox never shows a
-// broken image. The watermark application path is preserved so a
+// fall back to original when the rendition is broken so the lightbox never
+// shows a broken image (storage that cannot be reached answers 503 instead,
+// see answerStorageUnavailable). The watermark application path is preserved so a
 // preview surfaced in the lightbox carries the same protection a
 // guest would see on the full original.
 // A preview that cannot be served falls back to the original, so the lightbox
@@ -695,9 +716,11 @@ router.get('/:slug/preview/:photoId',
         require('../../services/imageProcessor');
       const tierWidth = normalizeTierWidth(req.query.w, PREVIEW_WIDTHS);
 
-      // Lazy generation: ensurePreviewImage returns null on any
-      // failure (corrupt source, sharp OOM, storage unavailable, …).
-      // Fall back to the original so the lightbox always renders.
+      // Lazy generation: ensurePreviewImage returns null when it cannot
+      // make the rendition (corrupt source, sharp OOM, …). Fall back to the
+      // original so the lightbox always renders. It throws when the storage
+      // backend cannot be reached while checking the stored rendition; the
+      // catch below answers that with a 503.
       const previewPath = tierWidth
         ? (await ensurePreviewImageAtWidth(photo, tierWidth)) || (await ensurePreviewImage(photo))
         : await ensurePreviewImage(photo);
@@ -763,7 +786,10 @@ router.get('/:slug/preview/:photoId',
       } else {
         res.setHeader('Content-Length', stat.size);
         const stream = await storage.get(previewPath);
-        pipeStreamToResponse(stream, res, { context: `preview for photo ${photoId}` });
+        pipeStreamToResponse(stream, res, {
+          context: `preview for photo ${photoId}`,
+          onStorageUnavailable: answerStorageUnavailable,
+        });
       }
     } catch (error) {
       logger.error('Error serving preview image:', {
@@ -772,6 +798,7 @@ router.get('/:slug/preview/:photoId',
         eventId: req.event?.id,
       });
       if (res.headersSent) return;
+      if (isStorageUnavailableError(error)) return answerStorageUnavailable(res);
       try {
         await fallBackToOriginal(req, res, { id: req.params.photoId });
       } catch (fallbackError) {

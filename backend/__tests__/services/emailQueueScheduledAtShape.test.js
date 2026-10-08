@@ -27,13 +27,12 @@ const { bootCrmDb, seedMinimal } = require('../integration/helpers/crmDb');
 const SRC = path.join(__dirname, '../../src');
 // Every `db('email_queue').insert({ ... status: 'pending' ... })` in the
 // backend. adminEmail.js inserts an already-sent manual message and is not a
-// queue writer.
+// queue writer. Gallery notices (create, publish, send later) go through
+// galleryNotificationService → queueEmail.
 const PENDING_WRITERS = [
   'services/emailProcessor.js',
-  'services/eventCreationService.js',
   'services/projectService.js',
   'services/newsletterService.js',
-  'routes/adminEvents/crud.js',
 ];
 
 describe('every pending-row writer names scheduled_at', () => {

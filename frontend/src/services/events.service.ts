@@ -1,5 +1,5 @@
 import { api } from '../config/api';
-import type { Event, GuestNameMode } from '../types';
+import type { AssignedAdmin, Event, GuestNameMode } from '../types';
 import { normalizeRequirePassword } from '../utils/accessControl';
 import { toBoolean } from '../utils/parsers';
 
@@ -55,6 +55,10 @@ interface CreateEventData {
   // customer_accounts.id; backend service diffs against the existing
   // assignments and applies inserts/deletes inside the same transaction.
   customer_account_ids?: number[];
+  // Team members (issue 743): admin accounts that reach this gallery the way
+  // its creator does, and whether their uploads wait for review.
+  assigned_admin_ids?: number[];
+  review_contributor_uploads?: boolean;
   // Custom styling switch; off = follow the global Branding theme.
   custom_theme_enabled?: boolean;
   // Photo source; import_now starts the folder's first import on create.
@@ -101,6 +105,10 @@ interface UpdateEventData {
   // Customer accounts (#354). Same semantics as on CreateEventData;
   // omit the field to leave assignments untouched, send [] to clear.
   customer_account_ids?: number[];
+  // Team members (issue 743), the owner's to change. Omit to leave the team
+  // untouched, send [] to clear.
+  assigned_admin_ids?: number[];
+  review_contributor_uploads?: boolean;
 }
 
 /** Two-stage delivery state of one gallery (issue 1562). */
@@ -121,8 +129,20 @@ export interface DeliveryState {
 export interface CompleteDeliveryResult {
   completed: boolean;
   email_queued: boolean;
+  /** Who the "complete gallery" mail was queued for. */
+  recipients?: GalleryNoticeRecipients;
   duplicate_photo_ids: number[];
   state: DeliveryState;
+}
+
+/** Who a gallery notice was queued for (galleryNotificationService.describeRecipients). */
+export interface GalleryNoticeRecipients {
+  /** Got the standard gallery email. */
+  email: string | null;
+  /** How many accounts got their customer portal email. */
+  account_count: number;
+  /** Who they are — empty without customers.view. */
+  accounts: Array<{ id: number; name: string; email: string }>;
 }
 
 export interface DownloadLimitUsage {
@@ -210,6 +230,12 @@ export const eventsService = {
       return data.map((event: Event) => normalizeEvent(event)) as any;
     }
     return data;
+  },
+
+  // Admin accounts a gallery's team can be picked from (issue 743).
+  async getAssignableAdmins(): Promise<AssignedAdmin[]> {
+    const response = await api.get<{ admins: AssignedAdmin[] }>('/admin/events/assignable-admins');
+    return response.data.admins;
   },
 
   // Get single event details (admin)
@@ -426,7 +452,7 @@ export const eventsService = {
   async sendGalleryEmail(
     eventId: number,
     options?: { password?: string },
-  ): Promise<{ message: string; recipient: string }> {
+  ): Promise<{ message: string; recipient: string; recipients?: GalleryNoticeRecipients }> {
     const body = options?.password ? { password: options.password } : undefined;
     const response = await api.post(`/admin/events/${eventId}/send-gallery-email`, body);
     return response.data;

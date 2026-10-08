@@ -20,7 +20,8 @@ import { safeParseDate, eventHasGuests } from './event-details/utils';
 import type { EventDetailsTab } from './event-details/types';
 import { EventDetailsHeader } from './event-details/EventDetailsHeader';
 import { EventTabs } from './event-details/EventTabs';
-import { OverviewTab } from './event-details/OverviewTab';
+import { OverviewTab, eventNotice, useAccountReach } from './event-details/OverviewTab';
+import { formatNameList } from '../../utils/galleryRecipients';
 import { PhotosTab } from './event-details/PhotosTab';
 import { EventSettingsTab } from './event-details/settings/EventSettingsTab';
 import { useEventSettingsDraft } from './event-details/settings/useEventSettingsDraft';
@@ -125,6 +126,7 @@ export const EventDetailsPage: React.FC = () => {
     hasComments: false,
     colorLabels: [],
     myColorLabels: [],
+    decisions: [],
     logic: 'AND'
   });
 
@@ -135,6 +137,11 @@ export const EventDetailsPage: React.FC = () => {
     queryFn: () => eventsService.getEvent(parseInt(id!)),
     enabled: !!id,
   });
+  // Who the publish / send dialogs announce the gallery to.
+  const reach = useAccountReach();
+  const notice = event
+    ? eventNotice(event, reach)
+    : { inlineEmail: null, accountNames: [], accountCount: 0, skippedAccountCount: 0 };
 
   // Flip the expiry banner live when the timestamp passes with the page open (#909).
   const [, setExpiryTick] = useState(0);
@@ -167,6 +174,7 @@ export const EventDetailsPage: React.FC = () => {
     minRating: feedbackFilters.minRating ?? undefined,
     colorLabels: feedbackFilters.colorLabels?.length ? feedbackFilters.colorLabels : undefined,
     myColorLabels: feedbackFilters.myColorLabels?.length ? feedbackFilters.myColorLabels : undefined,
+    decisions: feedbackFilters.decisions?.length ? feedbackFilters.decisions : undefined,
     logic: feedbackFilters.logic,
   }), [photoFilters, feedbackFilters]);
 
@@ -267,9 +275,19 @@ export const EventDetailsPage: React.FC = () => {
       eventsService.sendGalleryEmail(parseInt(id!), password ? { password } : undefined),
     onSuccess: (result) => {
       // #1262 — queueing is not delivery; point at where the queue is visible.
+      // Account names come back only with customers.view; otherwise a count.
+      const sent = result.recipients;
+      const names = sent
+        ? [sent.email, ...(sent.accounts.length > 0
+          ? sent.accounts.map((a) => a.name)
+          : sent.account_count > 0
+            ? [t('events.recipients.accountCount', { count: sent.account_count, defaultValue: '{{count}} customer accounts' })]
+            : [])].filter((n): n is string => !!n)
+        : [];
+      const recipient = names.length > 0 ? formatNameList(names, t) : result.recipient;
       toast.success(
         `${t('events.sendGalleryEmail.success', {
-          recipient: result.recipient,
+          recipient,
           defaultValue: 'Gallery email queued to {{recipient}}.',
         })} ${t('events.emailQueuedHint', 'The queue processor sends it — check System health if it does not arrive.')}`,
       );
@@ -341,7 +359,9 @@ export const EventDetailsPage: React.FC = () => {
       branding={(publicSettings?.theme_config as ThemeConfig | undefined) ?? null}
     >
       {(settings) => (
-        <div>
+        // On Settings the page fills the window from lg (useFillViewport in
+        // EventSettingsTab): the header and tabs stay, the panes scroll.
+        <div className={activeTab === 'settings' ? 'lg:flex-1 lg:min-h-0 lg:flex lg:flex-col' : undefined}>
           <EventDetailsHeader
             event={event}
             setShowRenameDialog={setShowRenameDialog}
@@ -473,22 +493,27 @@ export const EventDetailsPage: React.FC = () => {
             <PublishGalleryDialog
               eventName={event.event_name}
               requirePassword={!isGalleryPublic(event.require_password)}
-              customerEmail={event.customer_email}
+              inlineEmail={notice.inlineEmail}
               customerPhone={event.customer_phone}
-              assignedCustomerCount={((event as { customer_accounts?: Array<{ id: number }> }).customer_accounts || []).length}
+              accountNames={notice.accountNames}
+              accountCount={notice.accountCount}
+              skippedAccountCount={notice.skippedAccountCount}
               isPublishing={publishMutation.isPending}
               onConfirm={(password, notifyCustomer) => publishMutation.mutate({ password, notifyCustomer })}
               onClose={() => { if (!publishMutation.isPending) setShowPublishDialog(false); }}
             />
           )}
 
-          {/* Send gallery email (#1235). Only the inline-email path carries
-              the password; the account fallback sends a portal link. */}
+          {/* Send gallery email (#1235). Only the standard gallery email
+              carries the password; the accounts get a portal link. */}
           {showSendEmailDialog && (
             <SendGalleryEmailDialog
               eventName={event.event_name}
-              recipient={event.customer_email}
-              requirePassword={!!event.customer_email && !isGalleryPublic(event.require_password)}
+              inlineEmail={notice.inlineEmail}
+              accountNames={notice.accountNames}
+              accountCount={notice.accountCount}
+              skippedAccountCount={notice.skippedAccountCount}
+              requirePassword={!!notice.inlineEmail && !isGalleryPublic(event.require_password)}
               isSending={sendGalleryEmailMutation.isPending}
               onConfirm={(password) => sendGalleryEmailMutation.mutate(password)}
               onClose={() => { if (!sendGalleryEmailMutation.isPending) setShowSendEmailDialog(false); }}

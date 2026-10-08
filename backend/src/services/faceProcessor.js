@@ -177,6 +177,9 @@ async function processPhotoFaces(photoId) {
   // A photo whose source really is gone still returns null and lands in the
   // 'failed' branch below, which is the honest outcome — that is a broken
   // photo, not an unsupported one.
+  // Throws when the storage backend cannot be reached while the stored
+  // preview is checked (issue 1785); faceQueue retries that, it is not this
+  // photo's fault.
   const previewKey = await ensurePreviewImage(photo);
   if (!previewKey) {
     // Before failing the photo, check whether it is the STORAGE that is gone

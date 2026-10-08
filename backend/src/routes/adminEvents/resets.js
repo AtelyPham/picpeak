@@ -4,7 +4,7 @@
 
 const { db, logActivity } = require('../../database/db');
 const { adminAuth } = require('../../middleware/auth');
-const { requirePermission } = require('../../middleware/permissions');
+const { requirePermission, userHasAnyPermission } = require('../../middleware/permissions');
 const bcrypt = require('bcrypt');
 const { queueEmail } = require('../../services/emailProcessor');
 const { galleryPasswordColumns, readGalleryPassword, dropCopiesIfStorageOff } = require('../../utils/galleryPasswordVault');
@@ -13,22 +13,25 @@ const { validatePasswordInContext, getBcryptRounds } = require('../../utils/pass
 const logger = require('../../utils/logger');
 const { errorResponse } = require('../../utils/routeHelpers');
 const { buildShareLinkVariants } = require('../../services/shareLinkService');
-const { requireEventOwnership, scopeEventsQuery } = require('../../middleware/ownership');
+const { requireEventOwner, scopeEventsQuery } = require('../../middleware/ownership');
 const { getAbsoluteFrontendUrl } = require('../../utils/frontendUrl');
 const { parseBooleanInput } = require('../../utils/parsers');
+const {
+  resolveGalleryRecipients, notifyGalleryRecipients, describeRecipients, recipientSummary, passwordKnownColumns,
+} = require('../../services/galleryNotificationService');
 
 module.exports = (router) => {
 
 
   // Reset event password
-  router.post('/:id/reset-password', adminAuth, requirePermission(['events.edit', 'events.support']), requireEventOwnership, async (req, res) => {
+  router.post('/:id/reset-password', adminAuth, requirePermission(['events.edit', 'events.support']), requireEventOwner, async (req, res) => {
     try {
       const { id } = req.params;
       const { sendEmail = true, password: clientPassword } = req.body;
 
-      // Ownership: the rule requireEventOwnership already enforced, kept as
+      // Ownership: the rule requireEventOwner already enforced, kept as
       // defence in depth (issue 1670, §2.4).
-      const event = await scopeEventsQuery(db('events').where('id', id), req.admin).first();
+      const event = await scopeEventsQuery(db('events').where('id', id), req.admin, 'created_by', { assignments: false }).first();
       if (!event) {
         return res.status(404).json({ error: 'Event not found' });
       }
@@ -60,7 +63,9 @@ module.exports = (router) => {
         newPassword = generateReadablePassword();
       }
       const passwordHash = await bcrypt.hash(newPassword, getBcryptRounds());
-      const copyColumns = await galleryPasswordColumns({ password: newPassword });
+      // The admin sees this password in the response, so it is no longer the
+      // generated one nobody knows (migration 264).
+      const copyColumns = { ...(await galleryPasswordColumns({ password: newPassword })), ...(await passwordKnownColumns()) };
       // An admin-chosen password equal to the current one is not a change; it
       // keeps the hash only while the stored hash is still the one compared.
       // A generated password is always new. #1271 — the copy is written in the
@@ -130,24 +135,17 @@ module.exports = (router) => {
   });
 
   // Resend creation email
-  router.post('/:id/resend-email', adminAuth, requirePermission(['events.edit', 'events.support']), requireEventOwnership, async (req, res) => {
+  router.post('/:id/resend-email', adminAuth, requirePermission(['events.edit', 'events.support']), requireEventOwner, async (req, res) => {
     try {
       const { id } = req.params;
 
       // Get event details
-      // Ownership: the rule requireEventOwnership already enforced, kept as
+      // Ownership: the rule requireEventOwner already enforced, kept as
       // defence in depth (issue 1670, §2.4).
-      const event = await scopeEventsQuery(db('events').where('id', id), req.admin).first();
+      const event = await scopeEventsQuery(db('events').where('id', id), req.admin, 'created_by', { assignments: false }).first();
 
       if (!event) {
         return res.status(404).json({ error: 'Event not found' });
-      }
-
-      // The email is optional at creation and can be cleared later (issue
-      // 1733), so there may be nobody to send to. Say so instead of
-      // answering "queued" for a row the processor could never deliver.
-      if (!(event.customer_email || event.host_email)) {
-        return res.status(400).json({ error: 'The event has no customer email to send to' });
       }
 
       // The email processor will determine the language based on:
@@ -178,41 +176,65 @@ module.exports = (router) => {
     
       // Dates will be formatted by the email processor based on recipient language
     
-      // Queue the email
-      const recipientEmail = event.customer_email || event.host_email;
-      const recipientName = event.customer_name || event.host_name || (recipientEmail ? recipientEmail.split('@')[0] : null);
+      // Everyone the gallery was announced to: the inline address (unless it
+      // is one of the assigned accounts) and every reachable account. The
+      // email is optional at creation and can be cleared later (issue 1733),
+      // so there may be nobody to send to; say so instead of answering
+      // "queued" for a row the processor could never deliver.
+      const recipients = await resolveGalleryRecipients(event, {
+        includeAccounts: await userHasAnyPermission(req.admin.id, ['customers.events']),
+      });
+      if (!recipients.inlineEmail && recipients.accounts.length === 0) {
+        return res.status(400).json({ error: 'The event has no customer email to send to' });
+      }
       // event.share_link is the path-only form; use the full URL so the
       // customer's mail client renders a clickable absolute link.
       const { shareUrl } = await buildShareLinkVariants({ slug: event.slug, shareToken: event.share_token });
 
-      const emailData = {
-        customer_name: recipientName,
-        customer_email: recipientEmail,
-        host_name: recipientName,
-        event_name: event.event_name,
-        event_date: event.event_date,  // Pass raw date - will be formatted by email processor
-        gallery_link: shareUrl,
-        gallery_password: galleryPassword,
-        expiry_date: event.expires_at,  // Pass raw date - will be formatted by email processor
-        welcome_message: event.welcome_message || '',
-        eventId: id,
-        isResend: true // Flag to indicate this is a resend
+      const frontendUrl = await getAbsoluteFrontendUrl(req, { override: process.env.APP_URL });
+
+      // Built for whichever address actually gets the standard email — the
+      // inline one, or the folded-in one when its account notice is skipped.
+      const emailDataFor = (recipientEmail) => {
+        const recipientName = event.customer_name || event.host_name || (recipientEmail ? recipientEmail.split('@')[0] : null);
+        const emailData = {
+          customer_name: recipientName,
+          customer_email: recipientEmail,
+          host_name: recipientName,
+          event_name: event.event_name,
+          event_date: event.event_date,  // Pass raw date - will be formatted by email processor
+          gallery_link: shareUrl,
+          gallery_password: galleryPassword,
+          expiry_date: event.expires_at,  // Pass raw date - will be formatted by email processor
+          welcome_message: event.welcome_message || '',
+          eventId: id,
+          isResend: true // Flag to indicate this is a resend
+        };
+        // The creation mail carries the client link and PIN (#172). A resend can
+        // only do the same when a stored PIN exists (#1271); otherwise the client
+        // section is left out rather than sent with a placeholder.
+        if (parseBooleanInput(event.client_access_enabled, false) && stored.clientPassword && event.client_share_token) {
+          emailData.client_link = `${frontendUrl}/gallery/${event.slug}/client-access?token=${event.client_share_token}`;
+          emailData.client_password = stored.clientPassword;
+        }
+        return emailData;
       };
-      // The creation mail carries the client link and PIN (#172). A resend can
-      // only do the same when a stored PIN exists (#1271); otherwise the client
-      // section is left out rather than sent with a placeholder.
-      if (parseBooleanInput(event.client_access_enabled, false) && stored.clientPassword && event.client_share_token) {
-        const frontendUrl = await getAbsoluteFrontendUrl(req, { override: process.env.APP_URL });
-        emailData.client_link = `${frontendUrl}/gallery/${event.slug}/client-access?token=${event.client_share_token}`;
-        emailData.client_password = stored.clientPassword;
+
+      const sent = await notifyGalleryRecipients(event, {
+        recipients,
+        buildInlineEmailData: emailDataFor,
+      });
+      // Nothing queued — the only notice was skipped, or the queue refused —
+      // must not read as a resend.
+      if (!sent.inlineEmail && sent.accounts.length === 0) {
+        return res.status(400).json({ error: 'No email could be queued for this gallery' });
       }
-      await queueEmail(id, recipientEmail, 'gallery_created', emailData);
-    
+
       // Log the activity using the proper schema
       try {
         await logActivity('email_resent', {
-          email_type: 'gallery_created',
-          recipient: recipientEmail,
+          email_type: sent.inlineEmail ? 'gallery_created' : 'customer_gallery_assigned',
+          recipient: recipientSummary(sent),
           ip_address: req.ip || '0.0.0.0',
           user_agent: req.get('user-agent') || 'Unknown'
         }, id, {
@@ -226,8 +248,11 @@ module.exports = (router) => {
       }
     
       res.json({
-        usedStoredPassword, 
+        usedStoredPassword,
         success: true,
+        recipients: describeRecipients(sent, {
+          withIdentities: await userHasAnyPermission(req.admin.id, ['customers.view']),
+        }),
         message: 'Creation email has been queued for sending'
       });
     } catch (error) {

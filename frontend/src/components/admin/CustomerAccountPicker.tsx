@@ -21,6 +21,8 @@ export interface SelectedCustomer {
   id: number;
   email: string;
   displayName: string | null;
+  /** Never invited, so cannot sign in to the portal (password_hash IS NULL). */
+  isPassive?: boolean;
   /** Their customer groups (#1443), when the admin may read customers. */
   groups?: CustomerGroup[];
 }
@@ -120,7 +122,7 @@ export const CustomerAccountPicker: React.FC<Props> = ({ value, onChange, disabl
   }, []);
 
   const select = (c: CustomerAccountSummary) => {
-    onChange([...value, { id: c.id, email: c.email, displayName: c.displayName, groups: c.groups }]);
+    onChange([...value, { id: c.id, email: c.email, displayName: c.displayName, isPassive: c.isPassive, groups: c.groups }]);
     setQuery('');
     setResults([]);
     setIsOpen(false);
@@ -131,7 +133,7 @@ export const CustomerAccountPicker: React.FC<Props> = ({ value, onChange, disabl
   };
 
   const created = (c: CustomerAccountSummary) => {
-    onChange([...value, { id: c.id, email: c.email, displayName: c.displayName, groups: c.groups }]);
+    onChange([...value, { id: c.id, email: c.email, displayName: c.displayName, isPassive: c.isPassive, groups: c.groups }]);
     setIsCreating(false);
     setQuery('');
     setResults([]);

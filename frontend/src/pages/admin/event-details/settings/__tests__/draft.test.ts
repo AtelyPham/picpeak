@@ -43,6 +43,25 @@ describe('event settings draft', () => {
     expect(payload).toEqual({ welcome_message: 'Hi', photo_cap: 50 });
   });
 
+  it('sends the team and the review switch only when the owner changed them (issue 743)', () => {
+    const base = eventFieldsFromEvent({
+      ...EVENT,
+      assigned_admins: [{ id: 7, username: 'anna', role_name: 'Team Photographer' }],
+      review_contributor_uploads: 0,
+    } as unknown as Event, branding);
+    expect(base.assigned_admins.map((a) => a.id)).toEqual([7]);
+    expect(base.review_contributor_uploads).toBe(false);
+    // A team member's save of other fields never carries them.
+    expect(eventUpdatePayload({ ...base, welcome_message: 'Hi' }, base, t)).toEqual({ welcome_message: 'Hi' });
+
+    const payload = eventUpdatePayload({
+      ...base,
+      assigned_admins: [...base.assigned_admins, { id: 9, username: 'ben', role_name: null }],
+      review_contributor_uploads: true,
+    }, base, t);
+    expect(payload).toEqual({ assigned_admin_ids: [7, 9], review_contributor_uploads: true });
+  });
+
   it('switching custom styling off keeps the stored theme untouched', () => {
     const on = eventFieldsFromEvent({ ...EVENT, custom_theme_enabled: true } as Event, branding);
     const payload = eventUpdatePayload({ ...on, custom_theme_enabled: false }, on, t);
@@ -195,5 +214,24 @@ describe('event settings draft', () => {
     expect(eventFieldsFromEvent({ ...withHeader, custom_theme_enabled: false } as Event, branding).theme.headerStyle).toBe('standard');
     // On: the gallery renders its own column.
     expect(eventFieldsFromEvent({ ...withHeader, custom_theme_enabled: true } as Event, branding).theme.headerStyle).toBe('minimal');
+  });
+
+  it('asks for a password before a customer email reaches a gallery whose password was generated', () => {
+    const portalOnly = { ...EVENT, customer_email: null, password_generated: 1 } as unknown as Event;
+    const base = eventFieldsFromEvent(portalOnly, branding);
+    expect(base.generated_password_pending).toBe(true);
+
+    const withEmail = { ...base, customer_email: 'client@example.com' };
+    expect(() => eventUpdatePayload(withEmail, base, t)).toThrow(DraftValidationError);
+
+    const payload = eventUpdatePayload(
+      { ...withEmail, new_password: 'Sunrise-Lake-42', confirm_new_password: 'Sunrise-Lake-42' }, base, t,
+    );
+    expect(payload).toMatchObject({ customer_email: 'client@example.com', password: 'Sunrise-Lake-42' });
+  });
+
+  it('does not ask galleries whose password an admin typed', () => {
+    const base = eventFieldsFromEvent({ ...EVENT, customer_email: null } as unknown as Event, branding);
+    expect(eventUpdatePayload({ ...base, customer_email: 'client@example.com' }, base, t)).toMatchObject({ customer_email: 'client@example.com' });
   });
 });

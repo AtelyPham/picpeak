@@ -665,7 +665,8 @@
     "confirmEmailForSsoDialog": {
       "title": "Confirm this email for SSO?",
       "message": "Confirm {{email}} as {{name}}'s address? A single sign-on login that arrives with this verified email will then be linked to this account. The address itself is not changed. Only confirm it if you know it belongs to them."
-    }
+    },
+    "creditNameHelp": "Credited on photos this account uploads when the file has no photographer name in its metadata."
   },
   "systemHealth": {
     "retry": "Retry",
@@ -1773,14 +1774,13 @@
     "inactive": "Inactive",
     "expired": "Expired",
     "draft": "Draft",
+    "publish": "Publish",
     "publishAndNotify": "Publish & Notify Client",
     "publishConfirm": "This will make the gallery accessible and send the notification email to the client. Continue?",
     "publishSuccess": "Gallery published and client notified!",
     "publishDialog": {
       "title": "Publish gallery",
-      "descriptionWithEmail": "Publishing \"{{eventName}}\" makes the gallery accessible and sends the notification email to {{customerEmail}}.",
       "descriptionNoEmail": "Publishing \"{{eventName}}\" makes the gallery accessible. No customer email is set, so no notification will be sent.",
-      "descriptionAssignedAccount": "Publishing \"{{eventName}}\" makes the gallery accessible. The assigned customer account(s) will be notified by email (in their language) that it is available.",
       "justPublish": "Publish",
       "passwordLabel": "Gallery password",
       "passwordPlaceholder": "Enter the gallery password",
@@ -1790,8 +1790,7 @@
       "notifyHelp": "Uncheck to publish quietly — the gallery goes live and nothing is sent. You can send the email later from this page.",
       "descriptionQuiet": "Publishing \"{{eventName}}\" makes the gallery accessible. No email will be sent — you can send it later from this page.",
       "descriptionWhatsapp": "Publishing \"{{eventName}}\" makes the gallery accessible. If WhatsApp is configured, the customer is notified there.",
-      "descriptionAssignedAccount_one": "Publishing \"{{eventName}}\" makes the gallery accessible. The assigned customer account(s) will be notified by email (in their language) that it is available.",
-      "descriptionAssignedAccount_other": "Publishing \"{{eventName}}\" makes the gallery accessible. The assigned customer account(s) will be notified by email (in their language) that it is available."
+      "descriptionNotify": "Publishing \"{{eventName}}\" makes the gallery accessible and notifies:"
     },
     "duplicateEvent": "Duplicate gallery",
     "duplicateDialog": {
@@ -1950,8 +1949,8 @@
       "confirm": "Send the gallery email to {{recipient}}?",
       "success": "Gallery email queued to {{recipient}}.",
       "title": "Send gallery email",
-      "description": "Sends the gallery link for \"{{eventName}}\" to {{recipient}}.",
-      "passwordHelp": "The email includes this exact text. Re-type the gallery password (or pick a new one) — the backend re-hashes it so the login still works."
+      "passwordHelp": "The email includes this exact text. Re-type the gallery password (or pick a new one) — the backend re-hashes it so the login still works.",
+      "descriptionList": "Sends the gallery link for \"{{eventName}}\" to:"
     },
     "bulkArchive": {
       "title": "Confirm Bulk Archive",
@@ -2153,10 +2152,14 @@
         "folderStructureOn": "Folder structure on",
         "folderStructureOff": "Flat uploads",
         "firstLookDue": "first look, full gallery by {{date}}",
-        "firstLook": "first look, more to come"
+        "firstLook": "first look, more to come",
+        "teamMembers_one": "{{count}} team member",
+        "teamMembers_other": "{{count}} team members",
+        "teamReview": "team uploads reviewed"
       },
       "undoSection": "Undo changes in this section",
-      "delivery": "Folders & delivery"
+      "delivery": "Folders & delivery",
+      "passwordOwnerOnly": "Only the gallery owner can change the password or turn it off."
     },
     "folders": {
       "sectionTitle": "Folders",
@@ -2187,7 +2190,7 @@
       "completeTitle": "Mark the full gallery as ready?",
       "completeBody": "The banner and the placeholder tiles disappear. The first-look badges stay. Guests then see {{count}} photos.",
       "sendMail": "Send the \"your complete gallery is ready\" email",
-      "sendMailHelp": "To the customer email of this gallery. Workflows can also react to \"gallery.completed\".",
+      "sendMailHelp": "Workflows can also react to \"gallery.completed\".",
       "removeDuplicates": "Remove {{count}} first-look duplicates",
       "removeDuplicatesHelp": "First-look photos found again in the full set: same original filename, unique on both sides, and the same capture time (or, without one, the same size). Deleting is permanent; the copies in the full set take over the badge.",
       "removeDuplicatesNoPermission": "Deleting photos needs the photos.delete permission.",
@@ -2212,6 +2215,33 @@
       "removeDuplicates_one": "Remove {{count}} first-look duplicate",
       "removeDuplicates_other": "Remove {{count}} first-look duplicates",
       "duplicatesNotRemoved": "The gallery is complete, but the first-look duplicates could not be removed. Delete them from the Photos tab."
+    },
+    "recipients": {
+      "andMore": "{{names}} +{{count}} more",
+      "galleryEmail": "Gallery email",
+      "portalEmail": "Customer portal email",
+      "previewTitle": "Notified when you publish the gallery:",
+      "generatedPasswordNote": "Customers sign in through their customer portal, so no gallery password is needed. A strong one is generated to keep the gallery link locked. If you add a customer email later, you set a password then.",
+      "passwordForEmailRequired": "Set a gallery password before adding the customer email — the gallery email carries it.",
+      "passwordForEmailHint": "This gallery was shared through the customer portal only, so its password was generated and nobody knows it. The gallery email to this address includes the password, so set one now.",
+      "accountCount_one": "{{count}} customer account",
+      "accountCount_other": "{{count}} customer accounts",
+      "whatsapp": "WhatsApp",
+      "skippedAccounts_one": "{{count}} customer account is not notified — that needs the customers.events permission",
+      "skippedAccounts_other": "{{count}} customer accounts are not notified — that needs the customers.events permission"
+    },
+    "team": {
+      "label": "Team members",
+      "help": "Admin accounts added here can work on this gallery like you, within what their role allows. Customer and billing data stay yours.",
+      "removeAria": "Remove {{name}}",
+      "placeholder": "Search admin accounts",
+      "loading": "Loading…",
+      "loadFailed": "The admin accounts could not be loaded.",
+      "noResults": "No other admin accounts match.",
+      "reviewUploads": "Review team members' uploads before they are published",
+      "reviewUploadsHelp": "Holds uploads from team members whose role lacks the “Review Team Uploads” permission: they stay hidden from guests and clients until you or a reviewer approve them on the Photos tab. The Admin, Editor and Solo Photographer roles hold that permission by default, so their uploads are never held.",
+      "reviewUploadsHelpMember": "Your uploads to this gallery stay hidden from guests and clients until the owner or a reviewer approves them.",
+      "reviewUploadsHelpReviewer": "Uploads from team members without the “Review Team Uploads” permission wait for approval on the Photos tab. Yours are published right away."
     }
   },
   "settings": {
@@ -2268,7 +2298,9 @@
       "timeFormatHelp": "Controls how times render across admin views, customer-facing pages, and PDFs. Storage stays 24-hour (HH:mm); only the display switches.",
       "adminLanguage": "Your admin language",
       "adminLanguageHelp": "Applies to the admin area, for you on this device only. It takes effect immediately — no need to save.",
-      "customerLanguage": "Gallery & guest language"
+      "customerLanguage": "Gallery & guest language",
+      "accountCreditName": "Photo credit",
+      "accountCreditNameHelp": "Credited on photos you upload when the file has no photographer name in its metadata. Leave empty for no credit."
     },
     "publicSite": {
       "badge": "Public Landing",
@@ -2492,7 +2524,8 @@
       "firstLookKeywords": "Keywords",
       "firstLookKeywordsHelp": "Comma-separated. Case, spaces, dashes and underscores are ignored, so \"FirstLook\" also matches \"first-look\".",
       "deliveryDays": "Full gallery due after (days)",
-      "deliveryDaysHelp": "When a first look starts without a promised date, the full gallery is due this many days after the event date."
+      "deliveryDaysHelp": "When a first look starts without a promised date, the full gallery is due this many days after the event date.",
+      "defaultAllowDecisions": "Approve / reject per photo"
     },
     "imageSecurity": {
       "title": "Image Protection",
@@ -4255,7 +4288,14 @@
       "apiPhotoDownloaded": "Original downloaded from {{eventName}} with API token #{{token_id}}",
       "apiPhotosDownloaded_one": "API token “{{token_name}}” downloaded {{count}} original from {{eventName}}",
       "apiPhotosDownloaded_other": "API token “{{token_name}}” downloaded {{count}} originals from {{eventName}}",
-      "apiPhotosZipDownloaded": "API token “{{token_name}}” downloaded a ZIP of {{photo_count}} originals from {{eventName}}"
+      "apiPhotosZipDownloaded": "API token “{{token_name}}” downloaded a ZIP of {{photo_count}} originals from {{eventName}}",
+      "eventTeamChanged": "Team changed for {{eventName}}",
+      "photosReviewApproved_one": "{{count}} team upload approved in {{eventName}}",
+      "photosReviewApproved_other": "{{count}} team uploads approved in {{eventName}}",
+      "photosReviewRejected_one": "{{count}} team upload rejected in {{eventName}}",
+      "photosReviewRejected_other": "{{count}} team uploads rejected in {{eventName}}",
+      "photoDecision": "Photo approved or rejected in {{eventName}}",
+      "guestFeedbackDecision": "Guest approved or rejected a photo in {{eventName}}"
     },
     "notificationToasts": {
       "markedAllRead": "All notifications marked as read",
@@ -4341,7 +4381,9 @@
         "filterLabel": "Filter by credit",
         "filterAll": "All names",
         "filterNone": "No name"
-      }
+      },
+      "approvedBy": "Approved: {{value}}",
+      "rejectedBy": "Rejected: {{value}}"
     },
     "events": {
       "tabs": {
@@ -4640,7 +4682,14 @@
       "self_update_request_failed": "In-app update not started: the request could not be filed",
       "self_update_expired": "In-app update request withdrawn: the updater did not pick it up",
       "self_update_withdrawn": "In-app update request cancelled",
-      "self_update_finished": "In-app update finished: {{state}} ({{from_version}} → {{to_version}})"
+      "self_update_finished": "In-app update finished: {{state}} ({{from_version}} → {{to_version}})",
+      "photo_decision": "Photo approved or rejected in {{eventName}}",
+      "guest_feedback_decision": "Guest approved or rejected a photo in {{eventName}}",
+      "event_team_changed": "Team changed for {{eventName}}",
+      "photos_review_approved_one": "{{count}} team upload approved in {{eventName}}",
+      "photos_review_approved_other": "{{count}} team uploads approved in {{eventName}}",
+      "photos_review_rejected_one": "{{count}} team upload rejected in {{eventName}}",
+      "photos_review_rejected_other": "{{count}} team uploads rejected in {{eventName}}"
     },
     "people": {
       "title": "People in this gallery",
@@ -5008,6 +5057,7 @@
     "containerBgColorHelp": "The white card that holds the email content. Maps to Branding → Surface.",
     "listBgColor": "Info panel",
     "listBgColorHelp": "Background of the bulleted info panels inside the email body. Maps to Branding → Elevated.",
+    "listContrastWarning": "Body text is hard to read on the Info panel (contrast {{ratio}}:1, 4.5:1 recommended). Emails switch the panel text to a readable colour automatically, but matching colours look better.",
     "bodyTextColor": "Body text",
     "bodyTextColorHelp": "Paragraph and bold text colour. Maps to Branding → Primary text.",
     "mutedTextColor": "Footer text",
@@ -5843,7 +5893,9 @@
       "enableRateLimiting": "Enable Rate Limiting",
       "rateLimitingDesc": "Prevent spam by limiting feedback frequency",
       "timeWindow": "Time Window (minutes)",
-      "maxRequests": "Max Requests"
+      "maxRequests": "Max Requests",
+      "decisions": "Approve / reject per photo",
+      "decisionsDesc": "Guests approve or reject each photo, optionally saying why. You filter and export by their decision"
     },
     "moderated": "Feedback moderated",
     "deleted": "Feedback deleted",
@@ -5863,7 +5915,8 @@
       "like": "Likes",
       "comment": "Comments",
       "favorite": "Favorites",
-      "reaction": "Reactions"
+      "reaction": "Reactions",
+      "decision": "Approve / reject"
     },
     "allStatuses": "All Statuses",
     "status": {
@@ -5941,7 +5994,25 @@
     "removeColorLabel": "Remove {{color}} label",
     "setColorLabel": "Mark as {{color}}",
     "markedAs": "Marked as {{color}}",
-    "alsoMarkedBy": "Also marked by others: {{colors}}"
+    "alsoMarkedBy": "Also marked by others: {{colors}}",
+    "decisions": {
+      "approved": "Approved",
+      "rejected": "Rejected"
+    },
+    "totalDecisions": "Approved / rejected",
+    "decisionsTitle": "Approve / reject",
+    "decisionApprove": "Approve",
+    "decisionReject": "Reject",
+    "decisionClear": "Withdraw your decision",
+    "decisionReasonEdit": "Why? (optional)",
+    "decisionReasonLabel": "Why are you rejecting this photo? (optional)",
+    "decisionReasonPlaceholder": "e.g. eyes closed, not my best side",
+    "decisionReasonSave": "Save reason",
+    "decisionReasonBlocked": "Your reason contains words that are not allowed here.",
+    "decisionError": "Failed to save your decision",
+    "decisionType": "your decision",
+    "youApproved": "You approved this photo",
+    "youRejected": "You rejected this photo"
   },
   "filter": {
     "feedbackFilters": "Feedback Filters",
@@ -5964,7 +6035,11 @@
     "colorLabels": "Color labels",
     "showOnlyColor": "Show only {{color}}",
     "myColorLabels": "Your marks",
-    "showOnlyMyColor": "Show only my {{color}} marks"
+    "showOnlyMyColor": "Show only my {{color}} marks",
+    "decisions": "Approve / reject",
+    "decisionApproved": "Approved",
+    "decisionRejected": "Rejected",
+    "decisionUndecided": "Undecided"
   },
   "setup": {
     "title": "Welcome to PicPeak",
@@ -6370,6 +6445,29 @@
       "showWaiting": "Show waiting photos",
       "waitingForAdmin_one": "{{count}} folder request is waiting for an admin. Until then its {{photos}} photos sit in the closest existing folder.",
       "waitingForAdmin_other": "{{count}} folder requests are waiting for an admin. Until then their {{photos}} photos sit in the closest existing folder."
+    },
+    "review": {
+      "pendingOwner_one": "{{count}} upload from your team is waiting for your review",
+      "pendingOwner_other": "{{count}} uploads from your team are waiting for your review",
+      "pendingMember_one": "{{count}} team upload is waiting for the owner's review",
+      "pendingMember_other": "{{count}} team uploads are waiting for the owner's review",
+      "nonePending": "No uploads are waiting for review.",
+      "filterPending": "Pending review ({{count}})",
+      "filterRejected": "Rejected ({{count}})",
+      "showAll": "All photos",
+      "approve": "Approve",
+      "reject": "Reject",
+      "approved_one": "{{count}} photo approved and published",
+      "approved_other": "{{count}} photos approved and published",
+      "rejected_one": "{{count}} photo rejected",
+      "rejected_other": "{{count}} photos rejected",
+      "failed": "The photos could not be reviewed",
+      "pendingBadge": "Pending review",
+      "rejectedBadge": "Rejected",
+      "uploadedBy": "Uploaded by {{name}}",
+      "hiddenUntilApproved": "Hidden from guests and clients until approved",
+      "skippedOnShow_one": "{{count}} photo waits for review and stays hidden until it is approved",
+      "skippedOnShow_other": "{{count}} photos wait for review and stay hidden until they are approved"
     }
   },
   "customer": {

@@ -25,7 +25,9 @@ const { parseBooleanInput } = require('../../utils/parsers');
 const eventTypeService = require('../../services/eventTypeService');
 const { normaliseEventTimeTriple } = require('../../services/eventService');
 const { hasColumnCached } = require('../../utils/schemaCache');
-const { requireEventOwnership, scopeEventsListQuery, withoutForeignEventSecrets, scopeEventsQuery } = require('../../middleware/ownership');
+const { requireEventOwnership, requireEventOwner, scopeEventsListQuery, withoutForeignEventSecrets, scopeEventsQuery, ownsEvent } = require('../../middleware/ownership');
+const eventAdminAssignments = require('../../services/eventAdminAssignmentsService');
+const { mayReviewUploads, holdsForReview } = require('../../services/uploadReviewService');
 const { applyEventListSort } = require('./listSort');
 const { VIDEO_COUNT_SQL, VIDEO_DURATION_SQL } = require('../../utils/mediaTypeSql');
 
@@ -33,6 +35,10 @@ const { galleryPasswordColumns, dropCopiesIfStorageOff } = require('../../utils/
 const { credentialChangeColumns, sameAsStored } = require('../../utils/galleryCredentialCutoff');
 
 const { getFrontendBaseUrl, getAbsoluteFrontendUrl } = require('../../utils/frontendUrl');
+const {
+  resolveGalleryRecipients, galleryCreatedEmailData, notifyGalleryRecipients, describeRecipients, recipientSummary,
+  passwordKnownColumns,
+} = require('../../services/galleryNotificationService');
 const downloadZipService = require('../../services/downloadZipService');
 const { KEYBIND_MODES } = require('../../services/feedbackDefaults');
 const { GUEST_NAME_MODES } = require('../../services/photoCredit');
@@ -103,94 +109,6 @@ async function checkGalleryPasswordPolicy(password, eventName) {
     score: result.score,
     feedback: result.feedback,
   };
-}
-
-/**
- * Can this assigned customer account actually receive — and act on — the
- * gallery notice? (#1235)
- *
- * Shared by publish, by the send-later route, and mirrored by the UI that
- * decides whether to offer the button at all. All four have to agree, or the
- * admin gets an action that 400s, or worse, one that reports success for a
- * notice nobody can use.
- *
- * - `is_active`: compared loosely because SQLite stores it as 0/1 and a
- *   strict `!== false` lets 0 through.
- * - `can_sign_in`: a PASSIVE customer (password_hash IS NULL — see
- *   customerAccountsService.createDirect) is a real, active account that has
- *   simply never been invited. customer_gallery_assigned links to
- *   /customer/dashboard, and customerAuth rejects login without a hash, so
- *   mailing one sends a link to a door that will not open. Excluded here
- *   rather than mailed, because a silent non-delivery the admin believes
- *   succeeded is worse than a visible refusal. Sending them an invitation
- *   instead is the better answer, and a separate feature.
- * - the column is emitted by a raw SQL predicate, so it arrives as a boolean
- *   on Postgres and 0/1 on SQLite; `== false` and `=== 0` cover both, and
- *   undefined (older callers) stays permissive.
- */
-function canReceiveGalleryNotice(account) {
-  if (!account || !account.email) return false;
-  if (account.is_active === false || account.is_active === 0) return false;
-  if (account.can_sign_in === false || account.can_sign_in === 0) return false;
-  return true;
-}
-
-/**
- * Queue the gallery_created email for an event (#1235).
- *
- * Shared by publish and by the send-later route, because the two must produce
- * an identical email — an operator who publishes quietly and sends the mail a
- * week later should not get a subtly different message than one who published
- * loudly.
- *
- * The password is why this needs an argument at all: `password_hash` is a
- * hash, so the plaintext exists only in the request the admin just typed it
- * into (#627). Without one the email carries the legacy sentinel, exactly as an
- * API-only publish has always done.
- *
- * @returns {Promise<boolean>} false when the event has no inline recipient
- */
-async function queueGalleryCreatedEmail(event, { password, requirePassword } = {}) {
-  const customerEmail = event.customer_email || event.host_email;
-  if (!customerEmail) return false;
-
-  const customerName = event.customer_name || event.host_name;
-  const frontendBase = await getFrontendBaseUrl();
-  const { shareUrl } = await buildShareLinkVariants({
-    slug: event.slug, shareToken: event.share_token,
-  });
-
-  let galleryPasswordForEmail;
-  if (!requirePassword) {
-    galleryPasswordForEmail = 'No password required';
-  } else if (password) {
-    galleryPasswordForEmail = password;
-  } else {
-    galleryPasswordForEmail = '(set at creation)';
-  }
-
-  await db('email_queue').insert({
-    event_id: event.id,
-    recipient_email: customerEmail,
-    email_type: 'gallery_created',
-    email_data: JSON.stringify({
-      customer_name: customerName,
-      customer_email: customerEmail,
-      host_name: customerName || customerEmail.split('@')[0],
-      event_name: event.event_name,
-      event_date: event.event_date,
-      gallery_link: shareUrl || `${frontendBase}/gallery/${event.slug}`,
-      gallery_password: galleryPasswordForEmail,
-      expiry_date: event.expires_at ? new Date(event.expires_at).toISOString() : null,
-      welcome_message: event.welcome_message || ''
-    }),
-    status: 'pending',
-    created_at: new Date(),
-    // Explicit NULL: the column default is text on SQLite and never comes
-    // due (issue 1670) — see queueEmail.
-    scheduled_at: null
-  });
-  return true;
 }
 
 module.exports = (router) => {
@@ -275,6 +193,7 @@ module.exports = (router) => {
     body('allow_favorites').optional().isBoolean(),
     body('allow_reactions').optional().isBoolean(),
     body('allow_color_labels').optional().isBoolean(),
+    body('allow_decisions').optional().isBoolean(),
     body('keybind_mode').optional().isIn(KEYBIND_MODES),
     body('css_template_id').optional({ nullable: true, checkFalsy: true }).isInt(),
     // Hero logo settings
@@ -312,6 +231,10 @@ module.exports = (router) => {
     // customer_accounts.id — many-to-many via event_customer_assignments.
     body('customer_account_ids').optional().isArray(),
     body('customer_account_ids.*').optional().isInt({ min: 1 }),
+    // Team members and the review of their uploads (issue 743).
+    body('assigned_admin_ids').optional().isArray(),
+    body('assigned_admin_ids.*').optional().isInt({ min: 1 }),
+    body('review_contributor_uploads').optional().isBoolean(),
     // Custom styling switch (services/galleryTheme) and the photo source,
     // so a gallery is complete from the create form alone.
     body('custom_theme_enabled').optional().isBoolean(),
@@ -479,6 +402,18 @@ module.exports = (router) => {
     }
   });
 
+  // Admin accounts a gallery's team can be picked from (issue 743): id,
+  // username and role only. Registered before /:id, which would match it.
+  router.get('/assignable-admins', adminAuth, requirePermission('events.edit'), async (req, res) => {
+    try {
+      res.json({ admins: await eventAdminAssignments.listAssignableAdmins({
+        includeSuperAdmins: req.admin.roleName === 'super_admin',
+      }) });
+    } catch (error) {
+      errorResponse(res, error, 500, 'Failed to fetch admin accounts');
+    }
+  });
+
   // Get single event details
   router.get('/:id', adminAuth, requirePermission('events.view'), async (req, res) => {
     try {
@@ -555,8 +490,28 @@ module.exports = (router) => {
         logger.warn('Failed to load customer groups for event', { eventId: id, error: e.message });
       }
 
+      // Who a gallery notice would reach, as counts only: customer_accounts
+      // above is customers.view data, but every admin who may announce the
+      // gallery needs to know whether anyone is told. `folds_inline`: the
+      // inline address is one of the accounts and gets the portal email.
+      let galleryNotice = null;
+      try {
+        const { accounts, fallbackFor } = await resolveGalleryRecipients(event, { includeAccounts: true });
+        galleryNotice = { account_count: accounts.length, folds_inline: Boolean(fallbackFor) };
+      } catch (e) {
+        logger.warn('Failed to resolve gallery notice recipients', { eventId: id, error: e.message });
+      }
+
+      // The gallery's team (issue 743). Only the owner changes it; the owner
+      // or a holder of photos.review publishes the uploads it holds for review.
+      const assignedAdmins = await eventAdminAssignments.listAssignedAdmins(event.id);
+
       res.json(withoutForeignEventSecrets(mapEventForApi({
         ...event,
+        assigned_admins: assignedAdmins,
+        can_manage_assignments: ownsEvent(req.admin, event),
+        can_review_uploads: await mayReviewUploads(req.admin, event),
+        gallery_notice: galleryNotice,
         photo_count: parseInt(photoCount) || 0,
         video_count: Number(videoCount) || 0,
         video_duration: Number(videoDuration) || 0,
@@ -616,6 +571,11 @@ module.exports = (router) => {
       if (!event) {
         return res.status(404).json({ error: 'Event not found' });
       }
+      // A new gallery password is the owner's to set (issue 743), as reading
+      // and resetting it are; sending or publishing without one stays open.
+      if (password && !ownsEvent(req.admin, event)) {
+        return res.status(403).json({ error: 'Only the gallery owner can change its password', code: 'EVENT_OWNER_REQUIRED' });
+      }
       if (parseBooleanInput(event.is_draft, false)) {
         // A draft has no working gallery link yet, so the email would carry a
         // URL the customer cannot open. Publishing is the action they want.
@@ -636,82 +596,83 @@ module.exports = (router) => {
       }
 
       const requirePassword = parseBooleanInput(event.require_password, true);
-      const hasInlineRecipient = !!(event.customer_email || event.host_email);
+      // Everyone this send reaches: the inline address (unless it is one of
+      // the assigned accounts) and every reachable account.
+      const recipients = await resolveGalleryRecipients(event, {
+        includeAccounts: await userHasAnyPermission(req.admin.id, ['customers.events']),
+      });
+      if (!recipients.inlineEmail && recipients.accounts.length === 0) {
+        return res.status(400).json({ error: 'No customer email is set for this event' });
+      }
+      // A generated password was never shown to anyone (migration 264). The
+      // standard email would carry the "(set at creation)" sentinel instead,
+      // so it needs the real password in the request — the dialog asks for it.
+      const passwordGenerated = parseBooleanInput(event.password_generated, false);
+      // Only when the standard email is certain to go out: a folded-in address
+      // is mailed by the fallback only if its portal notice is skipped, and
+      // that fallback is withheld below rather than refused here — the dialog
+      // does not ask for a password it cannot know is needed.
+      const sentinelPassword = requirePassword && !password && passwordGenerated;
+      if (sentinelPassword && recipients.inlineEmail) {
+        return res.status(400).json({
+          error: 'Set a gallery password — the gallery email carries it.',
+          code: 'GALLERY_PASSWORD_REQUIRED',
+        });
+      }
 
       // Persist the password ONLY when the mail that carries it is actually
-      // going out (#627). The account-only fallback below sends
-      // customer_gallery_assigned, which links to the customer portal and
-      // never mentions a password — rehashing for that would silently change
-      // the live gallery password and lock out everyone holding the old one,
-      // in exchange for nothing.
-      if (hasInlineRecipient && requirePassword && password) {
+      // going out (#627). The account mail (customer_gallery_assigned) links to
+      // the customer portal and never mentions a password — rehashing for that
+      // would silently change the live gallery password and lock out everyone
+      // holding the old one, in exchange for nothing.
+      if (recipients.inlineEmail && requirePassword && password) {
         const policyError = await checkGalleryPasswordPolicy(password, event.event_name);
         if (policyError) return res.status(400).json(policyError);
 
         // Re-entering the current password is not a change: keep the hash and
         // the sessions opened with it. A new password ends those sessions.
         const copyColumns = await galleryPasswordColumns({ password });
+        const knownColumns = await passwordKnownColumns();
         // Kept only while the stored hash is still the one compared: a reset
         // landing in between must not leave this request's copy (and email)
         // disagreeing with the hash. Otherwise it is written as a change.
         const keptHash = await sameAsStored(password, event.password_hash)
           && await db('events').where({ id, password_hash: event.password_hash })
-            .update(Object.keys(copyColumns).length ? copyColumns : { updated_at: new Date().toISOString() });
+            .update({ ...copyColumns, ...knownColumns, updated_at: new Date().toISOString() });
         if (!keptHash) {
           await db('events').where('id', id).update({
             password_hash: await bcrypt.hash(password, getBcryptRounds()),
             ...(await credentialChangeColumns('gallery')),
             ...copyColumns,
+            ...knownColumns,
           });
         }
         await dropCopiesIfStorageOff(id);
       }
 
-      const queued = hasInlineRecipient
-        && await queueGalleryCreatedEmail(event, { password, requirePassword });
-      if (!queued) {
-        // No inline recipient, but the gallery may be assigned to registered
-        // customer account(s) — the same path publish takes. Without this the
-        // publish dialog's promise that the notice can be sent later is false
-        // for exactly those galleries.
-        let notified = 0;
-        try {
-          const customerAccountsService = require('../../services/customerAccountsService');
-          const assigned = await customerAccountsService.getAssignmentsForEvent(parseInt(id, 10));
-          for (const c of assigned.filter(canReceiveGalleryNotice)) {
-            await customerAccountsService
-              .notifyCustomerOfNewAssignments(c.id, [parseInt(id, 10)])
-              .then(() => { notified += 1; })
-              .catch((err) => logger.warn('Send gallery email: customer notice failed', { customerId: c.id, error: err.message }));
-          }
-        } catch (err) {
-          logger.warn('Send gallery email: assigned-customer lookup failed', { eventId: id, error: err.message });
-        }
-        if (notified > 0) {
-          await logActivity('gallery_email_sent',
-            { event_name: event.event_name, assigned_accounts: notified },
-            id,
-            { type: 'admin', id: req.admin.id, name: req.admin.username }
-          );
-          return res.json({
-            message: 'Gallery notice queued',
-            recipient: `${notified} assigned customer account(s)`,
-          });
-        }
-        return res.status(400).json({
-          error: 'No customer email is set for this event',
-        });
+      const sent = await notifyGalleryRecipients(event, {
+        recipients,
+        allowFallback: !sentinelPassword,
+        buildInlineEmailData: () => galleryCreatedEmailData(event, { password, requirePassword }),
+      });
+      if (!sent.inlineEmail && sent.accounts.length === 0) {
+        return res.status(400).json({ error: 'No customer email is set for this event' });
       }
 
       await logActivity('gallery_email_sent',
-        { event_name: event.event_name },
+        {
+          event_name: event.event_name,
+          ...(sent.accounts.length > 0 ? { assigned_accounts: sent.accounts.length } : {}),
+        },
         id,
         { type: 'admin', id: req.admin.id, name: req.admin.username }
       );
 
+      const withIdentities = await userHasAnyPermission(req.admin.id, ['customers.view']);
       res.json({
         message: 'Gallery email queued',
-        recipient: event.customer_email || event.host_email,
+        recipient: recipientSummary(sent, { withIdentities }),
+        recipients: describeRecipients(sent, { withIdentities }),
       });
     } catch (error) {
       errorResponse(res, error, 500, 'Failed to send the gallery email');
@@ -747,12 +708,38 @@ module.exports = (router) => {
       if (!event) {
         return res.status(404).json({ error: 'Event not found' });
       }
+      // A new gallery password is the owner's to set (issue 743), as reading
+      // and resetting it are; sending or publishing without one stays open.
+      if (password && !ownsEvent(req.admin, event)) {
+        return res.status(403).json({ error: 'Only the gallery owner can change its password', code: 'EVENT_OWNER_REQUIRED' });
+      }
 
       if (!parseBooleanInput(event.is_draft, false)) {
         return res.status(400).json({ error: 'Event is already published' });
       }
 
       const requirePassword = parseBooleanInput(event.require_password, true);
+      // Resolved before the gallery goes live, so a refusal below changes nothing.
+      const recipients = notifyCustomer
+        ? await resolveGalleryRecipients(event, {
+          includeAccounts: await userHasAnyPermission(req.admin.id, ['customers.events']),
+        })
+        : { inlineEmail: null, accounts: [] };
+      // A generated password was never shown to anyone (migration 264). The
+      // standard email would carry the "(set at creation)" sentinel instead,
+      // so it needs the real password in the request — the dialog asks for it.
+      const passwordGenerated = parseBooleanInput(event.password_generated, false);
+      // Only when the standard email is certain to go out: a folded-in address
+      // is mailed by the fallback only if its portal notice is skipped, and
+      // that fallback is withheld below rather than refused here — the dialog
+      // does not ask for a password it cannot know is needed.
+      const sentinelPassword = requirePassword && !password && passwordGenerated;
+      if (sentinelPassword && recipients.inlineEmail) {
+        return res.status(400).json({
+          error: 'Set a gallery password — the gallery email carries it.',
+          code: 'GALLERY_PASSWORD_REQUIRED',
+        });
+      }
       const publishUpdates = { is_draft: formatBoolean(false) };
       let publishKeepsHash = false;
       let publishWritesPassword = false;
@@ -763,7 +750,7 @@ module.exports = (router) => {
         const policyError = await checkGalleryPasswordPolicy(password, event.event_name);
         if (policyError) return res.status(400).json(policyError);
 
-        Object.assign(publishUpdates, await galleryPasswordColumns({ password }));
+        Object.assign(publishUpdates, await galleryPasswordColumns({ password }), await passwordKnownColumns());
         publishKeepsHash = await sameAsStored(password, event.password_hash);
         publishWritesPassword = true;
       }
@@ -786,35 +773,27 @@ module.exports = (router) => {
       // (#1235). Everything else about publishing still happens: the gallery
       // goes live, the activity is logged, and the event.published webhook
       // fires, because those describe a state change rather than a message to
-      // a customer.
-      const customerEmail = event.customer_email || event.host_email;
+      // a customer. The inline address gets the gallery email, every assigned
+      // account its portal email. Best-effort: the gallery is live by now.
+      let notified = { inlineEmail: null, accounts: [] };
       if (notifyCustomer) {
-        if (customerEmail) {
-          await queueGalleryCreatedEmail(event, { password, requirePassword });
-        } else {
-        // No inline email, but the gallery may be assigned to registered
-        // customer account(s). Notify them via the account "your galleries"
-        // email (customer_gallery_assigned, in the customer's own language)
-        // instead of the gallery_created mail, which needs an inline
-        // recipient. Best-effort.
-          try {
-            const customerAccountsService = require('../../services/customerAccountsService');
-            const assigned = await customerAccountsService.getAssignmentsForEvent(parseInt(id, 10));
-            for (const c of assigned.filter(canReceiveGalleryNotice)) {
-              await customerAccountsService
-                .notifyCustomerOfNewAssignments(c.id, [parseInt(id, 10)])
-                .catch((err) => logger.warn('Publish: customer gallery notice failed', { customerId: c.id, error: err.message }));
-            }
-          } catch (err) {
-            logger.warn('Publish: assigned-customer notification skipped', { eventId: id, error: err.message });
-          }
+        try {
+          notified = await notifyGalleryRecipients(event, {
+            recipients,
+            allowFallback: !sentinelPassword,
+            buildInlineEmailData: () => galleryCreatedEmailData(event, { password, requirePassword }),
+          });
+        } catch (err) {
+          logger.warn('Publish: gallery notification failed', { eventId: id, error: err.message });
         }
       }
 
       // WhatsApp gallery_ready on publish-from-draft (#640D). The PublishGallery
       // dialog (#627) hands us the password back so we can deliver it via
       // WhatsApp as well. Uses customer_phone from the persisted event row.
-      if (notifyCustomer && event.customer_phone) {
+      // Not for a generated password nobody knows: the message would carry
+      // an empty password line and a link that asks for one.
+      if (notifyCustomer && event.customer_phone && !sentinelPassword) {
         try {
           const { queueWhatsapp, getWhatsAppConfig } = require('../../services/whatsappProcessor');
           const waConfig = await getWhatsAppConfig();
@@ -869,7 +848,11 @@ module.exports = (router) => {
       res.json({
         message: 'Event published successfully',
         is_draft: false,
+        // The request, as before; `recipients` is what was actually queued.
         notified_customer: notifyCustomer,
+        recipients: describeRecipients(notified, {
+          withIdentities: await userHasAnyPermission(req.admin.id, ['customers.view']),
+        }),
       });
     } catch (error) {
       errorResponse(res, error, 500, 'Failed to publish event');
@@ -1004,6 +987,9 @@ module.exports = (router) => {
         watermark_downloads: source.watermark_downloads,
         watermark_text: source.watermark_text,
         require_password: source.require_password,
+        // Nobody knows the placeholder above until publish or an edit sets a
+        // real one (migration 264).
+        ...(await hasColumnCached('events', 'password_generated') ? { password_generated: formatBoolean(true) } : {}),
         css_template_id: source.css_template_id || null,
         hero_logo_visible: source.hero_logo_visible,
         hero_logo_size: source.hero_logo_size,
@@ -1053,6 +1039,7 @@ module.exports = (router) => {
           // A clone copies the SOURCE event, so these come from the source
           // row rather than the global defaults (#1044).
           allow_color_labels: sourceFeedback.allow_color_labels,
+          allow_decisions: sourceFeedback.allow_decisions,
           keybind_mode: sourceFeedback.keybind_mode,
           require_name_email: sourceFeedback.require_name_email,
           moderate_comments: sourceFeedback.moderate_comments,
@@ -1252,6 +1239,10 @@ module.exports = (router) => {
     // customer_accounts.id — many-to-many via event_customer_assignments.
     body('customer_account_ids').optional().isArray(),
     body('customer_account_ids.*').optional().isInt({ min: 1 }),
+    // Team members and the review of their uploads (issue 743), the owner's.
+    body('assigned_admin_ids').optional().isArray(),
+    body('assigned_admin_ids.*').optional().isInt({ min: 1 }),
+    body('review_contributor_uploads').optional().isBoolean(),
     // Custom styling switch (services/galleryTheme). Off keeps color_theme
     // and css_template_id stored, so switching it on again restores them.
     body('custom_theme_enabled').optional().isBoolean()
@@ -1301,10 +1292,10 @@ module.exports = (router) => {
       // insert error, and `[false]` coerced to true by formatBoolean.
       //
       // Guarded here rather than per field because it applies to all 44
-      // validated fields, not to a chosen few. `customer_account_ids` is the
-      // only field that is legitimately an array, and it is deleted from
-      // `updates` below before the write (#1296).
-      const ARRAY_VALUED_FIELDS = new Set(['customer_account_ids']);
+      // validated fields, not to a chosen few. `customer_account_ids` and
+      // `assigned_admin_ids` are the only fields that are legitimately arrays,
+      // and both are deleted from `updates` below before the write (#1296).
+      const ARRAY_VALUED_FIELDS = new Set(['customer_account_ids', 'assigned_admin_ids']);
       const arrayValued = Object.keys(updates)
         .filter((key) => Array.isArray(updates[key]) && !ARRAY_VALUED_FIELDS.has(key));
       if (arrayValued.length > 0) {
@@ -1312,6 +1303,73 @@ module.exports = (router) => {
           error: `Array values are not accepted for: ${arrayValued.join(', ')}`,
         });
       }
+
+      // The gallery's credentials are the owner's (issue 743): reading and
+      // resetting them is (requireEventOwner), so setting a new password or
+      // client PIN, regenerating the client link, or switching password
+      // protection on or off must be too. A non-owner's echo of the stored
+      // require_password, and empty password fields from the settings draft,
+      // are not changes and pass.
+      const setsPassword = (value) => typeof value === 'string' ? value !== '' : Boolean(value);
+      const touchesCredentials = setsPassword(req.body.password)
+        || setsPassword(req.body.client_password)
+        || parseBooleanInput(req.body.regenerate_client_token, false)
+        || Object.prototype.hasOwnProperty.call(req.body, 'require_password');
+      if (touchesCredentials) {
+        const stored = await db('events').where('id', id).first('id', 'created_by', 'require_password');
+        if (!stored) return res.status(404).json({ error: 'Event not found' });
+        const togglesProtection = Object.prototype.hasOwnProperty.call(req.body, 'require_password')
+          && parseBooleanInput(req.body.require_password, true) !== parseBooleanInput(stored.require_password, true);
+        const changesCredentials = setsPassword(req.body.password) || setsPassword(req.body.client_password)
+          || parseBooleanInput(req.body.regenerate_client_token, false) || togglesProtection;
+        if (changesCredentials && !ownsEvent(req.admin, stored)) {
+          return res.status(403).json({ error: 'Only the gallery owner can change its password', code: 'EVENT_OWNER_REQUIRED' });
+        }
+      }
+
+      // Who works on the gallery and whether their uploads wait for review
+      // (issue 743) are the owner's to decide: an assigned admin holding
+      // events.edit edits the gallery, not its team. A non-owner's echo of the
+      // stored values (the settings form sends the whole draft) changes
+      // nothing and is let through.
+      let assignedAdminIds = null;
+      const touchesTeam = Array.isArray(req.body.assigned_admin_ids)
+        || Object.prototype.hasOwnProperty.call(updates, 'review_contributor_uploads');
+      if (touchesTeam) {
+        const stored = await db('events').where('id', id).first('id', 'created_by', 'review_contributor_uploads');
+        if (!stored) return res.status(404).json({ error: 'Event not found' });
+        const previousAdminIds = (await db('event_admin_assignments').where('event_id', id).pluck('admin_user_id')).map(Number);
+        const isOwner = ownsEvent(req.admin, stored);
+        if (Array.isArray(req.body.assigned_admin_ids)) {
+          // A non-owner is compared on the raw ids, before validation, so the
+          // 400 for an unknown or inactive account never answers them: the
+          // route must not say which admin ids are live to someone who may not
+          // change the team anyway.
+          const same = (ids) => ids.length === previousAdminIds.length && ids.every((v) => previousAdminIds.includes(v));
+          if (!isOwner) {
+            const echoed = [...new Set(req.body.assigned_admin_ids.map(Number))]
+              .filter((v) => v !== Number(stored.created_by));
+            if (!same(echoed)) {
+              return res.status(403).json({ error: 'Only the gallery owner can change its team', code: 'EVENT_OWNER_REQUIRED' });
+            }
+          } else {
+            const submitted = await eventAdminAssignments.resolveAssignableIds(
+              req.body.assigned_admin_ids, stored.created_by, previousAdminIds);
+            if (!same(submitted)) assignedAdminIds = submitted;
+          }
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'review_contributor_uploads')) {
+          const next = parseBooleanInput(updates.review_contributor_uploads, false);
+          if (next === parseBooleanInput(stored.review_contributor_uploads, false)) {
+            delete updates.review_contributor_uploads;
+          } else if (!isOwner) {
+            return res.status(403).json({ error: 'Only the gallery owner can change upload review', code: 'EVENT_OWNER_REQUIRED' });
+          } else {
+            updates.review_contributor_uploads = formatBoolean(next);
+          }
+        }
+      }
+      delete updates.assigned_admin_ids;
 
       // Strip identity/provenance/secret columns from the mass-assigned
       // body (GHSA-3rqx). The handler spreads req.body straight into the
@@ -1338,6 +1396,9 @@ module.exports = (router) => {
         // #1271 — encrypted copies follow the hashes; a forged ciphertext
         // from another owner's row would decrypt through /:id/password
         'password_recoverable', 'client_password_recoverable',
+        // Whether that hash is a generated, never-shown password (migration
+        // 264); follows the password writes, never set directly.
+        'password_generated',
         // Server-consumed file paths — e.g. DELETE /:id/logo fs.unlink()s
         // hero_logo_path, so a forged value is an arbitrary-delete primitive.
         'hero_logo_path', 'hero_logo_url', 'archive_path', 'download_zip_path',
@@ -1489,7 +1550,8 @@ module.exports = (router) => {
       // leaves an already-watched event as it is stays an events.edit
       // operation, so a role without photos.upload can still edit the rest.
       if (Object.prototype.hasOwnProperty.call(updates, 'external_watch') || Object.prototype.hasOwnProperty.call(updates, 'external_path')) {
-        const current = await db('events').where('id', id).select('external_watch', 'external_path').first();
+        const current = await db('events').where('id', id)
+          .select('id', 'created_by', 'review_contributor_uploads', 'external_watch', 'external_path').first();
         const wasWatched = Boolean(current?.external_watch);
         const willWatch = Object.prototype.hasOwnProperty.call(updates, 'external_watch')
           ? Boolean(updates.external_watch)
@@ -1499,6 +1561,15 @@ module.exports = (router) => {
         if (willWatch && ((!wasWatched) || pathChanges)) {
           if (!(await userHasAllPermissions(req.admin.id, ['photos.upload']))) {
             return res.status(403).json({ error: 'The photos.upload permission is required to enable automatic imports for this folder' });
+          }
+          // The watcher imports visible, past the owner's review (issue 743),
+          // so a team member whose uploads wait for it cannot start one; the
+          // manual folder import refuses them the same way.
+          if (await holdsForReview(req.admin, current)) {
+            return res.status(403).json({
+              error: 'Uploads to this event wait for review; automatic folder imports are not available',
+              code: 'UPLOAD_REVIEW_REQUIRED',
+            });
           }
         }
       }
@@ -1588,6 +1659,20 @@ module.exports = (router) => {
         return res.status(404).json({ error: 'Event not found' });
       }
 
+      // A team upload still under review (issue 743) is not the gallery's to
+      // show yet, and the hero is the public link-preview cover; it is
+      // chosen once the owner has approved the photo.
+      if (updates.hero_photo_id != null
+        && Number(updates.hero_photo_id) !== Number(event.hero_photo_id)) {
+        const underReview = await db('photos')
+          .where({ id: updates.hero_photo_id, event_id: event.id })
+          .whereNotNull('moderation_status')
+          .first('id');
+        if (underReview) {
+          return res.status(409).json({ error: 'Photo is awaiting review', code: 'PHOTO_UNDER_REVIEW' });
+        }
+      }
+
       const currentRequirePassword = parseBooleanInput(event.require_password, true);
 
       // Resubmitting the current client password is not a change: keep the hash
@@ -1605,8 +1690,28 @@ module.exports = (router) => {
         return res.status(400).json({ error: 'Password must be provided when enabling password requirement.' });
       }
 
+      // A portal-only gallery's password was generated and never shown
+      // (migration 264). An inline customer email gets the standard gallery
+      // email, which carries the password — so adding one needs a real
+      // password, or that email would say "(set at creation)" to someone
+      // who was never told it.
+      const passwordStaysRequired = hasRequirePasswordUpdate ? requirePasswordUpdate : currentRequirePassword;
+      // The next value, not the key: a cleared address is written as null.
+      const nextInlineEmail = updates.customer_email || updates.host_email;
+      if (nextInlineEmail) {
+        const hadInlineEmail = Boolean(event.customer_email || event.host_email);
+        if (!hadInlineEmail && passwordStaysRequired && !newPasswordPlain
+          && parseBooleanInput(event.password_generated, false)) {
+          return res.status(400).json({
+            error: 'Set a gallery password before adding a customer email — the gallery email carries it.',
+            code: 'GALLERY_PASSWORD_REQUIRED',
+          });
+        }
+      }
+
       if (newPasswordPlain) {
         recoverable.password = newPasswordPlain;
+        Object.assign(updates, await passwordKnownColumns());
         if (!(await sameAsStored(newPasswordPlain, event.password_hash))) {
           updates.password_hash = await bcrypt.hash(newPasswordPlain, getBcryptRounds());
           credentialChanges.add('gallery');
@@ -1854,12 +1959,38 @@ module.exports = (router) => {
         }
       }
 
+      // Team members (issue 743): replaced as one set, validated above.
+      // Its own transaction after the event UPDATE (a db-level helper above
+      // would deadlock SQLite inside one), so a failure here comes after the
+      // gallery edits are already saved: say exactly that, and still audit
+      // the edits, rather than a 500 claiming nothing was saved.
+      let teamChange = null;
+      let teamError = null;
+      if (assignedAdminIds) {
+        try {
+          teamChange = await db.transaction((trx) => eventAdminAssignments.setAssignedAdmins(
+            parseInt(id, 10), assignedAdminIds, req.admin.id, trx));
+        } catch (e) {
+          teamError = e;
+          logger.error('Failed to set team members on event update', {
+            eventId: id, error: e.message, stack: e.stack,
+          });
+        }
+      }
+
       // Log activity
       await logActivity('event_updated',
         { changes: Object.keys(updates), eventName: event.event_name },
         id,
         { type: 'admin', id: req.admin.id, name: req.admin.username }
       );
+      if (teamChange && (teamChange.added.length > 0 || teamChange.removed.length > 0)) {
+        await logActivity('event_team_changed',
+          { ...teamChange, eventName: event.event_name },
+          id,
+          { type: 'admin', id: req.admin.id, name: req.admin.username }
+        );
+      }
 
       // Invalidate download zip if watermark settings changed
       const changeKeys = Object.keys(req.body);
@@ -1867,8 +1998,15 @@ module.exports = (router) => {
         downloadZipService.invalidate(parseInt(id));
       }
 
+      if (teamError) {
+        return res.status(500).json({
+          error: 'Gallery saved, but the team could not be saved. Try again.',
+          code: 'TEAM_NOT_SAVED',
+        });
+      }
       res.json({ message: 'Event updated successfully' });
     } catch (error) {
+      if (error.isOperational) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       errorResponse(res, error, 500, 'Failed to update event');
     }
   });
@@ -1926,7 +2064,7 @@ module.exports = (router) => {
     }
   });
 
-  router.delete('/:id', adminAuth, requirePermission('events.delete'), requireEventOwnership, async (req, res) => {
+  router.delete('/:id', adminAuth, requirePermission('events.delete'), requireEventOwner, async (req, res) => {
     try {
       const { id } = req.params;
       await deleteEventCascade(id, { id: req.admin.id, username: req.admin.username });

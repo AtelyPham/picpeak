@@ -308,7 +308,7 @@ function renderSignatureLink(href, text, color) {
  * @param {object} opts  { mutedTextColor, brandingCompanyName, language }
  * @returns {string} HTML rows for the footer <td>, or '' when disabled.
  */
-function renderEmailSignature(signature, { mutedTextColor, brandingCompanyName, language }) {
+function renderEmailSignature(signature, { mutedTextColor, brandingCompanyName, language, dividerColor = '#eeeeee' }) {
   if (!signature) return '';
 
   const lineStyle = `color:${mutedTextColor};font-size:12px;line-height:18px;margin:4px 0;`;
@@ -358,7 +358,7 @@ function renderEmailSignature(signature, { mutedTextColor, brandingCompanyName, 
   if (!rows.length) return '';
 
   return `
-              <div style="margin:15px 0 5px;padding-top:15px;border-top:1px solid #eeeeee;">
+              <div style="margin:15px 0 5px;padding-top:15px;border-top:1px solid ${dividerColor};">
                 ${rows.join('\n                ')}
               </div>`;
 }
@@ -407,6 +407,7 @@ function renderEmailSignatureText(signature, { brandingCompanyName, language } =
 // scheme other than http(s), and each colour has to match a colour grammar
 // before it is interpolated into <style>, style="" and bgcolor="".
 const { sanitizeCssColor } = require('../utils/cssSanitizer');
+const { readableTextOn, dividerOn } = require('../utils/colorContrast');
 
 function isUsableLogoUrl(value) {
   if (typeof value !== 'string' || !value.trim()) return false;
@@ -471,6 +472,20 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
   }
 
   const hoverColor = darkenColor(primaryColor, 0.15);
+  // The info panel only had a background colour, so its text inherited the
+  // body text colour: a dark palette with the default light panel (or a
+  // Branding sync that filled a light panel in) put near-white text on a
+  // near-white box. Keep the body text colour when it reads on the panel,
+  // otherwise switch to a neutral that does (utils/colorContrast). Links in
+  // the panel get the same check against the primary colour, at 3:1: they
+  // are underlined, and the default green on the default panel is ~4:1 —
+  // 4.5:1 would turn every default install's list links grey.
+  const listTextColor = readableTextOn(listBgColor, bodyTextColor);
+  const listLinkColor = readableTextOn(listBgColor, primaryColor, 3);
+  // The footer's top border and the signature rule were a fixed #eeeeee —
+  // a bright stripe across any dark palette. Derive them from the footer
+  // background instead; light footers keep #eeeeee.
+  const dividerColor = dividerOn(secondaryColor);
 
   // Build full logo URL - ensure logoUrl is a valid non-empty string
   const frontendUrl = (await getFrontendBaseUrl()) || 'http://localhost:3000';
@@ -487,7 +502,7 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
   // reads the row once. Never throws; returns null when disabled.
   const signatureHtml = renderEmailSignature(
     await businessProfileService.getEmailSignature(),
-    { mutedTextColor, brandingCompanyName: companyName, language }
+    { mutedTextColor, brandingCompanyName: companyName, language, dividerColor }
   );
 
   const year = new Date().getFullYear();
@@ -500,8 +515,19 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
   // below is rebuilt as inline-styled tables with bgcolor attrs for the same
   // reason. The <style> block stays as progressive enhancement.
   const buttonInlineStyle = `background-color:${primaryColor};color:${buttonTextColor};display:inline-block;padding:12px 30px;text-decoration:none;border-radius:5px;font-weight:500;`;
-  const inlinedBody = (typeof htmlBody === 'string' ? htmlBody : '')
+  // Same for the info panel: inline its look on every <ul> the template did
+  // not style itself, so clients that strip <style> keep text and panel in
+  // one readable pair. A body that brings its own <style> (an admin-edited
+  // template, a newsletter's body_css) styles its lists there, and an inline
+  // style would beat every rule in it — those keep the panel in the wrapper's
+  // <style> only.
+  const listInlineStyle = `background-color:${listBgColor};color:${listTextColor};padding:20px 20px 20px 40px;border-radius:5px;margin:20px 0;`;
+  let inlinedBody = (typeof htmlBody === 'string' ? htmlBody : '')
     .replace(/class="button"/g, `class="button" style="${buttonInlineStyle}"`);
+  if (!/<style[\s>]/i.test(inlinedBody)) {
+    inlinedBody = inlinedBody
+      .replace(/<ul(?![^>]*[\s"']style\s*=)(\s[^>]*)?>/gi, (match, attrs = '') => `<ul style="${listInlineStyle}"${attrs}>`);
+  }
 
   return `
 <!DOCTYPE html>
@@ -555,6 +581,7 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
     }
     .email-content ul {
       background-color: ${listBgColor};
+      color: ${listTextColor};
       padding: 20px 20px 20px 40px;
       border-radius: 5px;
       margin: 20px 0;
@@ -579,7 +606,7 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
       background-color: ${secondaryColor};
       padding: 30px;
       text-align: center;
-      border-top: 1px solid #eee;
+      border-top: 1px solid ${dividerColor};
     }
     .email-footer img {
       max-width: 120px;
@@ -601,6 +628,13 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
     }
     strong {
       color: ${bodyTextColor};
+    }
+    .email-content ul strong {
+      color: ${listTextColor};
+    }
+    .email-content ul a,
+    .email-content ul a:hover {
+      color: ${listLinkColor};
     }
     @media only screen and (max-width: 600px) {
       .email-wrapper {
@@ -634,7 +668,7 @@ async function wrapEmailHtml(htmlBody, subject, language = 'en') {
             </td>
           </tr>
           <tr>
-            <td align="center" bgcolor="${secondaryColor}" class="email-footer" style="background-color:${secondaryColor};padding:30px;text-align:center;border-top:1px solid #eeeeee;">
+            <td align="center" bgcolor="${secondaryColor}" class="email-footer" style="background-color:${secondaryColor};padding:30px;text-align:center;border-top:1px solid ${dividerColor};">
               <img src="${logoSrc}" alt="${companyNameHtml}" width="120" style="max-width:120px;height:auto;opacity:0.8;margin-bottom:15px;border:0;">
               <p style="color:${mutedTextColor};font-size:14px;margin:5px 0;">${companyNameHtml}</p>${signatureHtml}
               <p style="font-size:12px;color:#999999;margin:5px 0;">© ${year} ${companyNameHtml}. All rights reserved.</p>

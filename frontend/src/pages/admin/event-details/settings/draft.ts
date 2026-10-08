@@ -13,7 +13,7 @@
  * request value differs. A save the admin never touched writes nothing.
  */
 import { format } from 'date-fns';
-import type { Event } from '../../../../types';
+import type { AssignedAdmin, Event } from '../../../../types';
 import type { FeedbackSettings } from '../../../../services/feedback.service';
 import { DEFAULT_SLIDESHOW_STYLE, type SlideshowStyle } from '../../../../services/slideshow.service';
 import { GALLERY_THEME_PRESETS, type ThemeConfig } from '../../../../types/theme.types';
@@ -36,6 +36,12 @@ export type SettingsSectionKey =
   | 'danger';
 
 export interface EventFields extends EditFormState {
+  /**
+   * Read-only. The gallery's password was generated for portal-only access
+   * (migration 264) and no customer email has been told it, so adding one
+   * needs a real password first — the gallery email carries it.
+   */
+  generated_password_pending: boolean;
   /** Off: the gallery renders the global Branding theme. */
   custom_theme_enabled: boolean;
   /** The gallery's own theme; only written while custom_theme_enabled is on. */
@@ -54,6 +60,10 @@ export interface EventFields extends EditFormState {
   delivery_due_at: string;
   /** '' = the translated default ("First look"). */
   delivery_badge_label: string;
+  /** Team members (issue 743); only the owner changes them. */
+  assigned_admins: AssignedAdmin[];
+  /** Hold the team members' uploads until the owner approves them. */
+  review_contributor_uploads: boolean;
 }
 
 export const INHERIT = '__inherit__';
@@ -140,6 +150,7 @@ export function eventFieldsFromEvent(event: Event, branding: ThemeConfig | null 
     customer_name: event.customer_name || '',
     customer_email: event.customer_email || '',
     customer_phone: event.customer_phone || '',
+    generated_password_pending: truthy((event as Event & { password_generated?: unknown }).password_generated) && !event.customer_email,
     source_mode: event.source_mode === 'reference' ? 'reference' : 'managed',
     external_path: event.external_path || '',
     external_watch: truthy(event.external_watch),
@@ -183,6 +194,8 @@ export function eventFieldsFromEvent(event: Event, branding: ThemeConfig | null 
       return due ? format(due, 'yyyy-MM-dd') : '';
     })(),
     delivery_badge_label: event.delivery_badge_label || '',
+    assigned_admins: event.assigned_admins || [],
+    review_contributor_uploads: truthy(event.review_contributor_uploads),
   };
 }
 
@@ -209,6 +222,9 @@ export const SECTION_OF_FIELD: Record<keyof EventFields, SettingsSectionKey> = {
   customer_email: 'general',
   customer_phone: 'general',
   customer_accounts: 'general',
+  generated_password_pending: 'general',
+  assigned_admins: 'general',
+  review_contributor_uploads: 'general',
   expires_at: 'access',
   require_password: 'access',
   new_password: 'access',
@@ -353,6 +369,9 @@ function requestFields(f: EventFields): Record<string, unknown> {
     customer_email: f.customer_email.trim() || null,
     customer_phone: f.customer_phone.trim() || null,
     customer_account_ids: f.customer_accounts.map((c) => c.id),
+    // Only sent when changed, so a team member's save never carries them.
+    assigned_admin_ids: f.assigned_admins.map((a) => a.id),
+    review_contributor_uploads: f.review_contributor_uploads,
     expires_at: f.expires_at || null,
     require_password: f.require_password,
     allow_user_uploads: f.allow_user_uploads,
@@ -406,12 +425,20 @@ function requestFields(f: EventFields): Record<string, unknown> {
   return body;
 }
 
+/** Adding a customer email to this gallery needs a password first (see generated_password_pending). */
+export function emailNeedsPassword(f: EventFields): boolean {
+  return f.generated_password_pending && f.require_password && !!f.customer_email.trim();
+}
+
 /** The fields to PUT, or null when the events row is unchanged. */
 export function eventUpdatePayload(
   draft: EventFields,
   base: EventFields,
   t: Translate,
 ): Record<string, unknown> | null {
+  if (emailNeedsPassword(draft) && !draft.new_password) {
+    throw new DraftValidationError(t('events.recipients.passwordForEmailRequired', 'Set a gallery password before adding the customer email — the gallery email carries it.'), 'general');
+  }
   if (draft.require_password) {
     if (draft.require_password !== base.require_password && !draft.new_password) {
       throw new DraftValidationError(t('events.newPasswordRequired', 'Please set a password before enabling protection.'), 'access');

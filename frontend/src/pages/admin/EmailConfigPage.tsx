@@ -21,7 +21,7 @@ import { SentEmailsPanel } from '../../components/admin/SentEmailsPanel';
 import { ReceivedEmailsPanel } from '../../components/admin/ReceivedEmailsPanel';
 import { IncomingMailConfigCard } from '../../components/admin/IncomingMailConfigCard';
 import { CustomerMailboxCard } from '../../components/admin/CustomerMailboxCard';
-import { Palette, RefreshCw, Info } from 'lucide-react';
+import { Palette, RefreshCw, Info, AlertTriangle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useModal, useMutationWithToast } from '../../hooks';
@@ -34,6 +34,7 @@ import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from "../../components/common/LanguageSelector.tsx";
 import { useFeatureFlags, type FeatureKey } from '../../contexts/FeatureFlagsContext';
 import { SectionPageHeader } from '../../components/admin/SectionPageHeader';
+import { emailColorsFromBranding, lowListPanelContrast } from '../../utils/emailBrandingSync';
 
 /**
  * Template categorisation (migration 098). Sidebar sections render
@@ -183,7 +184,7 @@ const TEMPLATE_DISPLAY_NAMES: Record<string, string> = {
 };
 
 export const EmailConfigPage: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<'smtp' | 'templates' | 'sent' | 'received'>('smtp');
   const [selectedTemplateKey, setSelectedTemplateKey] = useState<string>('gallery_created');
   // For callbacks that outlive a render (a save completing after a switch).
@@ -408,25 +409,21 @@ export const EmailConfigPage: React.FC = () => {
    *   mutedTextColor    → email_muted_text_color
    *   (constant)        → email_button_text_color (#ffffff — no Branding equivalent)
    *
+   * Missing tokens fall back to the defaults of the theme's own colour mode
+   * (see utils/emailBrandingSync).
+   *
    * Just updates local state — admin still has to click Save to persist.
    * That two-step keeps the flow predictable and avoids surprise saves.
    */
   const handleSyncFromBranding = () => {
-    const theme = allSettings?.theme_config || {};
-    const accentDark = theme.accentDarkColor || theme.primaryColor || '#5C8762';
-    const surface = theme.surfaceColor || '#ffffff';
-    const background = theme.backgroundColor || '#fafafa';
-    const elevated = theme.elevatedColor || '#f5f5f5';
-    const textColor = theme.textColor || '#171717';
-    const mutedText = theme.mutedTextColor || '#737373';
-
-    setEmailPrimaryColor(accentDark);
-    setEmailSecondaryColor(surface);
-    setEmailBodyBgColor(background);
-    setEmailContainerBgColor(surface);
-    setEmailListBgColor(elevated);
-    setEmailBodyTextColor(textColor);
-    setEmailMutedTextColor(mutedText);
+    const c = emailColorsFromBranding(allSettings?.theme_config);
+    setEmailPrimaryColor(c.primary);
+    setEmailSecondaryColor(c.secondary);
+    setEmailBodyBgColor(c.bodyBg);
+    setEmailContainerBgColor(c.containerBg);
+    setEmailListBgColor(c.listBg);
+    setEmailBodyTextColor(c.bodyText);
+    setEmailMutedTextColor(c.mutedText);
     // Button text stays #ffffff — needs to read on accent-dark fill regardless
     // of branding accent choice. Admins can still override it manually.
     toast.info(t('email.syncedFromBranding', 'Email colours synced from Branding. Click Save to apply.'));
@@ -930,6 +927,18 @@ export const EmailConfigPage: React.FC = () => {
               ))}
             </div>
 
+            {(() => {
+              const ratio = lowListPanelContrast(emailBodyTextColor, emailListBgColor);
+              if (ratio === null) return null;
+              return (
+                <div role="status" className="mt-6 flex items-start gap-2 p-3 text-sm border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 rounded-lg">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>
+                    {t('email.listContrastWarning', 'Body text is hard to read on the Info panel (contrast {{ratio}}:1, 4.5:1 recommended). Emails switch the panel text to a readable colour automatically, but matching colours look better.', { ratio: (Math.floor(ratio * 10) / 10).toLocaleString(i18n.language, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) })}
+                  </span>
+                </div>
+              );
+            })()}
           </Card>
         </div>
       )}

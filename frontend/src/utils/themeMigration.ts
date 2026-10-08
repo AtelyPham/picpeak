@@ -7,7 +7,7 @@ import type { ThemeConfig, HeaderStyleType, HeroDividerStyle, GalleryLayoutType 
  * wholesale when an admin locks the instance to a mode that the active
  * theme doesn't natively support.
  */
-const DARK_SURFACE_DEFAULTS = {
+export const DARK_SURFACE_DEFAULTS = {
   backgroundColor: '#0f0f0f',
   surfaceColor: '#1a1a1a',
   elevatedColor: '#242424',
@@ -16,7 +16,7 @@ const DARK_SURFACE_DEFAULTS = {
   mutedTextColor: '#a3a3a3',
 };
 
-const LIGHT_SURFACE_DEFAULTS = {
+export const LIGHT_SURFACE_DEFAULTS = {
   backgroundColor: '#fafafa',
   surfaceColor: '#ffffff',
   elevatedColor: '#f5f5f5',

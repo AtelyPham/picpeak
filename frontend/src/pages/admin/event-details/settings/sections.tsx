@@ -7,16 +7,17 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff, Lock, RefreshCw } from 'lucide-react';
 import type { Event } from '../../../../types';
-import { Button, Input, LocalizedDateInput } from '../../../../components/common';
+import { Button, Input, LocalizedDateInput, PasswordGenerator } from '../../../../components/common';
 import { FeedbackSettings } from '../../../../components/admin';
 import { CustomerAccountPicker } from '../../../../components/admin/CustomerAccountPicker';
+import { TeamMemberPicker } from '../../../../components/admin/TeamMemberPicker';
 import { UploaderNameSettings } from '../../../../components/admin/UploaderNameSettings';
 import { useLocalizedDate } from '../../../../hooks/useLocalizedDate';
 import { usePermission } from '../../../../hooks/usePermission';
 import type { FeedbackSettings as FeedbackSettingsType } from '../../../../services/feedback.service';
 import { ExternalFolderPicker } from '../ExternalFolderPicker';
 import { useExternalImport } from '../useExternalImport';
-import type { EventFields } from './draft';
+import { emailNeedsPassword, type EventFields } from './draft';
 
 export interface FieldsProps {
   f: EventFields;
@@ -44,8 +45,19 @@ export const SectionCard: React.FC<{ title?: string; description?: string; child
   </section>
 );
 
-export const GeneralSection: React.FC<FieldsProps & { phoneFieldEnabled: boolean }> = ({ f, set, phoneFieldEnabled }) => {
+export const GeneralSection: React.FC<FieldsProps & {
+  phoneFieldEnabled: boolean;
+  /**
+   * Feeds the password generator, as on the create form, and says whether
+   * this admin may change the team (issue 743).
+   */
+  event?: Pick<Event, 'event_name' | 'event_date' | 'event_type' | 'can_manage_assignments' | 'can_review_uploads' | 'created_by'>;
+}> = ({ f, set, phoneFieldEnabled, event }) => {
   const { t } = useTranslation();
+  const [showPassword, setShowPassword] = useState(false);
+  // Only the owner changes the team and the review switch; everyone else
+  // sees them read-only (the backend refuses the change with 403).
+  const canManageTeam = event?.can_manage_assignments === true;
   return (
     <SectionCard>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -69,6 +81,63 @@ export const GeneralSection: React.FC<FieldsProps & { phoneFieldEnabled: boolean
             placeholder={t('events.hostEmailPlaceholder')}
           />
         </div>
+        {emailNeedsPassword(f) && (
+          <div className="md:col-span-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-3">
+            <p className="text-sm text-amber-700 dark:text-amber-400">
+              {t('events.recipients.passwordForEmailHint', 'This gallery was shared through the customer portal only, so its password was generated and nobody knows it. The gallery email to this address includes the password, so set one now.')}
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className={labelClass} htmlFor="settings-email-password">{t('events.galleryPassword')}</label>
+                <div className="relative">
+                  <Input
+                    id="settings-email-password"
+                    type={showPassword ? 'text' : 'password'}
+                    value={f.new_password}
+                    onChange={(e) => set({ new_password: e.target.value })}
+                    placeholder={t('events.passwordPlaceholder')}
+                    leftIcon={<Lock className="w-5 h-5 text-faint" />}
+                    className="pr-10"
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                    aria-label={showPassword ? t('common.hidePassword', 'Hide password') : t('common.showPassword', 'Show password')}
+                  >
+                    {showPassword
+                      ? <EyeOff className="w-5 h-5 text-faint hover:text-body" />
+                      : <Eye className="w-5 h-5 text-faint hover:text-body" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="settings-email-password-confirm">{t('events.confirmPassword')}</label>
+                <Input
+                  id="settings-email-password-confirm"
+                  type={showPassword ? 'text' : 'password'}
+                  value={f.confirm_new_password}
+                  onChange={(e) => set({ confirm_new_password: e.target.value })}
+                  placeholder={t('events.confirmPasswordPlaceholder')}
+                  leftIcon={<Lock className="w-5 h-5 text-faint" />}
+                  autoComplete="new-password"
+                />
+              </div>
+            </div>
+            <PasswordGenerator
+              eventName={event?.event_name}
+              eventDate={event?.event_date}
+              eventType={event?.event_type}
+              onPasswordGenerated={(password) => {
+                set({ new_password: password, confirm_new_password: password });
+                setShowPassword(true);
+              }}
+              passwordComplexity="moderate"
+              className="w-full"
+            />
+          </div>
+        )}
         {phoneFieldEnabled && (
           <div>
             <label className={labelClass} htmlFor="settings-host-phone">
@@ -89,6 +158,41 @@ export const GeneralSection: React.FC<FieldsProps & { phoneFieldEnabled: boolean
         value={f.customer_accounts}
         onChange={(next) => set({ customer_accounts: next })}
       />
+      {/* Team members (issue 743) */}
+      {canManageTeam ? (
+        <TeamMemberPicker
+          value={f.assigned_admins}
+          onChange={(next) => set({ assigned_admins: next })}
+          ownerId={event?.created_by ?? null}
+        />
+      ) : f.assigned_admins.length > 0 && (
+        <TeamMemberPicker value={f.assigned_admins} onChange={() => undefined} disabled />
+      )}
+      {(canManageTeam || f.review_contributor_uploads) && (
+        <div>
+          <label className="flex items-center">
+            <input
+              type="checkbox"
+              checked={f.review_contributor_uploads}
+              onChange={(e) => set({ review_contributor_uploads: e.target.checked })}
+              disabled={!canManageTeam}
+              className={checkboxClass}
+            />
+            <span className="ml-2 text-sm text-body">
+              {t('events.team.reviewUploads', 'Review team members\' uploads before they are published')}
+            </span>
+          </label>
+          <p className="text-xs text-muted mt-1 ml-6">
+            {/* The owner's help explains the switch; a team member, who only
+                sees it, is told what it means for their own uploads. */}
+            {canManageTeam
+              ? t('events.team.reviewUploadsHelp', 'Holds uploads from team members whose role lacks the “Review Team Uploads” permission: they stay hidden from guests and clients until you or a reviewer approve them on the Photos tab. The Admin, Editor and Solo Photographer roles hold that permission by default, so their uploads are never held.')
+              : event?.can_review_uploads === true
+                ? t('events.team.reviewUploadsHelpReviewer', 'Uploads from team members without the “Review Team Uploads” permission wait for approval on the Photos tab. Yours are published right away.')
+                : t('events.team.reviewUploadsHelpMember', 'Your uploads to this gallery stay hidden from guests and clients until the owner or a reviewer approves them.')}
+          </p>
+        </div>
+      )}
       <div>
         <label className={labelClass} htmlFor="settings-welcome">{t('events.welcomeMessageLabel')}</label>
         <textarea
@@ -104,7 +208,9 @@ export const GeneralSection: React.FC<FieldsProps & { phoneFieldEnabled: boolean
   );
 };
 
-export const AccessSection: React.FC<FieldsProps> = ({ f, set }) => {
+// `ownsEvent` false (a team member, issue 743): password protection and the
+// password itself are shown read-only; the server refuses changing them.
+export const AccessSection: React.FC<FieldsProps & { ownsEvent?: boolean }> = ({ f, set, ownsEvent = true }) => {
   const { t } = useTranslation();
   const { format } = useLocalizedDate();
   const [showPassword, setShowPassword] = useState(false);
@@ -124,6 +230,7 @@ export const AccessSection: React.FC<FieldsProps> = ({ f, set }) => {
             type="checkbox"
             className={`mt-1 ${checkboxClass}`}
             checked={f.require_password}
+            disabled={!ownsEvent}
             onChange={(e) => {
               const checked = e.target.checked;
               set({
@@ -147,7 +254,12 @@ export const AccessSection: React.FC<FieldsProps> = ({ f, set }) => {
           </div>
         )}
       </div>
-      {f.require_password && (
+      {!ownsEvent && (
+        <p className="text-xs text-muted">
+          {t('events.settingsTab.passwordOwnerOnly', 'Only the gallery owner can change the password or turn it off.')}
+        </p>
+      )}
+      {f.require_password && ownsEvent && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className={labelClass}>{t('events.newPasswordLabel', 'New Gallery Password')}</label>

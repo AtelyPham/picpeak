@@ -399,7 +399,111 @@ function isExcludedName(name, excludePatterns) {
   });
 }
 
-async function scanDirectory(dirPath, fileList, basePath, excludePatterns = []) {
+/**
+ * The directories below the storage root that a local backup writes into, as
+ * the walker will meet them (issue 1780).
+ *
+ * A local destination inside a backed-up folder (say <storage>/uploads/backups)
+ * made every run copy the previous run's output: one more nested copy of the
+ * tree per backup, until the volume was full. The walker skips these instead.
+ * Saving such a path is not refused, because installs that already have one
+ * could no longer save their backup form. A destination that IS a backed-up
+ * folder cannot be skipped; see backedUpFolderAtDestination.
+ *
+ * Only for a local destination: with S3 or rsync selected, a leftover local
+ * path is not written to, and skipping it would drop real files.
+ *
+ * `paths` are matched by name, `ids` by what the directory is on disk.
+ */
+// A directory as the filesystem knows it, whatever path led there. Docker can
+// show one host folder at two container paths (the /backup mount placed below
+// the storage mount), and no path comparison sees that. Null when the
+// directory is missing or the filesystem reports no inode.
+const dirIdentity = (dir) => fs.stat(dir, { bigint: true })
+  .then((stats) => (stats.ino ? `${stats.dev}:${stats.ino}` : null), () => null);
+
+const NO_OWN_OUTPUT = { paths: [], ids: [], atStorageRoot: false };
+
+async function ownOutputDirs(config, storagePath) {
+  if ((config.backup_destination_type || 'local').toLowerCase() !== 'local') return NO_OWN_OUTPUT;
+  // The same defaults performLocalBackup and saveManifestToLocal apply.
+  const destination = config.backup_destination_path || path.join(storagePath, 'backups');
+  const candidates = [destination, config.backup_manifest_path].filter(Boolean);
+  // Through symlinks, so a destination reached by another name is still
+  // recognised. A path that does not exist yet (the backup creates it) is
+  // resolved from its nearest existing ancestor, or it would not compare
+  // with a storage root that is itself reached through a link.
+  const real = async (p) => {
+    let current = path.resolve(p);
+    const missing = [];
+    for (;;) {
+      try {
+        return path.join(await fs.realpath(current), ...missing);
+      } catch (error) {
+        const parent = path.dirname(current);
+        if (parent === current) return path.resolve(p);
+        missing.unshift(path.basename(current));
+        current = parent;
+      }
+    }
+  };
+  const root = await real(storagePath);
+  const rootId = await dirIdentity(storagePath);
+  const paths = [];
+  const ids = [];
+  let atStorageRoot = false;
+  for (const candidate of candidates) {
+    const rel = path.relative(root, await real(candidate));
+    const id = await dirIdentity(candidate);
+    // Only the destination: files are copied there under their storage-
+    // relative path, so with the storage root as destination every file
+    // would be copied onto itself. A manifest folder there harms nothing.
+    if (candidate === destination && (rel === '' || (id && id === rootId))) atStorageRoot = true;
+    const inside = rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+    if (inside) paths.push(path.join(storagePath, rel));
+    if (id && id !== rootId) ids.push(id);
+  }
+  return { paths, ids, atStorageRoot };
+}
+
+/**
+ * The backed-up folder a local destination (or manifest folder) IS, '.' for
+ * the storage root, or null.
+ *
+ * Skipping cannot help here: with the destination set to <storage>/uploads
+ * itself, that folder's own files and the backup's output share one
+ * directory and cannot be told apart, so the walker would either keep
+ * nesting copies or drop the folder from the backup. The run refuses
+ * instead, and the connection test says so.
+ */
+async function backedUpFolderAtDestination(config, { everyPath = false } = {}) {
+  const storagePath = getStoragePath();
+  const own = await ownOutputDirs(config, storagePath);
+  if (own.atStorageRoot) return '.';
+  if (own.paths.length === 0 && own.ids.length === 0) return null;
+  // everyPath: also the folders that are switched off. The connection test
+  // probes a form that is not saved yet, so the "what to back up" toggles it
+  // would be judged by are not the ones the next run uses.
+  const targets = everyPath ? await loadBackupPathRows({ includeDisabled: true }) : await resolveBackupPaths(config);
+  for (const target of targets) {
+    const dir = path.join(storagePath, target.path);
+    if (own.paths.includes(dir)) return target.path;
+    const id = own.ids.length > 0 ? await dirIdentity(dir) : null;
+    if (id && own.ids.includes(id)) return target.path;
+  }
+  return null;
+}
+
+function destinationIsBackedUpFolderMessage(folder) {
+  if (folder === '.') {
+    return 'The backup destination is the storage folder itself, so every file would be copied onto itself. '
+      + 'Use a folder of its own, for example a subfolder such as "backups" or a directory outside the storage folder.';
+  }
+  return `The backup destination is the backed-up folder "${folder}" itself, so every run would copy the previous one. `
+    + 'Use a folder of its own, for example a subfolder of it or a directory outside the storage folder.';
+}
+
+async function scanDirectory(dirPath, fileList, basePath, excludePatterns = [], skip = NO_OWN_OUTPUT) {
   try {
     const entries = await fs.readdir(dirPath, { withFileTypes: true });
     for (const entry of entries) {
@@ -411,7 +515,9 @@ async function scanDirectory(dirPath, fileList, basePath, excludePatterns = []) 
       }
 
       if (entry.isDirectory()) {
-        await scanDirectory(fullPath, fileList, basePath, excludePatterns);
+        if (skip.paths.includes(fullPath)) continue;
+        if (skip.ids.length > 0 && skip.ids.includes(await dirIdentity(fullPath))) continue;
+        await scanDirectory(fullPath, fileList, basePath, excludePatterns, skip);
       } else if (entry.isFile()) {
         const stats = await fs.stat(fullPath);
         fileList.push({
@@ -664,6 +770,9 @@ async function getFilesToBackupInternal(configOrIncludeArchived = true) {
     : [];
   const excludePatterns = [...new Set([...DEFAULT_EXCLUDE_PATTERNS, ...configuredExcludes])];
 
+  // Never the backup's own output (issue 1780).
+  const ownOutput = await ownOutputDirs(config, storagePath);
+
   for (const target of targets) {
     // CRM document estate is special-cased in the comment block below
     // because it's the most expensive omission to recover from:
@@ -679,7 +788,7 @@ async function getFilesToBackupInternal(configOrIncludeArchived = true) {
     // those values refer to do not, leaving every CRM *_path column a
     // broken FK. scanDirectory short-circuits on ENOENT so installs
     // that never used CRM features won't error.
-    await scanDirectory(path.join(storagePath, target.path), files, storagePath, excludePatterns);
+    await scanDirectory(path.join(storagePath, target.path), files, storagePath, excludePatterns, ownOutput);
   }
 
   // Documents a row names in the legacy root (<cwd>/storage) when that is not
@@ -1242,6 +1351,14 @@ async function runBackupInternal(isManual = false) {
       db_schema_version: schemaVersion
     }).returning('id');
     runId = insertResult[0]?.id || insertResult[0];
+
+    // A destination that is itself a backed-up folder nests one more copy
+    // of the tree per run (issue 1780). Before the dump, which is written
+    // there too.
+    const clashingFolder = await backedUpFolderAtDestination(config);
+    if (clashingFolder) {
+      throw new Error(destinationIsBackedUpFolderMessage(clashingFolder));
+    }
 
     // Inline DB dump + fail-loud verification. The returned `databaseInfo`
     // is reused at manifest-build time below so we don't pay a second
@@ -1876,6 +1993,8 @@ service.validateBackupManifest = validateBackupManifest;
 service.loadManifestFromS3Bounded = loadManifestFromS3Bounded;
 service.MAX_S3_MANIFEST_BYTES = MAX_S3_MANIFEST_BYTES;
 service.resolveBackupPaths = resolveBackupPaths;
+service.backedUpFolderAtDestination = backedUpFolderAtDestination;
+service.destinationIsBackedUpFolderMessage = destinationIsBackedUpFolderMessage;
 service.resolveExcludedBackupPaths = resolveExcludedBackupPaths;
 service.backupPathIncluded = backupPathIncluded;
 service.effectiveFlagValue = effectiveFlagValue;

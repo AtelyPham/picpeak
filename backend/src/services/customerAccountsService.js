@@ -1335,7 +1335,10 @@ async function setAssignmentsForCustomer(customerId, targetEventIds, adminId, tr
  *   - One email per save (digest), not one per gallery.
  *   - Archived + expired events are filtered out — the customer would
  *     hit a "this gallery has expired" notice anyway, so naming them
- *     in the email just confuses people.
+ *     in the email just confuses people. Drafts too: publishing sends
+ *     this mail once the gallery is ready.
+ *   - Also called by galleryNotificationService whenever a gallery is
+ *     announced (create, publish, send later, resend).
  *   - Deactivated customers (is_active=false) get no email — their
  *     login is off, so a "you have new access" message would be
  *     misleading.
@@ -1343,9 +1346,11 @@ async function setAssignmentsForCustomer(customerId, targetEventIds, adminId, tr
  *     should never happen for accepted accounts but defensive).
  *   - Email failures are logged but never bubble up; the caller's
  *     `.catch` handler logs again at a more specific call site.
+ *
+ * @returns {Promise<boolean>} whether an email was queued
  */
 async function notifyCustomerOfNewAssignments(customerId, addedEventIds) {
-  if (!addedEventIds || addedEventIds.length === 0) return;
+  if (!addedEventIds || addedEventIds.length === 0) return false;
 
   const customer = await db('customer_accounts')
     .where({ id: customerId, is_active: formatBoolean(true) })
@@ -1355,7 +1360,7 @@ async function notifyCustomerOfNewAssignments(customerId, addedEventIds) {
     logger.info('Skip customer_gallery_assigned email: customer missing/inactive/no email', {
       customerId,
     });
-    return;
+    return false;
   }
 
   // Filter the added events to those the customer can actually open.
@@ -1363,11 +1368,16 @@ async function notifyCustomerOfNewAssignments(customerId, addedEventIds) {
   // past) would render as "Expired DD MMM" in the dashboard and lead
   // to a confusing "I clicked the link in the email and got a 410"
   // experience — drop those too. whereTimestamp: a plain `> Date` let every
-  // text-dated row through on SQLite (issue 1733).
+  // text-dated row through on SQLite (issue 1733). Drafts are not announced
+  // yet: publishing sends this mail, so assigning a draft would otherwise tell
+  // the customer twice, the first time about a gallery that is not ready.
   const now = new Date();
   const events = await db('events')
     .whereIn('id', addedEventIds)
     .where('is_archived', formatBoolean(false))
+    .andWhere(function() {
+      this.whereNull('is_draft').orWhere('is_draft', formatBoolean(false));
+    })
     .andWhere(function() {
       this.whereNull('expires_at').orWhere((q) => q.modify(whereTimestamp, 'expires_at', '>', now));
     })
@@ -1375,10 +1385,10 @@ async function notifyCustomerOfNewAssignments(customerId, addedEventIds) {
     .select('id', 'slug', 'event_name', 'event_date');
 
   if (events.length === 0) {
-    logger.info('Skip customer_gallery_assigned email: all added events archived/expired', {
+    logger.info('Skip customer_gallery_assigned email: all added events archived/expired/draft', {
       customerId, addedEventIds,
     });
-    return;
+    return false;
   }
 
   // Build the gallery list block. HTML is whitelisted via
@@ -1411,7 +1421,7 @@ async function notifyCustomerOfNewAssignments(customerId, addedEventIds) {
     || customer.first_name?.trim()
     || (customer.email ? customer.email.split('@')[0] : '');
 
-  await queueEmail(null, customer.email, 'customer_gallery_assigned', {
+  const queued = await queueEmail(null, customer.email, 'customer_gallery_assigned', {
     customer_name: customerName,
     gallery_count: String(events.length),
     // `singular` / `multiple` drive the {{#if}} blocks in the
@@ -1423,6 +1433,8 @@ async function notifyCustomerOfNewAssignments(customerId, addedEventIds) {
     gallery_list_text: galleryListText,
     dashboard_link: `${frontendUrl}/customer/dashboard`,
   });
+  // queueEmail resolves false when nothing was queued.
+  return queued === true;
 }
 
 /**
@@ -1440,6 +1452,8 @@ async function getAssignmentsForEvent(eventId) {
       'customer_accounts.first_name',
       'customer_accounts.last_name',
       'customer_accounts.is_active',
+      // The language a mail to this account goes out in (__language).
+      'customer_accounts.preferred_language',
       // NOT the hash itself — only whether one exists. A passive customer is
       // identified by password_hash IS NULL (see createDirect), and callers
       // that mail a portal link need to know the recipient can actually sign

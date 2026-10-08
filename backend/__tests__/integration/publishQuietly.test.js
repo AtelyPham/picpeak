@@ -32,9 +32,12 @@ jest.mock('../../src/middleware/auth', () => ({
 }));
 jest.mock('../../src/middleware/permissions', () => ({
   requirePermission: () => (_req, _res, next) => next(),
+  userHasAnyPermission: async () => true,
 }));
 jest.mock('../../src/middleware/ownership', () => ({
   requireEventOwnership: (_req, _res, next) => next(),
+  requireEventOwner: (_req, _res, next) => next(),
+  ownsEvent: () => true,
 }));
 
 const { bootCrmDb, seedMinimal } = require('./helpers/crmDb');
@@ -57,6 +60,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await db('email_queue').del();
+  // Postgres enforces activity_logs.event_id; SQLite never did.
+  await db('activity_logs').whereNotNull('event_id').del();
   await db('events').del();
 });
 
@@ -81,6 +86,9 @@ async function seedDraft({ slug, customerEmail = 'client@example.com', isDraft =
   }).returning('id');
   return typeof row === 'object' ? row.id : row;
 }
+
+// Postgres hands the json column back parsed; SQLite as text.
+const emailData = (row) => (typeof row.email_data === 'string' ? JSON.parse(row.email_data) : row.email_data);
 
 const queuedFor = (eventId) =>
   db('email_queue').where({ event_id: eventId, email_type: 'gallery_created' });
@@ -124,7 +132,7 @@ describe('publish quietly (#1235)', () => {
 
     const queued = await queuedFor(id);
     expect(queued).toHaveLength(1);
-    const data = JSON.parse(queued[0].email_data);
+    const data = emailData(queued[0]);
     expect(data.event_name).toBe('Event send-later');
     expect(data.gallery_link).toContain('send-later');
   });
@@ -229,7 +237,7 @@ describe('publish quietly (#1235)', () => {
     expect(res.status).toBe(200);
 
     const [queued] = await queuedFor(id);
-    expect(JSON.parse(queued.email_data).gallery_password).toBe('Sup3r-Secret');
+    expect(emailData(queued).gallery_password).toBe('Sup3r-Secret');
   });
 
   it('persists a changed password so the emailed one actually works', async () => {
@@ -250,7 +258,7 @@ describe('publish quietly (#1235)', () => {
     expect(await bcrypt.compare('Brand-New-Pass1', row.password_hash)).toBe(true);
 
     const [queued] = await queuedFor(id);
-    expect(JSON.parse(queued.email_data).gallery_password).toBe('Brand-New-Pass1');
+    expect(emailData(queued).gallery_password).toBe('Brand-New-Pass1');
   });
 
   it('does NOT touch the gallery password when only an account notice goes out', async () => {
