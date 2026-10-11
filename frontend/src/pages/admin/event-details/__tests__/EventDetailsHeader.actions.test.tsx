@@ -4,7 +4,7 @@
  * archived, Rename is no longer a menu item, and both "⋯" menus anchor to the
  * right edge (from sm the menu starts a row that sits at the right edge).
  */
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -117,5 +117,22 @@ describe('EventDetailsHeader — actions', () => {
       expect(menu).not.toHaveClass('left-0');
       fireEvent.click(button);
     }
+  });
+
+  // The server links an invoice to a gallery on the CRM owner rule; the menu
+  // offers "Create invoice" on the same flag.
+  it('offers Create invoice only when the gallery can carry the admin\'s invoices', () => {
+    perms.granted.add('bills.manage');
+    flagState.flags = { bills: true };
+    const open = () => {
+      fireEvent.click(menuButtons()[1]);
+      return screen.getByRole('menu');
+    };
+    renderHeader({ ...EVENT, can_link_crm: true } as Event);
+    expect(within(open()).getByRole('menuitem', { name: /create invoice/i })).toBeInTheDocument();
+    cleanup();
+    renderHeader({ ...EVENT, can_link_crm: false } as Event);
+    expect(within(open()).queryByRole('menuitem', { name: /create invoice/i })).not.toBeInTheDocument();
+    flagState.flags = {};
   });
 });
