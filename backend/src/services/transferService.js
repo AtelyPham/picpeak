@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const archiver = require('archiver');
+const { createArchiveStreamGuard } = require('../utils/archiveStreamGuard');
 
 const { db } = require('../database/db');
 const logger = require('../utils/logger');
@@ -858,6 +859,143 @@ async function streamTransferArchive(transfer, res) {
   return appended;
 }
 
+// Windows also ignores spaces before the extension here, and counts the
+// superscript digits as device numbers.
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])\s*(\.|$)/i;
+
+// The longest file name common file systems accept, in bytes.
+const MAX_FILENAME_BYTES = 255;
+
+/**
+ * `prefix` + `name`, shortened to fit a file name: a name that is already at
+ * the limit would otherwise leave the ZIP with an entry that cannot be
+ * unpacked (ENAMETOOLONG). The stem gives way, whole characters at a time,
+ * and the extension stays.
+ */
+function prefixedZipName(prefix, name) {
+  if (Buffer.byteLength(prefix + name) <= MAX_FILENAME_BYTES) return prefix + name;
+  const ext = path.extname(name);
+  const extension = Buffer.byteLength(ext) <= 32 ? ext : '';
+  const stem = Array.from(name.slice(0, name.length - extension.length));
+  while (stem.length > 1 && Buffer.byteLength(prefix + stem.join('') + extension) > MAX_FILENAME_BYTES) stem.pop();
+  // Cutting can leave a dot or space at the end, which Windows drops again.
+  return (prefix + stem.join('') + extension).replace(/[. ]+$/, '');
+}
+
+/**
+ * Stream a ZIP of everything a client sent through a file request to `res`
+ * (issue 1914): every upload round, oldest first, under the name the client
+ * gave each file. A name already taken gets the upload's id in front, and a
+ * counter if even that is taken. Names are compared the way a case-insensitive,
+ * normalising file system (macOS, Windows) would see them, so the archive
+ * unpacks intact there too: "a.JPG" and "A.jpg" clash, and so do the composed
+ * and decomposed spellings of "Müller.jpg".
+ *
+ * The bytes are stored exactly as received and are not opened here either.
+ *
+ * Reads go through the archive stream guard: two open at a time rather than
+ * one per file, a source that fails while still queued ends the download
+ * instead of the process, and a cancelled download releases what it holds.
+ *
+ * Returns the number of files appended.
+ */
+async function streamUploadsArchive(transfer, res) {
+  const uploads = await db('transfer_uploads')
+    .where('transfer_id', transfer.id)
+    .orderBy('uploaded_at', 'asc')
+    .orderBy('id', 'asc')
+    .select('id', 'original_filename', 'stored_path');
+
+  // Cancelled while the rows were being read: 'close' has fired already and
+  // will not fire again for the listener below, so nothing would ever release
+  // the reads opened from here on.
+  if (res.destroyed) return 0;
+
+  const archiveName = `${sanitizeForZipEntry(transfer.title || 'uploads') || 'uploads'}.zip`;
+  // Same guarantees as streamTransferArchive: a known type, nosniff, sandbox.
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', buildContentDisposition(archiveName));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', 'default-src \'none\'; sandbox');
+
+  const archive = archiver('zip', { zlib: { level: 5 } });
+  let stopped = false;
+  // Every way out releases the open reads; abort() throws if archiver has
+  // already torn itself down.
+  const stop = () => {
+    stopped = true;
+    guard.destroyAll();
+    archive.unpipe(res);
+    try { archive.abort(); } catch (_) { /* already aborted */ }
+    // Keep the aborted archive flowing, or the entry it was compressing
+    // never ends and its file stays open (as the gallery ZIP routes do).
+    archive.resume();
+  };
+  const fail = (err) => {
+    if (stopped) return;
+    logger.error('transferService: uploads archive error', { transferId: transfer.id, error: err.message });
+    stop();
+    try { res.destroy(err); } catch (_) { /* noop */ }
+  };
+  const guard = createArchiveStreamGuard({ onFatalError: fail });
+  archive.on('error', fail);
+  // The admin cancelled the download: nothing reads the archive any more.
+  res.on('close', () => { if (!res.writableFinished && !stopped) stop(); });
+  archive.pipe(res);
+
+  const storage = getStorage();
+  const usedNames = new Set();
+  let appended = 0;
+  for (const upload of uploads) {
+    // As it will exist once unpacked: Windows drops trailing dots and spaces
+    // ("report.pdf." lands on "report.pdf"), and no file system takes a name
+    // over the byte limit, duplicate or not.
+    let cleaned = sanitizeForZipEntry(upload.original_filename).replace(/[. ]+$/, '');
+    // Device names to Windows whatever the extension: such an entry cannot be
+    // unpacked there.
+    if (WINDOWS_RESERVED_NAME.test(cleaned)) cleaned = `_${cleaned}`;
+    const base = prefixedZipName('', cleaned || `file-${upload.id}`);
+    // Upper- then lower-cased, which folds the letters a plain lowercase
+    // keeps apart ("σ" and final "ς", "ß" and "ss") the way a
+    // case-insensitive file system does.
+    const seenAs = (candidate) => candidate.normalize('NFC').toUpperCase().toLowerCase();
+    let name = base;
+    for (let attempt = 1; usedNames.has(seenAs(name)); attempt += 1) {
+      name = prefixedZipName(attempt === 1 ? `${upload.id}-` : `${upload.id}-${attempt}-`, base);
+    }
+    usedNames.add(seenAs(name));
+    if (!await guard.acquire()) break;
+    try {
+      const srcStat = storage.kind() === 'local' ? await storage.stat(upload.stored_path) : true;
+      if (!srcStat) throw new Error(`Upload missing in storage: ${upload.stored_path}`);
+      const source = await storage.get(upload.stored_path);
+      // The download may have ended during either await. The guard destroys
+      // a source handed to it after that without listening to it, and a lazy
+      // read that then fails to open (the file was deleted meanwhile) would
+      // be an error nobody handles. So: listen first, then stop here.
+      source.on('error', () => {});
+      if (stopped) {
+        source.destroy();
+        break;
+      }
+      archive.append(guard.track(source), { name });
+      appended += 1;
+    } catch (err) {
+      logger.warn('transferService: skipping upload in uploads archive', {
+        transferId: transfer.id, uploadId: upload.id, error: err.message,
+      });
+    }
+  }
+
+  if (stopped) return appended;
+  // finalize() settles on the archive's end or error, and an aborted archive
+  // may emit neither; the response closing ends the wait too.
+  const finalized = archive.finalize();
+  finalized.catch(() => {}); // reported through fail()
+  await Promise.race([finalized, new Promise((resolve) => res.once('close', resolve))]);
+  return appended;
+}
+
 /** Load the admin-uploaded deliverable files for a transfer, in order. */
 async function loadTransferExtraFiles(transferId) {
   return db('transfer_extra_files')
@@ -1389,6 +1527,7 @@ module.exports = {
   assertDownloadable,
   claimDownload,
   streamTransferArchive,
+  streamUploadsArchive,
   streamTransferFile,
   streamTransferExtraFile,
   // uploads

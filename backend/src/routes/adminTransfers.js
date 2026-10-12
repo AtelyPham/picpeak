@@ -31,6 +31,7 @@ const {
   setAttachmentHeaders,
 } = require('../services/transferUploadPolicy');
 const logger = require('../utils/logger');
+const { streamingArchiveAdmission } = require('../utils/archiveStreamGuard');
 const { pipeStreamToResponse } = require('../utils/streamResponse');
 const fs = require('fs');
 
@@ -566,6 +567,40 @@ router.get('/:id/download',
     // getTransfer returns the serialized view; streamTransferArchive only needs
     // { id, title }, both present on it.
     await transferService.streamTransferArchive(transfer, res);
+  }),
+);
+
+// Admin download of everything a client sent through a file request, as one
+// ZIP (issue 1914). The same permission as the outgoing bundle above.
+router.get('/:id/uploads/download',
+  requirePermission('photos.download'),
+  [param('id').isInt({ min: 1 })],
+  handleAsync(async (req, res) => {
+    validateRequest(req);
+    const transfer = await transferService.getTransfer(parseInt(req.params.id, 10));
+    if (!transfer) return res.status(404).json({ error: 'Transfer not found' });
+    if (transfer.kind !== transferService.KIND_REQUEST) {
+      return res.status(400).json({ error: 'Only a file request receives files', code: 'NOT_A_REQUEST' });
+    }
+    // Before the attachment headers go on, or the browser saves this answer
+    // as the ZIP.
+    if (!transfer.uploads || transfer.uploads.length === 0) {
+      return res.status(404).json({ error: 'No files received yet', code: 'NO_UPLOADS' });
+    }
+    // The process-wide limit on archives being streamed at once, shared with
+    // the gallery ZIP routes: each holds storage reads for as long as its
+    // download takes.
+    const release = await streamingArchiveAdmission.acquire();
+    if (!release) {
+      res.set('Retry-After', '10');
+      return res.status(429).json({
+        error: 'Too many downloads are being prepared right now. Please try again shortly.', code: 'ARCHIVES_BUSY',
+      });
+    }
+    // Left while waiting for the slot: 'close' has fired and will not again.
+    if (res.destroyed || res.closed) return release();
+    res.once('close', release);
+    await transferService.streamUploadsArchive(transfer, res);
   }),
 );
 
