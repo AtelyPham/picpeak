@@ -153,6 +153,9 @@ const TRACKER_CODE_KEYS = new Set([
   'analytics_umami_url',
   'analytics_rybbit_url',
   'analytics_custom_head_html',
+  // Decides whether visitors who sent Do Not Track are counted (issue 1921):
+  // the same kind of decision as where the events go.
+  'analytics_honor_do_not_track',
 ]);
 const parseStoredSetting = (row) => {
   if (!row) return undefined;
@@ -167,6 +170,7 @@ const effectiveMissingSetting = async (key) => {
     return umami === true || umami === 'true' ? 'umami' : 'none';
   }
   if (key === 'analytics_umami_enabled') return false;
+  if (key === 'analytics_honor_do_not_track') return true;
   return null;
 };
 // A rule names either the owning `perm`, or `superAdmin: true` when the key is
@@ -231,6 +235,15 @@ const rejectUnauthorizedProtectedKeys = async (settings, req, res) => {
       error: 'Custom analytics scripts are no longer supported; choose Umami, Rybbit or none',
       code: 'CUSTOM_ANALYTICS_DISABLED',
     });
+    return true;
+  }
+  // Also shared by every generic writer, so the stored value has one shape
+  // whichever endpoint wrote it: a strict boolean (issue 1921). The client
+  // reads it through the public settings and the relay reads it directly;
+  // a string would let the two disagree about who is counted.
+  if (Object.hasOwn(settings, 'analytics_honor_do_not_track')
+    && typeof settings.analytics_honor_do_not_track !== 'boolean') {
+    res.status(400).json({ error: 'analytics_honor_do_not_track must be true or false', code: 'BAD_BOOLEAN' });
     return true;
   }
   return false;
