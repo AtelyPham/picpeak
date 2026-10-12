@@ -154,6 +154,25 @@ describe('fileWatcher camera RAW import', () => {
     warn.mockRestore();
   });
 
+  // chokidar announces a file once. A failed settings read that passed for
+  // "not allowed" skipped the RAW for good, and the cached deny skipped every
+  // other RAW for the next minute.
+  it('does not treat a failed settings read as a deny', async () => {
+    await setAllowedTypes('jpg,jpeg,png,webp,arw');
+    clearAllowedTypesCache();
+    const filePath = drop('DSC03380.ARW', Buffer.from('II*\0not really a sony raw'));
+
+    await db.raw('ALTER TABLE app_settings RENAME TO app_settings_offline');
+    try {
+      await expect(processNewPhoto(filePath)).rejects.toThrow();
+    } finally {
+      await db.raw('ALTER TABLE app_settings_offline RENAME TO app_settings');
+    }
+
+    await processNewPhoto(filePath);
+    expect(await db('photos').where({ event_id: eventId })).toHaveLength(1);
+  });
+
   // Not RAW, but the same insert: the column defaults to 'image', so a watched
   // video was filed as a photo.
   it('files a watched video as a video', async () => {
