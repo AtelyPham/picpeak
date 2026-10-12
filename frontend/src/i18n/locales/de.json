@@ -1065,7 +1065,10 @@
       "requestMessage": "Was benötigen Sie von ihnen? (optional)",
       "requestMessagePlaceholder": "Wird dem Kunden auf der Upload-Seite angezeigt",
       "uploadWindowDays": "Uploads annehmen für (Tage)",
-      "requestRecipientsHint": "Mehrere Adressen mit Komma trennen. Jede erhält den Upload-Link."
+      "requestRecipientsHint": "Mehrere Adressen mit Komma trennen. Jede erhält den Upload-Link.",
+      "maxFilesPerUpload": "Max. Dateien pro Upload",
+      "maxFilesDefault": "Standard ({{count}})",
+      "maxFilesInvalid": "Eine ganze Zahl von 1 bis {{max}}"
     },
     "picker": {
       "title": "Bilder aus anderen Events auswählen",
@@ -1114,7 +1117,8 @@
       "anyType": "Jeder Dateityp wird akzeptiert.",
       "acceptedTypes": "Akzeptiert: {{types}}",
       "someFailed": "Diese Dateien konnten nicht gespeichert werden. Bitte erneut versuchen: {{names}}",
-      "removeFile": "{{name}} entfernen"
+      "removeFile": "{{name}} entfernen",
+      "pacing": "Der Server bittet um eine kurze Pause. Weiter in {{seconds}} Sekunden …"
     },
     "newSend": "Dateien senden",
     "newRequest": "Dateien anfordern",
@@ -1154,7 +1158,12 @@
     "someDropped": "{{count}} angehängte Datei(en) wurden nicht übernommen – eine Dateianfrage sammelt nur Dateien: {{names}}",
     "deleteRequestAction": "Anfrage löschen",
     "deleteAction": "Transfer löschen",
-    "loadFailed": "Die Transfers konnten nicht geladen werden"
+    "loadFailed": "Die Transfers konnten nicht geladen werden",
+    "uploadLimit": "Dateien pro Upload",
+    "uploadLimitOwn": "Der Kunde kann bis zu {{count}} Dateien auf einmal auswählen. Diese Anfrage hat ein eigenes Limit.",
+    "uploadLimitDefault": "Der Kunde kann bis zu {{count}} Dateien auf einmal auswählen (Standard aus den Einstellungen).",
+    "uploadLimitSaved": "Upload-Limit gespeichert",
+    "uploadLimitUseDefault": "Standard verwenden"
   },
   "workflows": {
     "title": "Workflows",
@@ -4161,7 +4170,9 @@
       "extensions": "Endungen",
       "maxSize": "Maximale Dateigröße (MB)",
       "maxSizeHint": "Gilt pro Datei, nicht pro Upload.",
-      "readOnly": "Nur Admins mit Bearbeitungsrechten für Einstellungen können ändern, was Kunden senden dürfen."
+      "readOnly": "Nur Admins mit Bearbeitungsrechten für Einstellungen können ändern, was Kunden senden dürfen.",
+      "maxFiles": "Maximale Dateien pro Upload",
+      "maxFilesHint": "Wie viele Dateien ein Kunde auf einmal auswählen kann, 1 bis {{max}}. Danach kann er erneut hochladen; eine einzelne Dateianfrage kann einen eigenen Wert haben."
     }
   },
   "branding": {
