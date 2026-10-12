@@ -160,6 +160,31 @@ async function processNewPhoto(filePath) {
   // Find the event
   const event = await db('events').where({ slug: eventSlug, is_active: formatBoolean(true) }).first();
   if (!event) return;
+
+  // Check if photo already exists.
+  //
+  // `source_filename` is in here, not just filename/path, because a REPLACEMENT
+  // changes both of those (#1226). replacePhoto generates a fresh filename and
+  // a fresh managed path, so a watched-folder photo that had its file replaced
+  // — through the Lightroom round-trip (#745) or the admin replace — stopped
+  // matching either arm, and the next sweep imported the untouched original a
+  // second time. The gallery then held the edit AND the original: the same
+  // duplicate shape external_relpath prevents for reference galleries.
+  //
+  // source_filename is the stable key: written once at ingest (below) and
+  // preserved across a replace by design. Rows predating migration 193 are
+  // covered too — its backfill sets source_filename from
+  // COALESCE(original_filename, filename), and this path did not write
+  // original_filename then, so for watcher rows that resolves to the basename
+  // this compares against.
+  //
+  // Checked before any processing: chokidar re-announces every file on each
+  // boot, and a RAW preview extraction reads the whole file.
+  const existingPhoto = await findExistingPhoto(event.id, path.basename(filePath), relativePath);
+  if (existingPhoto) {
+    logger.debug(`Photo already exists: ${relativePath}`);
+    return;
+  }
   
   // Get file stats
   const stats = await fs.stat(filePath);
@@ -203,72 +228,50 @@ async function processNewPhoto(filePath) {
     ? (normalizeUploadMimeType(filename, '') || 'application/octet-stream')
     : (detectedMime || (isVideo ? 'video/mp4' : 'image/jpeg'));
 
-  // Check if photo already exists.
-  //
-  // `source_filename` is in here, not just filename/path, because a REPLACEMENT
-  // changes both of those (#1226). replacePhoto generates a fresh filename and
-  // a fresh managed path, so a watched-folder photo that had its file replaced
-  // — through the Lightroom round-trip (#745) or the admin replace — stopped
-  // matching either arm, and the next sweep imported the untouched original a
-  // second time. The gallery then held the edit AND the original: the same
-  // duplicate shape external_relpath prevents for reference galleries.
-  //
-  // source_filename is the stable key: written once at ingest (below) and
-  // preserved across a replace by design. Rows predating migration 193 are
-  // covered too — its backfill sets source_filename from
-  // COALESCE(original_filename, filename), and this path never wrote
-  // original_filename, so for watcher rows that resolves to the basename this
-  // compares against.
-  const existingPhoto = await findExistingPhoto(event.id, path.basename(filePath), relativePath);
+  // Credit from the file's EXIF (#1561). Only for a row about to be created,
+  // so a re-sweep of an imported folder reads nothing.
+  const credit = await resolveCredit({ localPath: filePath, isVideo });
+  // Browser-playable copy (issue 1430): a video the watcher picks up is
+  // queued like an uploaded one while the setting is on; otherwise it would
+  // wait for the next switch-on backfill. No transaction is open here.
+  const webCopyEnabled = isVideo && await require('./videoRenditionService').isEnabled();
 
-  if (!existingPhoto) {
-    // Credit from the file's EXIF (#1561). Only for a row about to be created,
-    // so a re-sweep of an imported folder reads nothing.
-    const credit = await resolveCredit({ localPath: filePath, isVideo });
-    // Browser-playable copy (issue 1430): a video the watcher picks up is
-    // queued like an uploaded one while the setting is on; otherwise it would
-    // wait for the next switch-on backfill. No transaction is open here.
-    const webCopyEnabled = isVideo && await require('./videoRenditionService').isEnabled();
+  // Add to database
+  const insertResult = await db('photos').insert({
+    event_id: event.id,
+    filename: path.basename(filePath),
+    // The camera-original name, the key the Lightroom round-trip (#745)
+    // matches a RAW against for auto-imported galleries.
+    source_filename: path.basename(filePath),
+    original_filename: path.basename(filePath),
+    path: relativePath,
+    thumbnail_path: relativeThumbPath,
+    type: isVideo ? 'video' : photoType,
+    // Written out rather than left to the column defaults, which file every
+    // row as an image, video or not.
+    media_type: isVideo ? 'video' : 'image',
+    source_origin: 'managed',
+    processing_status: 'complete',
+    size_bytes: stats.size,
+    mime_type: mimeType,
+    ...(dimensions && { width: dimensions.width, height: dimensions.height }),
+    ...(webCopyEnabled ? { web_status: 'pending' } : {}),
+    ...credit
+  }).returning('id');
+  const photoId = insertResult[0]?.id || insertResult[0];
 
-    // Add to database
-    const insertResult = await db('photos').insert({
-      event_id: event.id,
-      filename: path.basename(filePath),
-      // The camera-original name, the key the Lightroom round-trip (#745)
-      // matches a RAW against for auto-imported galleries.
-      source_filename: path.basename(filePath),
-      original_filename: path.basename(filePath),
-      path: relativePath,
-      thumbnail_path: relativeThumbPath,
-      type: isVideo ? 'video' : photoType,
-      // Written out rather than left to the column defaults, which file every
-      // row as an image, video or not.
-      media_type: isVideo ? 'video' : 'image',
-      source_origin: 'managed',
-      processing_status: 'complete',
-      size_bytes: stats.size,
-      mime_type: mimeType,
-      ...(dimensions && { width: dimensions.width, height: dimensions.height }),
-      ...(webCopyEnabled ? { web_status: 'pending' } : {}),
-      ...credit
-    }).returning('id');
-    const photoId = insertResult[0]?.id || insertResult[0];
+  logger.info(`Added new photo: ${relativePath}`);
+  downloadZipService.invalidate(event.id);
 
-    logger.info(`Added new photo: ${relativePath}`);
-    downloadZipService.invalidate(event.id);
-
-    // Webhook (#327) — auto-import path. Only fires in local mode since
-    // the watcher is disabled in S3 mode.
-    try {
-      const webhookService = require('./webhookService');
-      await webhookService.fire('photo.uploaded', {
-        event: { id: event.id, slug: event.slug, event_name: event.event_name },
-        photo: { id: photoId, filename: path.basename(filePath), size_bytes: stats.size, source: 'auto-import' },
-      });
-    } catch (e) { /* non-fatal */ }
-  } else {
-    logger.debug(`Photo already exists: ${relativePath}`);
-  }
+  // Webhook (#327) — auto-import path. Only fires in local mode since
+  // the watcher is disabled in S3 mode.
+  try {
+    const webhookService = require('./webhookService');
+    await webhookService.fire('photo.uploaded', {
+      event: { id: event.id, slug: event.slug, event_name: event.event_name },
+      photo: { id: photoId, filename: path.basename(filePath), size_bytes: stats.size, source: 'auto-import' },
+    });
+  } catch (e) { /* non-fatal */ }
 }
 
 async function removePhoto(filePath) {
