@@ -272,6 +272,20 @@ const extensionsToMimeTypes = (extString) => {
   return Array.from(mimeSet);
 };
 
+// The stored general_allowed_file_types value, unwrapped from its JSON
+// encoding when it has one. Throws if the database read fails.
+const readAllowedFileTypesSetting = async () => {
+  const setting = await db('app_settings')
+    .where({ setting_key: 'general_allowed_file_types' })
+    .first();
+
+  let rawValue = setting?.setting_value;
+  if (typeof rawValue === 'string') {
+    try { rawValue = JSON.parse(rawValue); } catch { /* keep string */ }
+  }
+  return rawValue;
+};
+
 /**
  * Get the allowed MIME types for uploads from the database setting.
  * Returns an array of MIME type strings, e.g. ['image/jpeg', 'image/png', 'video/mp4'].
@@ -282,16 +296,7 @@ const getAllowedMimeTypes = async () => {
   }
 
   try {
-    const setting = await db('app_settings')
-      .where({ setting_key: 'general_allowed_file_types' })
-      .first();
-
-    let rawValue = setting?.setting_value;
-    if (typeof rawValue === 'string') {
-      try { rawValue = JSON.parse(rawValue); } catch { /* keep string */ }
-    }
-
-    const mimeTypes = extensionsToMimeTypes(rawValue);
+    const mimeTypes = extensionsToMimeTypes(await readAllowedFileTypesSetting());
     cachedAllowedTypes = mimeTypes;
     allowedTypesCacheExpiresAt = Date.now() + CACHE_TTL_MS;
     return mimeTypes;
@@ -317,13 +322,7 @@ const getAllowedExtensions = async () => {
 
   let rawValue = DEFAULT_ALLOWED_FILE_TYPES;
   try {
-    const setting = await db('app_settings')
-      .where({ setting_key: 'general_allowed_file_types' })
-      .first();
-    rawValue = setting?.setting_value;
-    if (typeof rawValue === 'string') {
-      try { rawValue = JSON.parse(rawValue); } catch { /* keep string */ }
-    }
+    rawValue = await readAllowedFileTypesSetting();
   } catch (error) {
     logger.error('Failed to read allowed file types setting:', error.message);
   }

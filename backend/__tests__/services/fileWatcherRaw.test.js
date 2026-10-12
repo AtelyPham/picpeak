@@ -127,6 +127,21 @@ describe('fileWatcher camera RAW import', () => {
     expect(mockPreviewCleanup).toHaveBeenCalled();
   });
 
+  // chokidar re-announces every file in the folder on each boot. A RAW
+  // extraction reads the whole file, about 100 MB for a Sony A1 frame.
+  it('does not re-extract a RAW that is already in the gallery', async () => {
+    await setAllowedTypes('jpg,jpeg,png,webp,arw');
+    const filePath = drop('DSC03376.ARW', Buffer.from('II*\0not really a sony raw'));
+    await processNewPhoto(filePath);
+    const { withProcessableImage } = require('../../src/services/imageProcessor');
+    withProcessableImage.mockClear();
+
+    await processNewPhoto(filePath);
+
+    expect(withProcessableImage).not.toHaveBeenCalled();
+    expect(await db('photos').where({ event_id: eventId })).toHaveLength(1);
+  });
+
   it('says why it skipped a RAW the admin has not allowed', async () => {
     await setAllowedTypes('jpg,jpeg,png,webp');
     const warn = jest.spyOn(logger, 'warn');
