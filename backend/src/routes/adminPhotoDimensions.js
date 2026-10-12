@@ -5,6 +5,7 @@ const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
 const fs = require('fs').promises;
 const logger = require('../utils/logger');
+const applicationWork = require('../services/activeApplicationWork');
 
 const { resolvePhotoFilePath } = require('../services/photoResolver');
 const maintenanceJobs = require('../services/maintenanceJobState');
@@ -124,10 +125,10 @@ router.post('/repair-dimensions', adminAuth, requirePermission('system.manage'),
     });
 
     // Process in background
-    setImmediate(async () => {
+    applicationWork.defer('dimension repair', async () => {
       let sharp;
       try {
-        sharp = require('sharp');
+        sharp = require('../services/isolatedSharp');
       } catch (err) {
         logger.error('Sharp not available for dimension repair:', err.message);
         lease.stop();
@@ -350,7 +351,7 @@ router.post('/repair-capture-dates', adminAuth, requirePermission('system.manage
       count: photos.length
     });
 
-    setImmediate(async () => {
+    applicationWork.defer('dimension repair', async () => {
       const { extractCaptureDate, withLocalCopy } = require('../services/imageProcessor');
       const { resolvePhotoStorageKey } = require('../services/photoResolver');
       let successCount = 0;
@@ -622,8 +623,8 @@ router.post('/repair-orientation', adminAuth, requirePermission('system.manage')
 
     res.json({ message: `Checking orientation for ${photos.length} photos`, count: photos.length });
 
-    setImmediate(async () => {
-      const sharp = require('sharp');
+    applicationWork.defer('photo rendition repair', async () => {
+      const sharp = require('../services/isolatedSharp');
       const {
         orientedDimensions, hasOrientationTransform, withLocalCopy, withProcessableImage,
         deletePreviewTiers, deleteThumbnailTiers, previewTierKeys, thumbnailTierKeys,
@@ -958,7 +959,7 @@ router.post('/repair-credits', adminAuth, requirePermission('system.manage'), as
       count: photos.length
     });
 
-    setImmediate(async () => {
+    applicationWork.defer('photo rendition repair', async () => {
       const { withLocalCopy } = require('../services/imageProcessor');
       const { resolvePhotoStorageKey } = require('../services/photoResolver');
       const { extractExifCredit } = require('../services/photoCredit');

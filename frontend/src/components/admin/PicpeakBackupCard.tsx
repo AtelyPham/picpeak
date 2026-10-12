@@ -1,10 +1,11 @@
 import React, { useRef, useState } from 'react';
-import { Download, Upload, AlertTriangle, ShieldAlert, ExternalLink, CheckCircle2 } from 'lucide-react';
+import { Download, Upload, ShieldAlert, Info } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
 
-import { Button, Card } from '../common';
-import { api } from '../../config/api';
+import { Button, Card, Modal, Notice } from '../common';
+import { portableBackupService } from '../../services/portableBackup.service';
 
 // Portable ".picpeak" roundtrip, split across two Backup Manager tabs:
 //   - PicpeakExportCard  → Dashboard (making a backup)
@@ -12,18 +13,6 @@ import { api } from '../../config/api';
 // The manifest is bundled inside the .picpeak, so there is no separate
 // "manifest only" download here.
 
-interface RestoreResult {
-  tables: number;
-  filesRestored: number;
-  usesExternalMedia: boolean;
-  crossEngine?: boolean;
-  sessionInvalidated?: boolean;
-  // False when the pre-#1163 external-path conversion failed. Rows and files
-  // are in place, but no external original resolves until it is retried — so
-  // this must not be presented as a plain success.
-  externalPathsConverted?: boolean;
-  externalPathError?: string | null;
-}
 
 // ── Download half (Dashboard) ────────────────────────────────────────────────
 export const PicpeakExportCard: React.FC = () => {
@@ -34,10 +23,7 @@ export const PicpeakExportCard: React.FC = () => {
   const handleDownload = async () => {
     setDownloading(true);
     try {
-      const res = await api.get('/admin/backup/picpeak/export', {
-        params: { includePhotos },
-        responseType: 'blob',
-      });
+      const res = await portableBackupService.export(includePhotos);
       const cd = (res.headers['content-disposition'] as string) || '';
       const match = cd.match(/filename="?([^"]+)"?/);
       const filename = (match && match[1]) || 'picpeak-backup.picpeak';
@@ -49,7 +35,7 @@ export const PicpeakExportCard: React.FC = () => {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
-    } catch (_) {
+    } catch {
       toast.error(t('backup.picpeak.downloadFailed', 'Could not create the backup file.'));
     } finally {
       setDownloading(false);
@@ -69,18 +55,15 @@ export const PicpeakExportCard: React.FC = () => {
         <label className="flex items-center gap-2 text-sm text-body">
           <input
             type="checkbox"
-            className="h-4 w-4 rounded border-neutral-300"
+            className="h-4 w-4 rounded border-line-strong"
             checked={includePhotos}
             onChange={(e) => setIncludePhotos(e.target.checked)}
           />
           {t('backup.picpeak.includePhotos', 'Include original gallery photos (larger file)')}
         </label>
-        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/50 dark:bg-amber-900/20">
-          <ShieldAlert className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600 dark:text-amber-400" />
-          <p className="text-xs text-amber-800 dark:text-amber-200">
-            {t('backup.picpeak.secretsWarning', 'This file contains secrets in plain text (email password, admin credentials, API keys). Store it securely and only transfer it over trusted channels.')}
-          </p>
-        </div>
+        <Notice tone="warning" size="sm" className="mt-3" icon={<ShieldAlert className="h-4 w-4" />}>
+          {t('backup.picpeak.secretsWarning', 'This file contains secrets in plain text (email password, admin credentials, API keys). Store it securely and only transfer it over trusted channels.')}
+        </Notice>
         <Button
           variant="outline"
           className="mt-3"
@@ -103,7 +86,15 @@ export const PicpeakRestoreCard: React.FC = () => {
   const fileRef = useRef<HTMLInputElement>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [restoring, setRestoring] = useState(false);
-  const [result, setResult] = useState<RestoreResult | null>(null);
+  // Not every server can run a restore (it needs Linux, the native build and
+  // local storage). Where it cannot, say so here instead of failing an upload.
+  const { data: capability } = useQuery({
+    queryKey: ['picpeak-restore-capability'],
+    queryFn: () => portableBackupService.capability(),
+    staleTime: 60_000,
+    retry: false,
+  });
+  const unavailable = capability?.available === false;
 
   const onFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -115,27 +106,16 @@ export const PicpeakRestoreCard: React.FC = () => {
     if (!pendingFile) return;
     setRestoring(true);
     try {
-      const fd = new FormData();
-      fd.append('backup', pendingFile);
-      const res = await api.post<RestoreResult>('/admin/backup/picpeak/import', fd);
-      setResult(res.data);
+      await portableBackupService.start(pendingFile);
       setPendingFile(null);
-      if (res.data?.externalPathsConverted === false) {
-        toast.error(t('backup.picpeak.externalPathsFailed',
-          'Backup restored, but external photo paths could not be converted — those originals will not load until this is retried.'));
-      } else {
-        toast.success(t('backup.picpeak.restoreDone', 'Backup restored.'));
-      }
-      // The restore rewrote admin_users and the backend revoked our session
-      // (ids may have shifted). Send the operator to a fresh login rather than
-      // letting the now-stale token resolve to a different restored account.
-      if (res.data?.sessionInvalidated) {
-        toast.success(t('backup.picpeak.reloginRequired', 'Restore complete — please sign in again.'));
-        setTimeout(() => { window.location.href = '/admin/login'; }, 1500);
-      }
     } catch (e: any) {
-      const msg = e.response?.data?.error || t('backup.picpeak.restoreFailed', 'Restore failed.');
-      toast.error(msg);
+      // The server validates the file before it changes anything; its refusal
+      // names the reason by code, with its own text as the fallback.
+      const code = e.response?.data?.code as string | undefined;
+      const reason = code
+        ? t(`backup.picpeak.restoreError.${code}`, { defaultValue: t(`backup.picpeak.unavailable.${code}`, { defaultValue: e.response?.data?.error || '' }) })
+        : (e.response?.data?.error || '');
+      toast.error([t('backup.picpeak.restoreNotStarted', 'The restore was not started. Nothing was changed.'), reason].filter(Boolean).join(' '));
       setPendingFile(null);
     } finally {
       setRestoring(false);
@@ -150,102 +130,57 @@ export const PicpeakRestoreCard: React.FC = () => {
       <p className="mt-1 text-sm text-soft">
         {t('backup.picpeak.restoreIntro', 'Upload a .picpeak taken from this or another instance. Restoring a SQLite backup onto a PostgreSQL instance is supported (the upgrade path); other engine combinations must match.')}
       </p>
+      {unavailable && (
+        <div className="mt-4 flex items-start gap-2 rounded-lg border border-line bg-subtle p-3" role="status">
+          <Info className="mt-0.5 h-5 w-5 flex-shrink-0 text-soft" />
+          <div className="text-sm text-body">
+            <p className="font-medium text-heading">{t('backup.picpeak.unavailableTitle', 'Restoring a .picpeak is not available on this server')}</p>
+            <p className="mt-1">
+              {t(`backup.picpeak.unavailable.${capability?.reason}`, { defaultValue: capability?.message || '' })}
+            </p>
+            <p className="mt-1 text-soft">{t('backup.picpeak.unavailableHelp', 'Everything else, including creating a .picpeak, works normally.')}</p>
+          </div>
+        </div>
+      )}
       <input ref={fileRef} type="file" accept=".picpeak,application/zip" className="hidden" onChange={onFilePick} />
       <Button
         variant="outline"
         className="mt-4"
+        disabled={unavailable}
         onClick={() => fileRef.current?.click()}
         leftIcon={<Upload className="h-4 w-4" />}
       >
         {t('backup.picpeak.chooseFile', 'Choose .picpeak file…')}
       </Button>
 
-      {result && (
-        <div className="mt-4 rounded-lg border border-green-200 bg-green-50 p-4 dark:border-green-900/50 dark:bg-green-900/20">
-          <div className="flex items-start gap-2">
-            <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0 text-green-600 dark:text-green-400" />
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-green-800 dark:text-green-200">
-                {t('backup.picpeak.restoreDone', 'Backup restored.')}
-              </p>
-              <p className="mt-0.5 text-xs text-green-700 dark:text-green-300">
-                {t('backup.picpeak.restoreSummary', '{{tables}} tables and {{files}} files restored.', {
-                  tables: result.tables,
-                  files: result.filesRestored,
-                })}
-              </p>
-              {result.crossEngine && (
-                <p className="mt-0.5 text-xs text-green-700 dark:text-green-300">
-                  {t('backup.picpeak.crossEngineNote', 'Cross-engine restore: a SQLite backup was converted onto this PostgreSQL instance.')}
-                </p>
-              )}
-              {result.externalPathsConverted === false && (
-                <p className="mt-2 flex items-start gap-1 text-xs text-red-800 dark:text-red-300">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
-                  <span>
-                    {t('backup.picpeak.externalPathsFailedDetail',
-                      'External photo paths were not converted, so every referenced original is currently unreachable. Re-run the restore or the pending migrations once the cause is resolved.')}
-                    {result.externalPathError ? ` (${result.externalPathError})` : ''}
-                  </span>
-                </p>
-              )}
-              {result.usesExternalMedia && (
-                <p className="mt-2 flex items-start gap-1 text-xs text-amber-800 dark:text-amber-300">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
-                  <span>
-                    {t('backup.picpeak.externalMediaNote', 'This backup references an external-media library. Make sure external-media routing is configured on this instance.')}{' '}
-                    <a
-                      href="https://github.com/PicPeak/picpeak/blob/main/README.md"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-0.5 underline"
-                    >
-                      {t('backup.picpeak.externalMediaLink', 'Setup guide')}
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  </span>
-                </p>
-              )}
-              <Button variant="primary" size="sm" className="mt-3" onClick={() => window.location.reload()}>
-                {t('backup.picpeak.reload', 'Reload app')}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Destructive confirmation */}
-      {pendingFile && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-panel p-6 shadow-xl">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-6 w-6 flex-shrink-0 text-red-600 dark:text-red-400" />
-              <div>
-                <h3 className="text-lg font-semibold text-heading">
-                  {t('backup.picpeak.confirmTitle', 'Restore will delete all current data')}
-                </h3>
-                <p className="mt-2 text-sm text-body">
-                  {t('backup.picpeak.confirmBody', 'This permanently replaces ALL data on this instance with the uploaded backup, except your current account. This cannot be undone.')}
-                </p>
-                <p className="mt-2 truncate text-xs text-muted">{pendingFile.name}</p>
-              </div>
-            </div>
-            <div className="mt-6 flex justify-end gap-3">
-              <Button variant="outline" onClick={() => setPendingFile(null)} disabled={restoring}>
-                {t('common.cancel', 'Cancel')}
-              </Button>
-              <Button
-                variant="primary"
-                className="!bg-red-600 hover:!bg-red-700"
-                isLoading={restoring}
-                onClick={confirmRestore}
-              >
-                {t('backup.picpeak.confirmRestore', 'Delete & restore')}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Modal
+        open={!!pendingFile}
+        onClose={() => { if (!restoring) setPendingFile(null); }}
+        closeOnBackdrop={false}
+        size="sm"
+        title={t('backup.picpeak.confirmTitle', 'Restore will delete all current data')}
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setPendingFile(null)} disabled={restoring}>
+              {t('common.cancel', 'Cancel')}
+            </Button>
+            <Button
+              variant="danger"
+              isLoading={restoring}
+              onClick={confirmRestore}
+            >
+              {t('backup.picpeak.confirmRestore', 'Delete & restore')}
+            </Button>
+          </>
+        }
+      >
+        <Notice tone="danger">
+          {t('backup.picpeak.confirmBody', 'This permanently replaces ALL data on this instance with the uploaded backup, except your current account. This cannot be undone.')}
+        </Notice>
+        <p className="mt-2 truncate text-xs text-muted">{pendingFile?.name}</p>
+      </Modal>
     </Card>
   );
 };

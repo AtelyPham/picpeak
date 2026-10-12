@@ -3,6 +3,7 @@ import { ChevronRight, ChevronDown, Folder, FolderOpen, Loader2 } from 'lucide-r
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { externalMediaService } from '../../../services/externalMedia.service';
+import { useAdminAuth } from '../../../contexts/AdminAuthContext';
 
 export const FolderTreeNode: React.FC<{
   path: string;
@@ -14,11 +15,12 @@ export const FolderTreeNode: React.FC<{
   toggleExpand: (p: string) => void;
 }> = ({ path, name, depth, value, onChange, expandedPaths, toggleExpand }) => {
   const { t } = useTranslation();
+  const { user } = useAdminAuth();
   const isExpanded = expandedPaths.has(path);
   const isSelected = value === path;
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['external-folder-children', path],
+    queryKey: ['external-folder-children', user?.id, path],
     queryFn: () => externalMediaService.list(path),
     enabled: isExpanded,
     staleTime: 30_000
@@ -58,7 +60,7 @@ export const FolderTreeNode: React.FC<{
           {isExpanded ? (
             <FolderOpen className="w-4 h-4 flex-shrink-0 text-accent" />
           ) : (
-            <Folder className="w-4 h-4 flex-shrink-0 text-neutral-500" />
+            <Folder className="w-4 h-4 flex-shrink-0 text-muted" />
           )}
           <span className="truncate">{name}</span>
         </button>
@@ -76,7 +78,7 @@ export const FolderTreeNode: React.FC<{
           )}
           {isError && (
             <div
-              className="py-1 text-xs text-red-600 dark:text-red-400"
+              className="py-1 text-xs text-danger-text"
               style={childIndentStyle}
             >
               {t('errors.somethingWentWrong', 'Something went wrong')}
@@ -91,7 +93,7 @@ export const FolderTreeNode: React.FC<{
             </div>
           )}
           {dirs.map(d => {
-            const childPath = path ? `${path}/${d.name}` : d.name;
+            const childPath = d.path ?? (path ? `${path}/${d.name}` : d.name);
             return (
               <FolderTreeNode
                 key={childPath}

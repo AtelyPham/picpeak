@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { analyticsDashboardFrameProps, analyticsDashboardUrl } from '../../utils/analyticsDashboardUrl';
 import { 
   BarChart3, 
   TrendingUp, 
@@ -8,12 +9,14 @@ import {
   Smartphone,
   Monitor,
   Activity,
+  ExternalLink,
   RefreshCw,
   Tablet
 } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 
-import { Button, Card, Loading } from '../../components/common';
+import { Button, Card, ErrorState, Loading, Notice } from '../../components/common';
+import { SectionPageHeader } from '../../components/admin/SectionPageHeader';
 import { useQuery } from '@tanstack/react-query';
 import { adminService } from '../../services/admin.service';
 import { settingsService } from '../../services/settings.service';
@@ -54,11 +57,26 @@ export const AnalyticsPage: React.FC = () => {
   const [dateRange, setDateRange] = useState<'7d' | '30d' | '90d'>('7d');
   const [isEmbedMode, setIsEmbedMode] = useState(false);
   
-  // Check if Umami is configured from settings or environment
-  const [umamiConfig, setUmamiConfig] = useState<{ url?: string; shareUrl?: string; enabled?: boolean }>({});
+  // Check if Umami is configured in the admin settings
+  const [umamiConfig, setUmamiConfig] = useState<{ url?: string; shareUrl?: string; enabled?: boolean; cookieDomain?: string | null }>({});
+  const dashboardProps = analyticsDashboardFrameProps(umamiConfig.shareUrl, umamiConfig.cookieDomain);
+  // The new tab is the primary way in: it needs neither credentialless iframe
+  // support nor the dashboard origin in the deployment's frame-src.
+  const dashboardUrl = analyticsDashboardUrl(umamiConfig.shareUrl, umamiConfig.cookieDomain);
+  const dashboardLink = dashboardUrl && (
+    <a
+      href={dashboardUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-2 whitespace-nowrap text-sm font-medium text-accent hover:opacity-80"
+    >
+      <ExternalLink className="w-4 h-4" />
+      {t('analytics.openDashboard')}
+    </a>
+  );
 
   // Fetch analytics data from backend
-  const { data: apiData, isLoading, refetch } = useQuery({
+  const { data: apiData, isLoading, isError, isRefetching, refetch } = useQuery({
     queryKey: ['admin-analytics', dateRange],
     queryFn: async () => {
       const days = dateRange === '7d' ? 7 : dateRange === '30d' ? 30 : 90;
@@ -95,38 +113,15 @@ export const AnalyticsPage: React.FC = () => {
           setUmamiConfig({
             url: settings.analytics_umami_url,
             shareUrl: settings.analytics_umami_share_url,
-            enabled: true
-          });
-        } else {
-          // Fall back to environment variables if they exist
-          const envUrl = import.meta.env.VITE_UMAMI_URL;
-          const envWebsiteId = import.meta.env.VITE_UMAMI_WEBSITE_ID;
-          
-          if (envUrl && envWebsiteId) {
-            setUmamiConfig({
-              url: envUrl,
-              shareUrl: import.meta.env.VITE_UMAMI_SHARE_URL,
-              enabled: true
-            });
-          } else {
-            setUmamiConfig({ enabled: false });
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch Umami config:', error);
-        // Fall back to environment variables if they exist
-        const envUrl = import.meta.env.VITE_UMAMI_URL;
-        const envWebsiteId = import.meta.env.VITE_UMAMI_WEBSITE_ID;
-        
-        if (envUrl && envWebsiteId) {
-          setUmamiConfig({
-            url: envUrl,
-            shareUrl: import.meta.env.VITE_UMAMI_SHARE_URL,
+            cookieDomain: settings.analytics_dashboard_cookie_domain,
             enabled: true
           });
         } else {
           setUmamiConfig({ enabled: false });
         }
+      } catch (error) {
+        console.error('Failed to fetch Umami config:', error);
+        setUmamiConfig({ enabled: false });
       }
     };
 
@@ -199,7 +194,7 @@ export const AnalyticsPage: React.FC = () => {
     const isPositive = trend > 0;
     return (
       <span className={`inline-flex items-center text-xs font-medium ${
-        isPositive ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'
+        isPositive ? 'text-success-text' : 'text-danger-text'
       }`}>
         <TrendingUp className={`w-3 h-3 mr-1 ${!isPositive ? 'rotate-180' : ''}`} />
         {Math.abs(trend)}%
@@ -234,50 +229,53 @@ export const AnalyticsPage: React.FC = () => {
   }
 
   // If Umami is configured and embed mode is enabled, show the Umami dashboard
-  if (isEmbedMode && umamiConfig.shareUrl) {
+  if (isEmbedMode && dashboardProps) {
     return (
       <div>
-        <div className="flex justify-between items-center mb-6">
-          <div>
-            <h1 className="text-2xl font-bold text-heading">{t('analytics.title')}</h1>
-            <p className="text-soft mt-1">{t('analytics.detailedSubtitle')}</p>
-          </div>
-          <Button
-            variant="outline"
-            onClick={() => setIsEmbedMode(false)}
-            leftIcon={<BarChart3 className="w-4 h-4" />}
-          >
-            {t('analytics.showSummaryView')}
-          </Button>
-        </div>
+        <SectionPageHeader
+          icon={BarChart3}
+          title={t('analytics.title')}
+          description={t('analytics.detailedSubtitle')}
+          feature="analytics"
+          actions={(
+            <>
+              {dashboardLink}
+              <Button
+                variant="outline"
+                onClick={() => setIsEmbedMode(false)}
+                leftIcon={<BarChart3 className="w-4 h-4" />}
+              >
+                {t('analytics.showSummaryView')}
+              </Button>
+            </>
+          )}
+        />
+        <p className="-mt-3 mb-6 text-sm text-soft">{t('analytics.embedCspHint')}</p>
         
         <Card padding="none" className="overflow-hidden" style={{ height: '800px' }}>
           <iframe
-            src={umamiConfig.shareUrl}
+            {...dashboardProps}
             className="w-full h-full border-0"
             title="Umami Analytics Dashboard"
-            // An admin-configured third-party page: it gets what a dashboard
-            // needs (its own scripts, its own origin, links, forms) and
-            // nothing more — no top-navigation, no popups without user
-            // activation, no referrer.
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups-to-escape-sandbox allow-popups"
-            referrerPolicy="no-referrer"
+            // Separate cookie/storage context, including redirects; no
+            // ordinary-frame fallback, popup escape or top navigation.
           />
         </Card>
       </div>
     );
   }
 
-  return (
-    <div>
-      {/* Page Header */}
-      <div className="flex justify-between items-center mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-heading">{t('analytics.title')}</h1>
-          <p className="text-soft mt-1">{t('analytics.subtitle')}</p>
-        </div>
-        <div className="flex items-center gap-3">
-          {umamiConfig.shareUrl && (
+  const pageHeader = (
+    <>
+    <SectionPageHeader
+      icon={BarChart3}
+      title={t('analytics.title')}
+      description={t('analytics.subtitle')}
+      feature="analytics"
+      actions={(
+        <>
+          {dashboardLink}
+          {dashboardProps && (
             <Button
               variant="outline"
               onClick={() => setIsEmbedMode(true)}
@@ -296,14 +294,40 @@ export const AnalyticsPage: React.FC = () => {
           <select
             value={dateRange}
             onChange={(e) => setDateRange(e.target.value as any)}
-            className="px-4 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:ring-2 focus:ring-primary-500"
+            className="px-4 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:ring-2 focus:ring-accent"
           >
             <option value="7d">{t('analytics.last7Days')}</option>
             <option value="30d">{t('analytics.last30Days')}</option>
             <option value="90d">{t('analytics.last90Days')}</option>
           </select>
-        </div>
+        </>
+      )}
+    />
+    {umamiConfig.shareUrl && !dashboardProps && (
+      <p className="-mt-3 mb-6 text-sm text-soft" role="status">{t('analytics.embedUnavailable')}</p>
+    )}
+    {dashboardProps && (
+      <p className="-mt-3 mb-6 text-sm text-soft">{t('analytics.embedCspHint')}</p>
+    )}
+    </>
+  );
+
+  if (isError && !apiData) {
+    return (
+      <div>
+        {pageHeader}
+        <ErrorState
+          title={t('analytics.loadFailed', 'Could not load the analytics')}
+          onRetry={() => refetch()}
+          retrying={isRefetching}
+        />
       </div>
+    );
+  }
+
+  return (
+    <div>
+      {pageHeader}
 
       {/* Key Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
@@ -316,11 +340,11 @@ export const AnalyticsPage: React.FC = () => {
                 {renderTrendBadge(analytics?.pageViews.trend || 0)}
               </div>
             </div>
-            <Eye className="w-8 h-8 text-blue-600" />
+            <Eye className="w-8 h-8 text-info-text" />
           </div>
           {analytics?.pageViews.chartData && renderMiniChart(
             analytics.pageViews.chartData.map(d => ({ date: d.date, value: d.views })),
-            'bg-blue-500'
+            'bg-info'
           )}
         </Card>
 
@@ -333,11 +357,11 @@ export const AnalyticsPage: React.FC = () => {
                 {renderTrendBadge(analytics?.uniqueVisitors.trend || 0)}
               </div>
             </div>
-            <Users className="w-8 h-8 text-green-600" />
+            <Users className="w-8 h-8 text-success-text" />
           </div>
           {analytics?.uniqueVisitors.chartData && renderMiniChart(
             analytics.uniqueVisitors.chartData.map(d => ({ date: d.date, value: d.visitors })),
-            'bg-green-500'
+            'bg-success'
           )}
         </Card>
 
@@ -350,7 +374,7 @@ export const AnalyticsPage: React.FC = () => {
                 {renderTrendBadge(analytics?.downloads.trend || 0)}
               </div>
             </div>
-            <Download className="w-8 h-8 text-purple-600" />
+            <Download className="w-8 h-8 text-chart-4" />
           </div>
           <div className="mt-4 space-y-2">
             <p className="text-xs text-muted uppercase">{t('analytics.topGallery')}</p>
@@ -396,7 +420,7 @@ export const AnalyticsPage: React.FC = () => {
                   <div className="flex items-center gap-4">
                     <div className="flex-1 bg-fill rounded-full h-2 max-w-[100px]">
                       <div
-                        className="bg-purple-600 h-2 rounded-full"
+                        className="bg-chart-4 h-2 rounded-full"
                         style={{
                           width: `${(gallery.downloads / (analytics.downloads.topGalleries[0]?.downloads || 1)) * 100}%`
                         }}
@@ -480,9 +504,9 @@ export const AnalyticsPage: React.FC = () => {
                 ? adminService.formatBytes(storageInfo.recommended_soft_limit)
                 : t('settings.storage.unlimited');
             const progressColor = overSoftLimit
-              ? 'bg-red-600'
+              ? 'bg-danger'
               : (usagePercent != null && usagePercent >= 90)
-                ? 'bg-amber-500'
+                ? 'bg-warning'
                 : 'bg-accent-dark';
             const limitDescriptor = storageInfo
               ? storageInfo.soft_limit_configured
@@ -514,7 +538,7 @@ export const AnalyticsPage: React.FC = () => {
                         ? t('analytics.storageNoMeasurement', 'no measurement available')
                         : `${usagePercent}% ${t('analytics.of')} ${limitDisplay}`}
                     </p>
-                    <p className={`text-xs mt-1 ${overSoftLimit ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-red-500 dark:text-red-400 font-medium'}`}>
+                    <p className={`text-xs mt-1 ${overSoftLimit ? 'text-danger-text font-semibold' : 'text-danger font-medium'}`}>
                       {limitDescriptor}
                     </p>
                   </div>
@@ -545,17 +569,9 @@ export const AnalyticsPage: React.FC = () => {
 
       {/* Configuration Notice */}
       {umamiConfig.enabled === false && (
-        <Card padding="md" className="mt-6 bg-amber-50 dark:bg-amber-900/30 border-amber-200 dark:border-amber-800">
-          <div className="flex items-start gap-3">
-            <Activity className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
-            <div>
-              <p className="text-sm font-medium text-amber-900 dark:text-amber-200">{t('analytics.notConfigured')}</p>
-              <p className="text-sm text-amber-700 dark:text-amber-300 mt-1">
-                {t('analytics.configureInstructions')}
-              </p>
-            </div>
-          </div>
-        </Card>
+        <Notice tone="warning" className="mt-6" icon={<Activity className="w-5 h-5" />} title={t('analytics.notConfigured')}>
+          {t('analytics.configureInstructions')}
+        </Notice>
       )}
     </div>
   );

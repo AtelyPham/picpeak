@@ -2,6 +2,7 @@ const express = require('express');
 const { db, withRetry } = require('../database/db');
 const logger = require('../utils/logger');
 const { normaliseDownloadLimit } = require('../services/downloadQuota');
+const { normalizeStatusColors } = require('../utils/statusColors');
 const router = express.Router();
 
 // Get public settings (branding and theme)
@@ -135,6 +136,9 @@ router.get('/', async (req, res) => {
         : settingsObject.branding_force_color_mode === 'light'
           ? 'light'
           : null,
+      // Status colours (Branding › Colours). Only the hues the studio picked;
+      // the frontend falls back to tokens.css for the rest.
+      branding_status_colors: normalizeStatusColors(settingsObject.branding_status_colors),
       // Login-page-only branding (#354 follow-up). Applies exclusively
       // to /admin/login and /customer/login — the rest of the app keeps
       // using branding_logo_size / branding_logo_max_height. Default
@@ -175,46 +179,30 @@ router.get('/', async (req, res) => {
       enable_recaptcha: settingsObject.security_enable_recaptcha === true || settingsObject.security_enable_recaptcha === 'true',
       recaptcha_site_key: settingsObject.security_recaptcha_site_key || null,
       maintenance_mode: settingsObject.general_maintenance_mode === true || settingsObject.general_maintenance_mode === 'true',
-      // Umami analytics configuration (only if enabled). Kept for
-      // back-compat: pre-#663 installs without `analytics_tracker_provider`
-      // still surface Umami settings under their original keys so the
-      // frontend tracker script switches over cleanly.
+      // Legacy Umami flag. Kept for back-compat: on pre-#663 installs without
+      // `analytics_tracker_provider` the data-only client still reads it. The
+      // collector URLs and site IDs stay server-side; the client only needs
+      // to know which provider is on.
       umami_enabled: settingsObject.analytics_umami_enabled === true || settingsObject.analytics_umami_enabled === 'true',
-      umami_url: (settingsObject.analytics_umami_enabled === true || settingsObject.analytics_umami_enabled === 'true') ? (settingsObject.analytics_umami_url || null) : null,
-      umami_website_id: (settingsObject.analytics_umami_enabled === true || settingsObject.analytics_umami_enabled === 'true') ? (settingsObject.analytics_umami_website_id || null) : null,
       // The share URL is the bearer link to the whole Umami dashboard, not
       // tracker bootstrap; the admin analytics page reads it from
       // /admin/settings, so it never leaves the authenticated API.
-      // Tracker-provider switch (#663 Phase 1). Drives which provider's
-      // script gets injected into the gallery <head>. 'none' / unset =
-      // no tracker. The frontend tracker service picks the right shape
-      // from the (provider, *_url, *_website_id) tuple below.
+      // Only supported, data-only collectors are public. Legacy custom mode
+      // stays disabled, even if its old enable flag is still true.
       analytics_tracker_provider: (() => {
         const explicit = settingsObject.analytics_tracker_provider;
-        if (typeof explicit === 'string' && ['none', 'umami', 'rybbit', 'custom'].includes(explicit)) {
+        if (typeof explicit === 'string' && ['none', 'umami', 'rybbit'].includes(explicit)) {
           return explicit;
         }
+        if (explicit) return 'none';
         // Back-compat with installs that haven't picked yet.
         return (settingsObject.analytics_umami_enabled === true || settingsObject.analytics_umami_enabled === 'true')
           ? 'umami'
           : 'none';
       })(),
-      // Rybbit native provider (#663). Only exposed when actively chosen
-      // — otherwise hidden so the front-end never tries to inject a
-      // stale tracker.
-      rybbit_url: settingsObject.analytics_tracker_provider === 'rybbit'
-        ? (settingsObject.analytics_rybbit_url || null)
-        : null,
-      rybbit_website_id: settingsObject.analytics_tracker_provider === 'rybbit'
-        ? (settingsObject.analytics_rybbit_website_id || null)
-        : null,
-      // Custom-mode pre-sanitised HTML snippet (#663). Sanitised at save
-      // time via customScriptSanitiser; surfaced as-is here so the
-      // gallery <head> can render it without re-sanitising on every
-      // request.
-      analytics_custom_head_html: settingsObject.analytics_tracker_provider === 'custom'
-        ? (settingsObject.analytics_custom_head_html || '')
-        : '',
+      // Never distribute administrator-supplied executable HTML, including
+      // legacy rows written through another generic settings endpoint.
+      analytics_custom_head_html: '',
       // Event field requirements
       event_require_customer_name: settingsObject.event_require_customer_name !== false,
       event_require_customer_email: settingsObject.event_require_customer_email !== false,

@@ -1,6 +1,6 @@
 import React from 'react';
-import { Globe, Key, Activity, AlertCircle, Code, ShieldCheck } from 'lucide-react';
-import { Card, Input } from '../../../components/common';
+import { Globe, Key, Activity, ShieldCheck } from 'lucide-react';
+import { Card, Input, Notice } from '../../../components/common';
 import { useTranslation } from 'react-i18next';
 import { SettingsSaveBar } from '../../../components/admin/SettingsSaveBar';
 import type { AnalyticsSettings, TrackerProvider } from '../hooks/useSettingsState';
@@ -16,66 +16,23 @@ interface AnalyticsTabProps {
   onDiscard: () => void;
 }
 
-const PROVIDER_OPTIONS: TrackerProvider[] = ['none', 'umami', 'rybbit', 'custom'];
+const PROVIDER_OPTIONS: TrackerProvider[] = ['none', 'umami', 'rybbit'];
 
-/**
- * Umami and Rybbit are loaded through PicPeak's own origin (the backend
- * proxies `/api/analytics/tracker/*` to the URL configured above), so the
- * shipped `script-src 'self'` / `connect-src 'self'` CSP already covers both
- * the script and its beacon and nothing has to be allowlisted by hand.
- */
+/** PicPeak-owned events, never third-party code on the application origin. */
 const ProxiedNotice: React.FC = () => {
   const { t } = useTranslation();
 
   return (
-    <div className="p-4 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg">
-      <div className="flex items-start gap-3">
-        <ShieldCheck className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0" />
-        <div className="text-sm text-blue-800 dark:text-blue-200">
-          <p className="font-medium mb-1">
-            {t('settings.analytics.proxiedNotice', 'Served from your own domain')}
-          </p>
-          <p>
-            {t(
-              'settings.analytics.proxiedNoticeText',
-              'PicPeak loads the tracker script and forwards its events through its own domain, so no Content-Security-Policy or reverse-proxy change is needed — and ad blockers see first-party requests. Your tracker still gets each visitor\'s IP and user agent (forwarded as X-Forwarded-For), so device and location reporting keeps working. The URL must be reachable from the PicPeak server and resolve to a public address.',
-            )}
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-/**
- * Custom mode is the one provider that still loads from a third-party origin:
- * the pasted snippet is rendered verbatim into <head>, so PicPeak has nothing
- * to proxy and the static CSP applies to it unchanged.
- */
-const CspWarning: React.FC = () => {
-  const { t } = useTranslation();
-
-  return (
-    <div className="p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
-      <div className="flex items-start gap-3">
-        <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
-        <div className="text-sm text-amber-800 dark:text-amber-200">
-          <p className="font-medium mb-1">
-            {t('settings.analytics.customCspWarning', 'Content-Security-Policy reminder')}
-          </p>
-          <p>
-            {t(
-              // Deliberately a NEW key: the old `customCspWarningText` value is
-              // still in en/de and describes the pre-proxy world ("your tracker
-              // loads from another domain", script-src only), which is now only
-              // true for Custom mode and is missing connect-src.
-              'settings.analytics.customOnlyCspWarningText',
-              'PicPeak ships with a strict CSP (`script-src \'self\'; connect-src \'self\'`). Unlike the Umami and Rybbit options above, a pasted snippet is not proxied — add your tracker\'s domain to BOTH `script-src` (to load the script) and `connect-src` (for the events it sends) in your reverse-proxy or nginx CSP config, otherwise the browser silently blocks it.',
-            )}
-          </p>
-        </div>
-      </div>
-    </div>
+    <Notice
+      tone="info"
+      icon={<ShieldCheck className="w-5 h-5" />}
+      title={t('settings.analytics.proxiedNotice', 'Data-only analytics forwarding')}
+    >
+      {t(
+        'settings.analytics.proxiedNoticeText',
+        'PicPeak forwards sanitized page views and gallery events without loading third-party code. The collector receives visitor IP and user agent, but no query strings, page titles, referrers, tokens or account identifiers. Production collectors must use HTTPS.',
+      )}
+    </Notice>
   );
 };
 
@@ -99,7 +56,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
         <p className="text-sm text-soft mb-4">
           {t(
             'settings.analytics.providerDescription',
-            'Pick which tracker to use for the public gallery, or paste your own script. The admin dashboard\'s device-breakdown chart only enriches when you pick Umami or Rybbit — those expose a metrics API. Other providers (Plausible, Matomo, GA4, …) work via the Custom mode below.',
+            'Choose Umami or Rybbit for public gallery analytics. PicPeak forwards data only; arbitrary custom scripts are no longer supported.',
           )}
         </p>
 
@@ -116,6 +73,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
             }))}
             className="w-full sm:w-72 px-3 py-2 text-sm border border-line-strong rounded-lg bg-shell text-heading"
           >
+            {provider === 'custom' && <option value="custom" disabled>{t('settings.analytics.customDisabled', 'Custom scripts disabled')}</option>}
             {PROVIDER_OPTIONS.map((p) => (
               <option key={p} value={p}>
                 {t(`settings.analytics.provider.${p}`, p)}
@@ -136,7 +94,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 value={analyticsSettings.umami_url}
                 onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, umami_url: e.target.value }))}
                 placeholder="https://analytics.yourdomain.com"
-                leftIcon={<Globe className="w-5 h-5 text-neutral-400" />}
+                leftIcon={<Globe className="w-5 h-5 text-faint" />}
               />
               <p className="text-xs text-muted mt-1">
                 {t('settings.analytics.umamiUrlHelp')}
@@ -152,7 +110,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 value={analyticsSettings.umami_website_id}
                 onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, umami_website_id: e.target.value }))}
                 placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                leftIcon={<Key className="w-5 h-5 text-neutral-400" />}
+                leftIcon={<Key className="w-5 h-5 text-faint" />}
               />
               <p className="text-xs text-muted mt-1">
                 {t('settings.analytics.websiteIdHelp')}
@@ -168,10 +126,10 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 value={analyticsSettings.umami_share_url}
                 onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, umami_share_url: e.target.value }))}
                 placeholder="https://analytics.yourdomain.com/share/..."
-                leftIcon={<Activity className="w-5 h-5 text-neutral-400" />}
+                leftIcon={<Activity className="w-5 h-5 text-faint" />}
               />
               <p className="text-xs text-muted mt-1">
-                {t('settings.analytics.shareUrlHelp')}
+                {t('settings.analytics.shareUrlHelp')} {t('analytics.embedCspHint')}
               </p>
             </div>
 
@@ -184,7 +142,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 value={analyticsSettings.umami_api_key}
                 onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, umami_api_key: e.target.value }))}
                 placeholder="api_xxx…"
-                leftIcon={<Key className="w-5 h-5 text-neutral-400" />}
+                leftIcon={<Key className="w-5 h-5 text-faint" />}
                 autoComplete="off"
               />
               <p className="text-xs text-muted mt-1">
@@ -211,7 +169,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 value={analyticsSettings.rybbit_url}
                 onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, rybbit_url: e.target.value }))}
                 placeholder="https://app.rybbit.io"
-                leftIcon={<Globe className="w-5 h-5 text-neutral-400" />}
+                leftIcon={<Globe className="w-5 h-5 text-faint" />}
               />
               <p className="text-xs text-muted mt-1">
                 {t(
@@ -230,7 +188,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 value={analyticsSettings.rybbit_website_id}
                 onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, rybbit_website_id: e.target.value }))}
                 placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                leftIcon={<Key className="w-5 h-5 text-neutral-400" />}
+                leftIcon={<Key className="w-5 h-5 text-faint" />}
               />
               <p className="text-xs text-muted mt-1">
                 {t(
@@ -249,7 +207,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 value={analyticsSettings.rybbit_api_key}
                 onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, rybbit_api_key: e.target.value }))}
                 placeholder="rybbit_xxx…"
-                leftIcon={<Key className="w-5 h-5 text-neutral-400" />}
+                leftIcon={<Key className="w-5 h-5 text-faint" />}
                 autoComplete="off"
               />
               <p className="text-xs text-muted mt-1">
@@ -264,50 +222,20 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
           </div>
         )}
 
-        {/* Custom panel */}
+        {/* Legacy snippets are retained in admin settings for recovery, never rendered. */}
         {provider === 'custom' && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-body mb-1">
-                {t('settings.analytics.customHeadHtml', 'Custom <head> HTML')}
-              </label>
-              <div className="relative">
-                <span className="absolute left-3 top-3 pointer-events-none">
-                  <Code className="w-5 h-5 text-neutral-400" />
-                </span>
-                <textarea
-                  value={analyticsSettings.custom_head_html}
-                  onChange={(e) => setAnalyticsSettings((prev) => ({ ...prev, custom_head_html: e.target.value }))}
-                  placeholder={'<script async defer data-domain="example.com" src="https://plausible.io/js/script.js"></script>'}
-                  rows={6}
-                  spellCheck={false}
-                  className="w-full pl-10 pr-3 py-2 font-mono text-xs border border-line-strong rounded-lg bg-shell text-heading"
-                />
-              </div>
-              <p className="text-xs text-muted mt-1">
-                {t(
-                  'settings.analytics.customHeadHtmlHelp',
-                  'Paste your tracker\'s `<head>` snippet (Plausible, Matomo, Pirsch, GA4, GoatCounter, Fathom, Cloudflare Web Analytics, …). Sanitised on save: only `<script>` / `<noscript>` / `<link rel="preconnect|dns-prefetch">` / `<meta>` tags survive, and event-handler attributes are stripped. The admin dashboard\'s device-breakdown chart falls back to a server-side user-agent heuristic in this mode — pick Umami or Rybbit if you want the tracker-side numbers.',
-                )}
-              </p>
-            </div>
-
-            <CspWarning />
-          </div>
+          <p className="text-sm text-soft" role="status">
+            {t('settings.analytics.customDisabledHelp', 'Your legacy custom snippet is disabled and is not sent to visitors. Choose Umami, Rybbit or None, then save to clear the old snippet.')}
+          </p>
         )}
 
         {provider === 'none' && (
-          <div className="p-4 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg">
-            <div className="flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0" />
-              <div className="text-sm text-blue-800 dark:text-blue-200">
-                {t(
-                  'settings.analytics.providerNoneInfo',
-                  'No external tracker injected. The admin dashboard still shows summary cards + the daily chart from PicPeak\'s own access_logs; the device-breakdown chart uses a coarse user-agent heuristic.',
-                )}
-              </div>
-            </div>
-          </div>
+          <Notice tone="info">
+            {t(
+              'settings.analytics.providerNoneInfo',
+              'No external events forwarded. The admin dashboard still shows summary cards + the daily chart from PicPeak\'s own access_logs; the device-breakdown chart uses a coarse user-agent heuristic.',
+            )}
+          </Notice>
         )}
       </Card>
 

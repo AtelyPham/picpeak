@@ -27,6 +27,12 @@ jest.mock('../../src/utils/safeExec', () => ({
   spawnFromFile: jest.fn().mockResolvedValue({ stdout: '', stderr: '' }),
 }));
 jest.mock('../../src/services/emailProcessor', () => ({ queueEmail: jest.fn() }));
+// Session-cutoff controls isolate the already admitted native restore body;
+// whole-operation admission/ownership has its own maintenance-owner suite.
+jest.mock('../../src/services/portableRestoreIngress', () => ({ withIngress: run => run() }), { virtual: true });
+jest.mock('../../src/services/portableRestoreCoordinator', () => ({
+  admitUpload: async () => {}, isRegistered: () => false,
+}));
 
 const { bootCrmDb } = require('../integration/helpers/crmDb');
 
@@ -36,10 +42,11 @@ describe('restoreService — pre-restore sessions are invalidated', () => {
   const stubbedService = (restoreType) => {
     const svc = new RestoreService();
     svc.tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'picpeak-restore-cutoff-tmp-'));
-    svc.loadAndValidateManifest = async () => ({
+    svc.loadAndValidateManifest = async () => require('../../src/services/backupManifest').signManifest({
+      manifest: { version: '3.0' }, system: {}, application: {}, verification: {},
       backup: { id: 'b1', type: 'full', timestamp: new Date().toISOString() },
       files: { count: 0, total_size: 0, manifest: [] },
-      database: { type: 'sqlite' },
+      database: { type: 'sqlite', checksum: require('crypto').createHash('sha256').update('stubbed authenticated dump').digest('hex') },
       metadata: {},
     });
     svc.performPreRestoreValidation = async () => ({ isValid: true, errors: [], warnings: [] });

@@ -286,14 +286,13 @@
         "s3_storage",
         "s3_backups"
       ],
-      "reason": "Admin backup initiation, portable export/import and successful S3 roundtrip test. Local export never implies S3; names, schedules, sizes, contents and history excluded.",
+      "reason": "Admin backup initiation, portable export and successful S3 roundtrip test. Coordinated restore control is excluded separately; names, schedules, sizes, contents and history excluded.",
       "route_signatures": [
         "GET /config",
         "PUT /config",
         "GET /status",
         "POST /run",
         "GET /picpeak/export",
-        "POST /picpeak/import",
         "GET /runs/:id",
         "DELETE /runs/:id",
         "GET /files",
@@ -857,9 +856,12 @@
       "signals": [
         "share_mounts"
       ],
-      "reason": "Only admin import operation; status/list/browse are not use. Snapshot checks external-path presence, never reports a path.",
+      "reason": "Only admin import operation is use; status, browsing and source-owner assignment/revocation are excluded. Snapshot checks external-path presence, never reports a path or owner.",
       "route_signatures": [
         "GET /list",
+        "GET /sources",
+        "PUT /sources",
+        "DELETE /sources/:sourceId",
         "POST /events/:id/import-external",
         "GET /events/:id/status"
       ]
@@ -1474,8 +1476,10 @@
     "analyticsTrackerProxy.js": {
       "decision": "excluded",
       "signals": [],
-      "reason": "Public/customer/gallery/visitor surface or existing optional third-party analytics proxy: no product-usage middleware, callbacks, counters or report triggers.",
-      "route_signatures": []
+      "reason": "Optional data-only visitor telemetry is separate from product-usage reporting: no product-usage middleware, callbacks, counters or report triggers.",
+      "route_signatures": [
+        "POST /events"
+      ]
     },
     "auth.js": {
       "decision": "partial",
@@ -1605,6 +1609,18 @@
         "POST /:token/verification",
         "POST /:token/verification/confirm"
       ]
+    },
+    "portableRestoreControl.js": {
+      "decision": "excluded",
+      "signals": [],
+      "reason": "Coordinated maintenance admission and attempt-scoped progress are excluded: no product-usage middleware, background telemetry writers, capabilities, archive metadata or progress tokens are reported.",
+      "route_signatures": []
+    },
+    "portableRestoreShell.js": {
+      "decision": "excluded",
+      "signals": [],
+      "reason": "Read-only bundled maintenance UI and assets never inspect business data or start product-usage middleware, callbacks, counters or report triggers.",
+      "route_signatures": ["GET *"]
     },
     "publicFonts.js": {
       "decision": "excluded",

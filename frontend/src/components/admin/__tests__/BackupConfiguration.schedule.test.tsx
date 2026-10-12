@@ -96,9 +96,29 @@ describe('BackupConfiguration destination highlight', () => {
     const selected = screen.getByRole('button', { name: /destinationTypes.local.name/ });
     const other = screen.getByRole('button', { name: /destinationTypes.s3.name/ });
 
-    expect(selected.className).toContain('border-primary-600');
-    expect(selected.querySelector('svg')?.getAttribute('class')).toContain('text-primary-600');
-    expect(other.className).not.toContain('border-primary-600');
-    expect(selected.className).not.toMatch(/border-primary(\s|$)|accent-dark\//);
+    expect(selected.className).toContain('border-accent');
+    expect(selected.querySelector('svg')?.getAttribute('class')).toContain('text-accent');
+    expect(other.className).not.toMatch(/border-accent(\s|$)/);
+    expect(selected.className).not.toMatch(/accent-dark\//);
+  });
+});
+
+describe('BackupConfiguration restore-point retention', () => {
+  const field = () => screen.getByLabelText('backup.configuration.schedule.retentionCount') as HTMLInputElement;
+
+  it('defaults to 7 points when the install has no setting yet, and saves that', async () => {
+    const onSave = renderForm({});
+    expect(field().value).toBe('7');
+    await save();
+    expect(onSave.mock.calls[0][0]).toEqual(expect.objectContaining({ backup_retention_count: 7 }));
+  });
+
+  it('shows the stored count, 0 included, and saves a change as a number', async () => {
+    const onSave = renderForm({ backup_retention_count: 0 });
+    expect(field().value).toBe('0');
+    await userEvent.clear(field());
+    await userEvent.type(field(), '3');
+    await userEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    expect(onSave.mock.calls[0][0]).toEqual(expect.objectContaining({ backup_retention_count: 3 }));
   });
 });

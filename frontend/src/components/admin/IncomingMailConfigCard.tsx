@@ -1,25 +1,39 @@
 /**
  * Incoming mail (IMAP) configuration — a second block under the outgoing SMTP
- * settings, styled to match the SMTP card (icon inputs, password eye toggle,
- * full-width Save). Shown only when the `incomingMail` feature flag is on.
+ * settings, styled to match the SMTP card (icon inputs, password eye toggle).
+ * Shown only when the `incomingMail` feature flag is on. Its fields are part of
+ * the page's draft: the page's save bar saves them (`save` / `discard` on the
+ * handle, `onStateChange` reports dirty and saving); the buttons in the card
+ * are actions and run at once.
  *
  * The Folder field auto-detects: "Detect folders" lists the mailboxes on the
  * server and offers them as a dropdown (auto-selecting the inbox), instead of
  * making the admin type a path.
  */
-import React, { useEffect, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-toastify';
-import { Save, Server, User, Lock, Eye, EyeOff, FolderSearch, PlugZap, Mailbox, RefreshCw } from 'lucide-react';
+import { Server, User, Lock, Eye, EyeOff, FolderSearch, PlugZap, Mailbox, RefreshCw } from 'lucide-react';
 import { Button, Card, Input, Loading } from '../common';
 import { emailService, type IncomingMailConfig, type ImapFolder } from '../../services/email.service';
 import { useMutationWithToast, useModal } from '../../hooks';
+import { mailPolicyError } from '../../utils/mailErrors';
 
 const labelCls = 'block text-sm font-medium text-body mb-1';
-const selectCls = 'w-full px-3 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-accent-dark';
+const selectCls = 'w-full px-3 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:ring-2 focus:ring-accent focus:border-accent-dark';
 
-export const IncomingMailConfigCard: React.FC = () => {
+export interface IncomingMailConfigHandle {
+  /** Saves the fields when they changed; resolves false when the save failed. */
+  save: () => Promise<boolean>;
+  discard: () => void;
+}
+
+interface IncomingMailConfigCardProps {
+  onStateChange?: (state: { dirty: boolean; saving: boolean }) => void;
+}
+
+export const IncomingMailConfigCard = forwardRef<IncomingMailConfigHandle, IncomingMailConfigCardProps>(({ onStateChange }, ref) => {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['incoming-mail-config'], queryFn: () => emailService.getIncomingConfig() });
@@ -28,6 +42,7 @@ export const IncomingMailConfigCard: React.FC = () => {
   const [folders, setFolders] = useState<ImapFolder[] | null>(null);
 
   useEffect(() => { if (data) setCfg(data); }, [data]);
+  const dirty = !!data && JSON.stringify(cfg) !== JSON.stringify(data);
 
   const set = (k: keyof IncomingMailConfig, v: any) => setCfg((c) => ({ ...c, [k]: v }));
 
@@ -43,19 +58,32 @@ export const IncomingMailConfigCard: React.FC = () => {
     },
     successMessage: t('email.incoming.savedToast', 'Incoming mail settings saved.'),
     invalidateKeys: [['incoming-mail-config']],
-    errorMessage: (e: any) => e?.response?.data?.error || e?.response?.data?.errors?.[0]?.msg || e.message || 'Failed',
+    // Named, because it can fail next to an SMTP save that went through.
+    errorMessage: (e: any) => `${t('email.incoming.title', 'Incoming mail (IMAP)')}: ${mailPolicyError(e, t) || e?.response?.data?.error || e?.response?.data?.errors?.[0]?.msg || e.message || 'Failed'}`,
   });
+
+  useEffect(() => {
+    onStateChange?.({ dirty, saving: save.isPending });
+  }, [dirty, save.isPending, onStateChange]);
+
+  useImperativeHandle(ref, () => ({
+    save: async () => {
+      if (!dirty) return true;
+      try { await save.mutateAsync(); return true; } catch { return false; }
+    },
+    discard: () => { if (data) setCfg(data); },
+  }));
 
   const test = useMutationWithToast({
     mutationFn: () => emailService.testIncoming(cfg),
     successMessage: (r) => t('email.incoming.testOk', 'Connected to {{folder}} — {{messages}} messages, {{unseen}} unread.', { folder: r.folder, messages: r.messages, unseen: r.unseen }),
-    errorMessage: (e: any) => e?.response?.data?.error || e.message || t('email.incoming.testFailed', 'Connection failed.'),
+    errorMessage: (e: any) => mailPolicyError(e, t) || e?.response?.data?.error || e.message || t('email.incoming.testFailed', 'Connection failed.'),
   });
 
   const roundTrip = useMutationWithToast({
     mutationFn: () => emailService.roundTripIncoming(),
     successMessage: (r) => t('email.incoming.roundTripOk', 'Round-trip OK — delivered to {{recipient}} in {{seconds}}s.', { recipient: r.recipient, seconds: r.seconds }),
-    errorMessage: (e: any) => e?.response?.data?.error || e.message || t('email.incoming.roundTripFailed', 'Round-trip test failed.'),
+    errorMessage: (e: any) => mailPolicyError(e, t) || e?.response?.data?.error || e.message || t('email.incoming.roundTripFailed', 'Round-trip test failed.'),
   });
 
   const poll = useMutation({
@@ -72,7 +100,7 @@ export const IncomingMailConfigCard: React.FC = () => {
         qc.invalidateQueries({ queryKey: ['received-emails'] });
       }
     },
-    onError: (e: any) => toast.error(e?.response?.data?.error || e.message || t('email.incoming.pollFailed', 'Mailbox poll failed.')),
+    onError: (e: any) => toast.error(mailPolicyError(e, t) || e?.response?.data?.error || e.message || t('email.incoming.pollFailed', 'Mailbox poll failed.')),
   });
 
   const detect = useMutation({
@@ -93,7 +121,7 @@ export const IncomingMailConfigCard: React.FC = () => {
         toast.info(t('email.incoming.noFolders', 'No folders returned by the server.'));
       }
     },
-    onError: (e: any) => toast.error(e?.response?.data?.error || e.message || t('email.incoming.detectFailed', 'Could not detect folders.')),
+    onError: (e: any) => toast.error(mailPolicyError(e, t) || e?.response?.data?.error || e.message || t('email.incoming.detectFailed', 'Could not detect folders.')),
   });
 
   if (isLoading) return <Loading />;
@@ -105,19 +133,19 @@ export const IncomingMailConfigCard: React.FC = () => {
 
       <div className="space-y-4">
         <div>
-          <label className={labelCls}>{t('email.incoming.host', 'IMAP Host')} <span className="text-red-500">*</span></label>
+          <label className={labelCls}>{t('email.incoming.host', 'IMAP Host')} <span className="text-danger">*</span></label>
           <Input
             type="text"
             value={cfg.imap_host}
             onChange={(e) => set('imap_host', e.target.value)}
             placeholder="imap.example.com"
-            leftIcon={<Server className="w-5 h-5 text-neutral-400" />}
+            leftIcon={<Server className="w-5 h-5 text-faint" />}
           />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className={labelCls}>{t('email.incoming.port', 'Port')} <span className="text-red-500">*</span></label>
+            <label className={labelCls}>{t('email.incoming.port', 'Port')} <span className="text-danger">*</span></label>
             <Input type="number" value={cfg.imap_port} onChange={(e) => set('imap_port', parseInt(e.target.value, 10) || 0)} placeholder="993" />
           </div>
           <div>
@@ -130,14 +158,14 @@ export const IncomingMailConfigCard: React.FC = () => {
         </div>
 
         <div>
-          <label className={labelCls}>{t('email.incoming.user', 'Username')} <span className="text-red-500">*</span></label>
+          <label className={labelCls}>{t('email.incoming.user', 'Username')} <span className="text-danger">*</span></label>
           <Input
             type="text"
             value={cfg.imap_user}
             onChange={(e) => set('imap_user', e.target.value)}
             autoComplete="off"
             placeholder="rechnungen@yourdomain.com"
-            leftIcon={<User className="w-5 h-5 text-neutral-400" />}
+            leftIcon={<User className="w-5 h-5 text-faint" />}
           />
         </div>
 
@@ -150,9 +178,9 @@ export const IncomingMailConfigCard: React.FC = () => {
               onChange={(e) => set('imap_pass', e.target.value)}
               autoComplete="new-password"
               placeholder={t('email.enterPassword', 'Enter password')}
-              leftIcon={<Lock className="w-5 h-5 text-neutral-400" />}
+              leftIcon={<Lock className="w-5 h-5 text-faint" />}
             />
-            <button type="button" onClick={passwordVisibilityModal.toggle} className="absolute right-3 top-3 text-neutral-400 hover:text-neutral-600">
+            <button type="button" onClick={passwordVisibilityModal.toggle} className="absolute right-3 top-3 text-faint hover:text-soft">
               {passwordVisibilityModal.isOpen ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
             </button>
           </div>
@@ -216,13 +244,11 @@ export const IncomingMailConfigCard: React.FC = () => {
           >
             {t('email.incoming.poll', 'Check now')}
           </Button>
-          <Button variant="primary" onClick={() => save.mutate()} isLoading={save.isPending} leftIcon={<Save className="w-5 h-5" />} className="flex-1 min-w-[12rem]">
-            {t('email.incoming.save', 'Save Incoming Mail Settings')}
-          </Button>
         </div>
       </div>
     </Card>
   );
-};
+});
+IncomingMailConfigCard.displayName = 'IncomingMailConfigCard';
 
 export default IncomingMailConfigCard;
