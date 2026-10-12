@@ -57,7 +57,8 @@ const chokidar = require('chokidar');
 const { db } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
 const logger = require('../utils/logger');
-const { resolveExternalPath } = require('./externalMediaService');
+const applicationWork = require('./activeApplicationWork');
+const externalAccess = require('./externalMediaAccess');
 const {
   importExternalFolder,
   ImportInProgressError,
@@ -94,9 +95,23 @@ const watched = new Map();
 // Folders reported missing, so the reconcile loop logs each once rather than
 // once a minute until the mount comes back.
 const missingLogged = new Set();
+// Events whose watcher was refused, so the warning is logged once per process.
+const refusedLogged = new Set();
 let reconcileTimer = null;
 let sweepTimer = null;
 let started = false;
+let stopping = false;
+let stopPromise = null;
+const pending = new Set();
+
+function trackWork(label, run) {
+  if (stopping) return Promise.resolve(null);
+  const promise = applicationWork.track(`external media ${label}`, run);
+  pending.add(promise);
+  const release = () => pending.delete(promise);
+  promise.then(release, release);
+  return promise;
+}
 
 /**
  * Events that asked to be watched and can be: reference mode, a folder set,
@@ -127,7 +142,11 @@ const isMedia = (filePath) => MEDIA_EXTENSIONS.includes(path.extname(filePath).t
  *
  * Returns the import result, or null when nothing ran.
  */
-async function runImport(eventId, reason) {
+function runImport(eventId, reason) {
+  return trackWork('import', () => runImportInternal(eventId, reason));
+}
+
+async function runImportInternal(eventId, reason) {
   const event = await db('events').where('id', eventId).first();
   // The same eligibility listWatchedEvents() applies, re-checked at run time:
   // reconcile only looks once a minute, and an event archived or deactivated
@@ -180,6 +199,7 @@ async function runImport(eventId, reason) {
  * settles into a single pass once the folder has been quiet for DEBOUNCE_MS.
  */
 function scheduleImport(eventId) {
+  if (stopping) return;
   const entry = watched.get(eventId);
   if (!entry) return;
   if (entry.timer) clearTimeout(entry.timer);
@@ -197,9 +217,10 @@ function scheduleImport(eventId) {
  * when it could not be (bad path, folder not there yet).
  */
 async function startWatching(event) {
+  if (stopping) return false;
   let absPath;
   try {
-    absPath = resolveExternalPath({ external_path: event.external_path }, '');
+    absPath = (await externalAccess.authorizeImport(event.id, event.external_path, { automatic: true })).target;
   } catch (err) {
     // A path outside EXTERNAL_MEDIA_ROOT cannot be watched, and should not
     // have been saved. Log and leave it; nothing to clean up.
@@ -222,7 +243,11 @@ async function startWatching(event) {
   }
   missingLogged.delete(event.id);
 
+  // stop() may have begun while the filesystem checks were in flight.
+  if (stopping) return false;
+
   const watcher = chokidar.watch(absPath, {
+    followSymlinks: false,
     // The sweep and the first reconcile cover what is already there; firing
     // 'add' for every existing file on boot would schedule an import of a
     // folder that was just imported.
@@ -282,7 +307,11 @@ async function stopWatching(eventId) {
  * rows the event already has, so on a folder that was imported by hand it
  * costs one directory walk.
  */
-async function reconcile() {
+function reconcile() {
+  return trackWork('reconcile', reconcileInternal);
+}
+
+async function reconcileInternal() {
   let events;
   try {
     events = await listWatchedEvents();
@@ -291,7 +320,22 @@ async function reconcile() {
     return;
   }
 
-  const wanted = new Map(events.map((e) => [e.id, e]));
+  const wanted = new Map();
+  for (const event of events) {
+    try {
+      await externalAccess.authorizeImport(event.id, event.external_path, { automatic: true });
+      wanted.set(event.id, event);
+    } catch (error) {
+      // The gallery stops importing here, and nothing in the admin UI says
+      // so: tell the operator once, with what to change.
+      if (!refusedLogged.has(event.id)) {
+        refusedLogged.add(event.id);
+        logger.warn(`[externalMediaWatcher] event ${event.id} (${event.slug}): not watching '${event.external_path}' (${error.message}). `
+          + 'The folder must be a readable path inside EXTERNAL_MEDIA_ROOT that no link leads out of; '
+          + 'choose the folder again under the gallery\'s Photo source to fix it.');
+      }
+    }
+  }
 
   for (const eventId of [...watched.keys()]) {
     const next = wanted.get(eventId);
@@ -302,6 +346,7 @@ async function reconcile() {
 
   const fresh = [];
   for (const event of wanted.values()) {
+    if (stopping) return;
     if (!watched.has(event.id) && await startWatching(event)) {
       fresh.push(event.id);
     }
@@ -317,7 +362,11 @@ async function reconcile() {
  * purpose: each pass reads and decodes new files off the mount, and running
  * them in parallel would only make a slow NAS slower.
  */
-async function sweep() {
+function sweep() {
+  return trackWork('sweep', sweepInternal);
+}
+
+async function sweepInternal() {
   for (const eventId of [...watched.keys()]) {
     await runImport(eventId, 'sweep');
   }
@@ -328,18 +377,20 @@ function startExternalMediaWatcher() {
     logger.info('[externalMediaWatcher] disabled via EXTERNAL_MEDIA_WATCH=false');
     return null;
   }
-  if (started) return null;
+  if (started || stopping) return null;
   started = true;
 
   reconcile().catch((err) => logger.warn(`[externalMediaWatcher] initial reconcile failed: ${err.message}`));
 
   reconcileTimer = setInterval(() => {
+    if (!started) return;
     reconcile().catch((err) => logger.warn(`[externalMediaWatcher] reconcile failed: ${err.message}`));
   }, RECONCILE_INTERVAL_MS);
   reconcileTimer.unref?.();
 
   if (SWEEP_INTERVAL_MS > 0) {
     sweepTimer = setInterval(() => {
+      if (!started) return;
       sweep().catch((err) => logger.warn(`[externalMediaWatcher] sweep failed: ${err.message}`));
     }, SWEEP_INTERVAL_MS);
     sweepTimer.unref?.();
@@ -353,7 +404,18 @@ function startExternalMediaWatcher() {
  * Tear everything down. For tests and for a clean shutdown; the process exits
  * fine without it because every timer is unref'd.
  */
-async function stopExternalMediaWatcher() {
+function stopExternalMediaWatcher() {
+  if (stopPromise) return stopPromise;
+  stopping = true;
+  started = false;
+  stopPromise = stopExternalMediaWatcherInternal().finally(() => {
+    stopping = false;
+    stopPromise = null;
+  });
+  return stopPromise;
+}
+
+async function stopExternalMediaWatcherInternal() {
   if (reconcileTimer) clearInterval(reconcileTimer);
   if (sweepTimer) clearInterval(sweepTimer);
   reconcileTimer = null;
@@ -361,8 +423,12 @@ async function stopExternalMediaWatcher() {
   for (const eventId of [...watched.keys()]) {
     await stopWatching(eventId);
   }
+  // Imports and reconciliations started by a timer, initial startup, or an
+  // exported manual call are owned until their last file/database write.
+  // A pending reconciliation cannot create another watcher while stopping.
+  while (pending.size) await Promise.allSettled([...pending]);
   missingLogged.clear();
-  started = false;
+  refusedLogged.clear();
 }
 
 module.exports = {

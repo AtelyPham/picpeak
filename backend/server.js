@@ -68,7 +68,10 @@ const helmet = require('helmet');
 const compression = require('compression');
 const cors = require('cors');
 const path = require('path');
-const { initializeDatabase, db } = require('./src/database/db');
+const { initializeDatabase, db, enableApplicationWorkOwnership } = require('./src/database/db');
+const applicationWork = require('./src/services/activeApplicationWork');
+const restoreCoordinator = require('./src/services/portableRestoreCoordinator');
+const { createApplicationWorkMiddleware, ownRouteHandlers } = require('./src/middleware/applicationWork');
 const {
   getFrontendBaseUrlSync,
   getAbsoluteFrontendUrl,
@@ -99,6 +102,12 @@ const {
   getAdminTokenFromRequest,
   getGalleryTokenFromRequest,
 } = require('./src/utils/tokenUtils');
+const {
+  LEGACY_TRUST_PROXY,
+  isTrustProxyUnset,
+  parseTrustProxy,
+  resolveListenHost,
+} = require('./src/config/network');
 
 // Import routes
 const authRoutes = require('./src/routes/auth');
@@ -109,6 +118,7 @@ const setupRoutes = require('./src/routes/setup');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const LISTEN_HOST = resolveListenHost();
 
 // Trust proxy headers (required for Traefik/nginx).
 //
@@ -118,20 +128,27 @@ const PORT = process.env.PORT || 3000;
 // rate-limit keys) is the originating client IP behind any number
 // of trusted reverse proxies.
 //
-// Default: 'loopback, linklocal, uniquelocal' — covers localhost,
-// link-local (169.254.0.0/16), and unique-local IPv6 (fc00::/7).
-// Standard for nginx-in-front-of-Node deployments on the same host
-// and for Docker bridge networks. Operators with unusual topologies
-// (load balancer in a public subnet, multi-hop NAT) override via
-// TRUST_PROXY env, accepting any value Express accepts: a number,
-// 'loopback', 'linklocal', 'uniquelocal', a CIDR, a comma list, or
+// Default (TRUST_PROXY unset): 'loopback, linklocal, uniquelocal', the
+// legacy private-range trust. It stays the default so an install that only
+// pulls a new image keeps resolving the real client behind its proxy, but a
+// source address being private does not prove it is a proxy this deployment
+// controls. Recommended: set TRUST_PROXY to the exact hop count (the Compose
+// stack pins 1 for its frontend nginx; the installer writes 'loopback' for
+// a native reverse proxy). Any value Express accepts works: a number,
+// 'loopback', 'linklocal', 'uniquelocal', a CIDR, a comma list, 'false' /
+// '0' (trust nothing), or
 // 'true' (trust ALL proxies — only safe behind a fully-controlled
 // reverse-proxy chain).
 //
 // NEVER read req.headers['x-forwarded-for'] directly in audit paths
 // — see utils/clientIp.js for the rationale.
-const trustProxySetting = process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal';
-app.set('trust proxy', trustProxySetting === 'true' ? true : trustProxySetting);
+app.set('trust proxy', parseTrustProxy());
+if (process.env.NODE_ENV === 'production' && isTrustProxyUnset()) {
+  logger.warn(
+    `TRUST_PROXY is not set: trusting forwarding headers from every private-range address (${LEGACY_TRUST_PROXY}). `
+    + 'Set TRUST_PROXY to the exact number of reverse-proxy hops in front of PicPeak (or false when there is none).'
+  );
+}
 
 // Security middleware with custom CSP
 // In native HTTP installs, do NOT force HTTPS for subresources.
@@ -255,16 +272,34 @@ const corsOptions = {
 };
 
 // Only attach CORS to API endpoints, not static assets
+// This is a dedicated exact-path capability surface, never an admin-prefix or
+// caller-header exemption to ordinary admission. It also precedes
+// analytics, body parsing, static rendering and every application API.
+app.use(require('./src/routes/portableRestoreControl').createRestoreControlRouter({ cors: cors(corsOptions) }));
+app.use(require('./src/routes/portableRestoreShell').createRestoreShellRouter({ shouldServe: () => restoreCoordinator.isFenced() }));
+// A restore keeps this process alive and busy on purpose. While one runs the
+// health probes answer 200 from memory, outside the request fence and without
+// touching the database, so a health-based restarter does not kill it halfway.
+app.get(['/health', '/api/health'], (req, res, next) => {
+  if (!restoreCoordinator.isFenced()) return next();
+  return res.json({
+    status: 'ok',
+    maintenance: restoreCoordinator.status().restartRequired ? 'restart_required' : 'restoring',
+    timestamp: new Date().toISOString(),
+    pid: process.pid,
+    uptime: process.uptime()
+  });
+});
+// The fence is a flag in memory, refreshed by the coordinator's own watch;
+// an ordinary request never reads the control row.
+app.use(createApplicationWorkMiddleware({ enabled: () => restoreCoordinator.tracking() }));
 app.use('/api', cors(corsOptions));
 // Handle preflight explicitly for API paths
 app.options('/api/*', cors(corsOptions));
 
-// Same-origin proxy for the configured analytics tracker. Mounted HERE, ahead
-// of the body parsers, so the tracker's beacon payload reaches the proxy as a
-// raw buffer (express.json would consume it, and the CSRF Content-Type gate
-// below would 415 a navigator.sendBeacon `text/plain` POST). It carries no
-// PicPeak state and reads no PicPeak credentials — see the route file for the
-// SSRF/path-allowlist model.
+// Data-only analytics, mounted before the app-wide body parser to enforce its
+// own smaller JSON limit. It never serves vendor code, reads
+// PicPeak credentials, or forwards arbitrary upstream responses.
 app.use('/api/analytics/tracker', require('./src/routes/analyticsTrackerProxy'));
 
 // Health check endpoint. `pid` + `uptime` let monitors (and the local E2E
@@ -1168,6 +1203,7 @@ async function stopServer() {
       await Promise.all([close, require('./src/services/serviceShutdown').stopServices()]);
     } finally {
       clearTimeout(timeout);
+      await restoreCoordinator.stop();
       // Always release the pool: a rejected service stop must not leave
       // ref'd sockets keeping the process alive until SIGKILL.
       await db.destroy();
@@ -1177,8 +1213,43 @@ async function stopServer() {
 }
 
 // Initialize services
-async function startServer() {
+// Request and query tracking exists so a coordinated restore can wait for
+// accepted work. It is installed only where such a restore can run.
+let restoreWorkTracked = false;
+function trackRestoreWork() {
+  if (restoreWorkTracked) return;
+  restoreWorkTracked = true;
+  enableApplicationWorkOwnership();
+  ownRouteHandlers(app);
+}
+
+// Only reached when a previous run left a restore fence behind.
+async function recoverPendingRestore() {
+  trackRestoreWork();
+  // As for the ordinary listener: bootstrap authority must not become the
+  // default authority of an incoming request.
+  httpServer = await applicationWork.runUncontrolled(() => require('./src/database/crmAccess').withoutCrmContext(
+    () => new Promise((resolve, reject) => {
+      const listener = app.listen(PORT, LISTEN_HOST, () => { listener.removeListener('error', reject); resolve(listener); });
+      listener.once('error', reject);
+    })));
+  logger.warn(`A portable restore was interrupted; serving the maintenance page on port ${PORT} until it is recovered`);
+  await restoreCoordinator.initialize();
+  await restoreCoordinator.waitForStartupAdmission();
+}
+
+function startServer() {
+  return require('./src/database/crmAccess').withTrustedCrmAccess('application bootstrap', startServerInternal);
+}
+
+async function startServerInternal() {
   try {
+    // A portable restore interrupted by a crash or reboot leaves the instance
+    // fenced. Only then does the listener open before the database is ready:
+    // it serves the maintenance page and the restore progress while the
+    // restore is recovered. For every other boot this is one file lookup.
+    if (await restoreCoordinator.pendingAtBoot()) await recoverPendingRestore();
+
     // Initialize database
     await initializeDatabase();
     await require('./src/utils/authSecurity').assertAuthSecuritySchema();
@@ -1200,6 +1271,8 @@ async function startServer() {
     // Initialize auth security cleanup job
     const { initializeCleanupJob } = require('./src/utils/authSecurity');
     initializeCleanupJob();
+    require('./src/middleware/sessionTimeout').startSessionCleanup();
+    require('./src/services/chunkedUploadService').start();
     
     require('./src/utils/cleanupTempUploads').startTempUploadCleanup();
 
@@ -1419,6 +1492,22 @@ async function startServer() {
     // sharp/ffmpeg/EXIF pipeline off the request thread.
     backgroundProcessor.start();
 
+    // Decide now how image work is isolated, so a host that cannot run the
+    // memory-limited image worker says so in the startup log, once.
+    require('./src/services/isolatedSharp').prepare()
+      .catch((err) => logger.warn('Image worker check failed at boot', { error: err.message }));
+
+    // The same for ffmpeg/ffprobe/exiftool: one startup line says which of
+    // the optional protections (process guard, kernel leases) this host runs
+    // and what to do about the ones it does not. Never a reason not to start.
+    require('./src/services/mediaCapabilities').probe();
+
+    // Public upload leases: heartbeat this process's live requests and reap
+    // the ones a dead process left behind, now and every 30 s.
+    const publicUploadQuota = require('./src/services/publicUploadQuota');
+    publicUploadQuota.startMaintenance();
+    publicUploadQuota.cleanupAbandoned().catch((err) => logger.warn('Public upload reaper failed at boot', { error: err.message }));
+
     // Face detection (#1074). Starts alongside the photo processor but stays
     // idle — every worker tick re-checks the `faces` feature flag, which is
     // off by default. It is safe to start unconditionally precisely because
@@ -1435,8 +1524,18 @@ async function startServer() {
     // setting every tick, so nothing runs until an admin switches it on.
     require('./src/services/videoRenditionQueue').start();
 
-    httpServer = app.listen(PORT, () => {
-      logger.info(`Server running on port ${PORT}`);
+    // Coordinated portable restore is optional. Where this host cannot run it
+    // one startup line says why, the import answers 503 and nothing else
+    // changes; where it can, requests are tracked so a restore can drain them.
+    // Never a reason not to start, and never awaited.
+    restoreCoordinator.activate({
+      resumeServices: () => require('./src/services/serviceShutdown').resumeServices(),
+      forceClose: () => httpServer?.closeAllConnections(),
+    }).then((capability) => { if (capability.available) trackRestoreWork(); })
+      .catch((err) => logger.warn('Portable restore check failed at boot', { error: err.message }));
+
+    const listening = () => {
+      logger.info(`Server running on ${LISTEN_HOST || 'all interfaces'}:${PORT}`);
       logger.info(`Admin interface: ${process.env.ADMIN_URL || 'http://localhost:3000'}`);
       logger.info(`Frontend: ${process.env.FRONTEND_URL || 'http://localhost:3001'}`);
       // First-run banner. Print the TOKEN ITSELF only when the 0600 token file
@@ -1451,8 +1550,14 @@ async function startServer() {
           : `  One-time setup token:  ${setupToken}\n  (could not write the token file, so it is shown here)`;
         console.log(`\n${line}\n  PicPeak first-run setup — no admin account yet.\n  Open:                  ${url}\n${secretLine}\n${line}\n`);
       }
-    });
+    };
+    // Already listening when an interrupted restore had to be recovered first.
+    // Bootstrap/cron authority must not become the default authority of an
+    // incoming HTTP request. Its authentication/capability middleware owns it.
+    if (httpServer) listening();
+    else httpServer = await require('./src/database/crmAccess').withoutCrmContext(() => app.listen(PORT, LISTEN_HOST, listening));
   } catch (error) {
+    if (shutdownPromise) { await shutdownPromise; return; }
     logger.error('Failed to start server:', error);
     await stopServer();
     process.exitCode = 1;

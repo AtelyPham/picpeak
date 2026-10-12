@@ -22,10 +22,11 @@ const { errorResponse, safeValidationErrors } = require('../../utils/routeHelper
 const { isUniqueViolation } = require('../../utils/dbErrors');
 const { buildShareLinkVariants } = require('../../services/shareLinkService');
 const { parseBooleanInput } = require('../../utils/parsers');
+const externalAccess = require('../../services/externalMediaAccess');
 const eventTypeService = require('../../services/eventTypeService');
 const { normaliseEventTimeTriple } = require('../../services/eventService');
 const { hasColumnCached } = require('../../utils/schemaCache');
-const { requireEventOwnership, requireEventOwner, scopeEventsListQuery, withoutForeignEventSecrets, scopeEventsQuery, ownsEvent } = require('../../middleware/ownership');
+const { requireEventOwnership, requireEventOwner, scopeEventsListQuery, withoutForeignEventSecrets, scopeEventsQuery, ownsEvent, canLinkCrmToEvent } = require('../../middleware/ownership');
 const eventAdminAssignments = require('../../services/eventAdminAssignmentsService');
 const { mayReviewUploads, holdsForReview } = require('../../services/uploadReviewService');
 const { applyEventListSort } = require('./listSort');
@@ -37,6 +38,7 @@ const { credentialChangeColumns, sameAsStored } = require('../../utils/galleryCr
 const { getFrontendBaseUrl, getAbsoluteFrontendUrl } = require('../../utils/frontendUrl');
 const {
   resolveGalleryRecipients, galleryCreatedEmailData, notifyGalleryRecipients, describeRecipients, recipientSummary,
+  galleryLinkFor,
   passwordKnownColumns,
 } = require('../../services/galleryNotificationService');
 const downloadZipService = require('../../services/downloadZipService');
@@ -510,6 +512,8 @@ module.exports = (router) => {
         ...event,
         assigned_admins: assignedAdmins,
         can_manage_assignments: ownsEvent(req.admin, event),
+        // Whether invoices may be linked to this gallery (the CRM owner rule).
+        can_link_crm: canLinkCrmToEvent(req.admin, event),
         can_review_uploads: await mayReviewUploads(req.admin, event),
         gallery_notice: galleryNotice,
         photo_count: parseInt(photoCount) || 0,
@@ -804,7 +808,10 @@ module.exports = (router) => {
             await queueWhatsapp(parseInt(id, 10), event.customer_phone, 'gallery_created', {
               customer_name: event.customer_name || event.host_name || '',
               event_name: event.event_name,
-              gallery_link: shareUrlForWa || `${await getFrontendBaseUrl()}/gallery/${event.slug}`,
+              // The phone belongs to the gallery's customer: a CRM customer
+              // gets their portal link here too (galleryLinkFor).
+              gallery_link: await galleryLinkFor(event, event.customer_email || event.host_email,
+                shareUrlForWa || `${await getFrontendBaseUrl()}/gallery/${event.slug}`),
               // Plaintext only when the admin re-typed at publish; otherwise
               // omit so the buildComponents() helper renders an empty {{4}}
               // line instead of leaking the "(set at creation)" sentinel.
@@ -1533,7 +1540,7 @@ module.exports = (router) => {
       // canonical one is dropped here, before the guard.
       for (const key of Object.keys(updates)) {
         const lower = key.toLowerCase();
-        if ((lower === 'external_watch' || lower === 'external_path') && key !== lower) delete updates[key];
+        if (['external_watch', 'external_path', 'source_mode'].includes(lower) && key !== lower) delete updates[key];
       }
 
       // Folder watcher opt-in (issue 1187). Written through formatBoolean
@@ -1583,6 +1590,46 @@ module.exports = (router) => {
         return res.status(400).json({ error: 'external_path is required when source_mode is reference' });
       }
 
+      // The event form re-sends the source fields with every save. Only a save
+      // that points the gallery at another folder is a source decision and
+      // needs access to that folder; renaming a reference gallery or moving
+      // its expiry must not. Fields that repeat what is stored are dropped, so
+      // the rest of the save goes through on events.edit alone.
+      const sourceFields = ['source_mode', 'external_path', 'external_watch']
+        .filter((key) => Object.prototype.hasOwnProperty.call(updates, key));
+      if (sourceFields.length > 0) {
+        const stored = await db('events').where({ id }).first('source_mode', 'external_path', 'external_watch');
+        const storedMode = stored?.source_mode === 'reference' ? 'reference' : 'managed';
+        const sendsPath = sourceFields.includes('external_path');
+        // Compared normalised: `/clients/a` on the row and `clients/a` in the
+        // request are the same folder.
+        const pathChanges = sendsPath && !externalAccess.sameSourcePath(updates.external_path, stored?.external_path);
+        const becomesReference = updates.source_mode === 'reference' && storedMode !== 'reference';
+        const nextPath = sendsPath ? updates.external_path : stored?.external_path;
+        try {
+          if (nextPath && (pathChanges || becomesReference)) {
+            const willWatch = sourceFields.includes('external_watch')
+              ? Boolean(updates.external_watch) : Boolean(stored?.external_watch);
+            const access = await externalAccess.authorizeImport(id, nextPath, {
+              actor: { type: 'admin', id: req.admin.id },
+              permission: willWatch ? 'photos.upload' : 'photos.view',
+            });
+            updates.external_path = access.relativePath;
+          } else if (sendsPath && !pathChanges) {
+            delete updates.external_path;
+          }
+        } catch (error) {
+          if (error instanceof externalAccess.ExternalMediaAccessError || error.code === 'PATH_OUTSIDE_BASE') {
+            return res.status(error.statusCode || 400).json({ error: error.message });
+          }
+          throw error;
+        }
+        if (updates.source_mode === storedMode) delete updates.source_mode;
+        if (sourceFields.includes('external_watch') && Boolean(updates.external_watch) === Boolean(stored?.external_watch)) {
+          delete updates.external_watch;
+        }
+      }
+
       // Plaintexts to remember after the row is written (#1271); each key is
       // only set when this request changed that password.
       const recoverable = {};
@@ -1601,7 +1648,6 @@ module.exports = (router) => {
       }
       if (updates.regenerate_client_token) {
         updates.client_share_token = crypto.randomBytes(32).toString('hex');
-        credentialChanges.add('client');
       }
       delete updates.regenerate_client_token;
 
@@ -1910,6 +1956,12 @@ module.exports = (router) => {
         if (parseBooleanInput(updates.client_access_enabled, false) && !event.client_share_token && !updates.client_share_token) {
           updates.client_share_token = crypto.randomBytes(32).toString('hex');
         }
+      }
+      // Client login needs the link token as well as the PIN, so a PIN never
+      // stays without one (older rows, or a PIN set on its own).
+      if ((updates.client_password_hash || event.client_password_hash)
+        && !event.client_share_token && !updates.client_share_token) {
+        updates.client_share_token = crypto.randomBytes(32).toString('hex');
       }
 
       // Update event. Skip the write when the denylist (or masked secrets)

@@ -8,9 +8,13 @@ const { createReadStream, createWriteStream, realpathSync, constants: fsConstant
 const { db } = require('../database/db');
 const knexConfig = require('../../knexfile');
 const logger = require('../utils/logger');
+const applicationWork = require('./activeApplicationWork');
 const { queueEmail } = require('./emailProcessor');
 const { formatBoolean } = require('../utils/dbCompat');
 const packageJson = require('../../package.json');
+const recoveryFiles = require('./recoveryFiles');
+const { getStorage } = require('./storage');
+const { withTrustedCrmAccess } = require('../database/crmAccess');
 
 // Constants
 
@@ -27,6 +31,7 @@ const packageJson = require('../../package.json');
 // — so the rows are deleted from the temp copy before it is finalised. See
 // createSQLiteBackup below.
 const FACE_TABLES = ['photo_faces', 'event_people', 'event_people_merge_dismissals'];
+const RESTORE_RUNTIME_TABLES = require('../utils/restoreRuntimeTables');
 
 // sqlite3's `.backup` is a dot-command parsed by sqlite3's OWN tokenizer, not
 // the shell: spawn()'s argv separation does not stop a quote or a line break
@@ -270,7 +275,14 @@ class DatabaseBackupService {
   /**
    * Get table checksums for change detection
    */
-  async getTableChecksums() {
+  // The checksums read every table whole, CRM documents included, and return
+  // only counts and digests. Who may ask for them is the route's backup
+  // permission, so the read itself is not narrowed to one admin's documents.
+  getTableChecksums() {
+    return withTrustedCrmAccess('database backup checksums', () => this.getTableChecksumsInternal());
+  }
+
+  async getTableChecksumsInternal() {
     const checksums = {};
     const tables = await this.getTables();
     
@@ -335,7 +347,7 @@ class DatabaseBackupService {
         AND name != 'knex_migrations_lock'
         ORDER BY name
       `);
-      return result.map(row => row.name).filter((t) => !FACE_TABLES.includes(t));
+      return result.map(row => row.name).filter((t) => !FACE_TABLES.includes(t) && !RESTORE_RUNTIME_TABLES.includes(t));
     } else {
       // PostgreSQL
       const result = await db.raw(`
@@ -348,7 +360,7 @@ class DatabaseBackupService {
       `);
       return result.rows
         .map(row => row.table_name)
-        .filter((t) => !FACE_TABLES.includes(t));
+        .filter((t) => !FACE_TABLES.includes(t) && !RESTORE_RUNTIME_TABLES.includes(t));
     }
   }
 
@@ -398,6 +410,15 @@ class DatabaseBackupService {
         ]).catch(() => {
           // Table absent on installs that predate migration 177 — fine.
         });
+      }
+      // Runtime S3 indirection is target-local. Unlike optional historical
+      // face tables, scrub failures MUST abort rather than export live keys.
+      for (const table of RESTORE_RUNTIME_TABLES) {
+        const present = await spawnAsync('sqlite3', [tempPath,
+          `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='${table}';`]);
+        if (present.stdout.trim() === '1') {
+          await spawnAsync('sqlite3', [tempPath, `DELETE FROM ${table};`]);
+        }
       }
 
       // Reset the DERIVED state on photos as well. Without this the restored
@@ -498,6 +519,7 @@ class DatabaseBackupService {
     for (const table of FACE_TABLES) {
       pgDumpOptions.push(`--exclude-table-data=public.${table}`);
     }
+    for (const table of RESTORE_RUNTIME_TABLES) pgDumpOptions.push(`--exclude-table-data=public.${table}`);
     // NOTE: the Postgres path cannot rewrite rows inside pg_dump the way the
     // SQLite path can, so photos.face_status is restored as-is here. The
     // restore path compensates — see resetDerivedFaceState in restoreService.
@@ -567,9 +589,16 @@ class DatabaseBackupService {
   }
 
   /**
-   * Main backup method
+   * Main backup method. A backup covers the whole database whoever starts it
+   * (the schedule, or an admin holding backup.create), so it never runs under
+   * the caller's CRM document scope.
    */
-  async backup(options = {}) {
+  backup(options = {}) {
+    return applicationWork.track('database backup',
+      () => withTrustedCrmAccess('database backup', () => this.backupInternal(options)));
+  }
+
+  async backupInternal(options = {}) {
     if (this.isRunning) {
       throw new Error('Backup already in progress');
     }
@@ -673,10 +702,29 @@ class DatabaseBackupService {
       
       // Create the backup
       this.updateProgress('Creating database backup...');
+      const captureReferences = async () => [...await recoveryFiles.requiredKeys(db, () => true)].sort();
+      let storageReferences = getStorage().kind() === 's3' ? await captureReferences() : null;
       if (this.dbType === 'sqlite') {
         await this.createSQLiteBackup(sqlFile, options);
       } else {
         await this.createPostgreSQLBackup(sqlFile, options);
+      }
+      if (storageReferences) {
+        // An upload or an archive run landing mid-dump is normal on a live
+        // install. Re-read until two captures agree; a set that never settles
+        // is recorded as the union, which can only require too much.
+        const seen = new Set(storageReferences);
+        let settled = false;
+        for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+          const current = await captureReferences();
+          settled = JSON.stringify(current) === JSON.stringify(storageReferences);
+          current.forEach(key => seen.add(key));
+          storageReferences = current;
+        }
+        if (!settled) {
+          storageReferences = [...seen].sort();
+          logger.warn(`Primary-storage references kept changing during the database dump; recording the union of ${storageReferences.length} keys`);
+        }
       }
       
       // Compress if requested
@@ -699,6 +747,16 @@ class DatabaseBackupService {
       
       // Get final file size
       const finalStats = await fs.stat(finalFile);
+
+      // The key list stays beside the dump; the run row (returned by
+      // GET /history) only carries its count and checksum.
+      let referenceStats = null;
+      if (storageReferences) {
+        const body = JSON.stringify(storageReferences);
+        await fs.writeFile(`${finalFile}${recoveryFiles.REFERENCES_SUFFIX}`, body, { mode: 0o600 });
+        referenceStats = { count: storageReferences.length,
+          checksum: crypto.createHash('sha256').update(body).digest('hex') };
+      }
       
       // Calculate duration
       const endTime = new Date();
@@ -722,6 +780,7 @@ class DatabaseBackupService {
             compressed: compress,
             validated: validateIntegrity,
             compressionStats,
+            ...(referenceStats ? { storageReferences: referenceStats } : {}),
             tableCount: tableChecksums ? Object.keys(tableChecksums).length : null,
             app_version: packageJson.version,
             node_version: process.version,
@@ -873,6 +932,7 @@ class DatabaseBackupService {
           // Delete the file
           if (backup.file_path) {
             await fs.unlink(backup.file_path);
+            await fs.rm(`${backup.file_path}${recoveryFiles.REFERENCES_SUFFIX}`, { force: true });
           }
           
           // Delete the record
@@ -1018,7 +1078,9 @@ async function startScheduledBackups() {
     // Default schedule: 3 AM daily (offset from file backups at 2 AM)
     const schedule = config.database_backup_schedule || '0 3 * * *';
 
-    backupSchedule = cron.schedule(schedule, async () => {
+    // The schedule can be restarted from an admin's settings save; the job
+    // must not keep running as that admin.
+    backupSchedule = cron.schedule(schedule, () => withTrustedCrmAccess('scheduled database backup', async () => {
       logger.info('Starting scheduled database backup');
       try {
         await databaseBackupService.backup();
@@ -1031,7 +1093,7 @@ async function startScheduledBackups() {
       } catch (error) {
         logger.error('Scheduled database backup failed:', error);
       }
-    });
+    }));
     
     logger.info(`Database backup service started with schedule: ${schedule}`);
   } catch (error) {
