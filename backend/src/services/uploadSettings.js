@@ -314,19 +314,17 @@ const getAllowedMimeTypes = async () => {
  * read files off disk rather than from a browser: there is no MIME to check,
  * and an extension the MIME map does not know yet (CR3, RAF, RW2) is still a
  * deliberate choice by the admin.
+ *
+ * Throws when the database read fails, unlike getAllowedMimeTypes. A watched
+ * file is announced once, so a failed read passed off as "not allowed" would
+ * skip it for good. Nothing is cached on failure.
  */
 const getAllowedExtensions = async () => {
   if (Date.now() < allowedExtensionsCacheExpiresAt && cachedAllowedExtensions) {
     return cachedAllowedExtensions;
   }
 
-  let rawValue = DEFAULT_ALLOWED_FILE_TYPES;
-  try {
-    rawValue = await readAllowedFileTypesSetting();
-  } catch (error) {
-    logger.error('Failed to read allowed file types setting:', error.message);
-  }
-
+  const rawValue = await readAllowedFileTypesSetting();
   const extensions = new Set(
     String(typeof rawValue === 'string' && rawValue.trim() ? rawValue : DEFAULT_ALLOWED_FILE_TYPES)
       .split(',')
