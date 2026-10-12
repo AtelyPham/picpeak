@@ -74,6 +74,9 @@ const DEFAULT_ALLOWED_FILE_TYPES = 'jpg,jpeg,png,webp';
 let cachedAllowedTypes = null;
 let allowedTypesCacheExpiresAt = 0;
 
+let cachedAllowedExtensions = null;
+let allowedExtensionsCacheExpiresAt = 0;
+
 const parseSettingValue = (setting) => {
   if (!setting || setting.setting_value == null) {
     return null;
@@ -301,9 +304,46 @@ const getAllowedMimeTypes = async () => {
   }
 };
 
+/**
+ * The configured extensions themselves, bare and lowercase. For callers that
+ * read files off disk rather than from a browser: there is no MIME to check,
+ * and an extension the MIME map does not know yet (CR3, RAF, RW2) is still a
+ * deliberate choice by the admin.
+ */
+const getAllowedExtensions = async () => {
+  if (Date.now() < allowedExtensionsCacheExpiresAt && cachedAllowedExtensions) {
+    return cachedAllowedExtensions;
+  }
+
+  let rawValue = DEFAULT_ALLOWED_FILE_TYPES;
+  try {
+    const setting = await db('app_settings')
+      .where({ setting_key: 'general_allowed_file_types' })
+      .first();
+    rawValue = setting?.setting_value;
+    if (typeof rawValue === 'string') {
+      try { rawValue = JSON.parse(rawValue); } catch { /* keep string */ }
+    }
+  } catch (error) {
+    logger.error('Failed to read allowed file types setting:', error.message);
+  }
+
+  const extensions = new Set(
+    String(typeof rawValue === 'string' && rawValue.trim() ? rawValue : DEFAULT_ALLOWED_FILE_TYPES)
+      .split(',')
+      .map(ext => ext.trim().toLowerCase().replace(/^\./, ''))
+      .filter(Boolean)
+  );
+  cachedAllowedExtensions = extensions;
+  allowedExtensionsCacheExpiresAt = Date.now() + CACHE_TTL_MS;
+  return extensions;
+};
+
 const clearAllowedTypesCache = () => {
   allowedTypesCacheExpiresAt = 0;
   cachedAllowedTypes = null;
+  allowedExtensionsCacheExpiresAt = 0;
+  cachedAllowedExtensions = null;
 };
 
 module.exports = {
@@ -316,6 +356,7 @@ module.exports = {
   getMaxVideoSizeBytes,
   clearMaxVideoSizeCache,
   getAllowedMimeTypes,
+  getAllowedExtensions,
   clearAllowedTypesCache,
   extensionsToMimeTypes,
   EXTENSION_TO_MIME,

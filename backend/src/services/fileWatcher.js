@@ -7,10 +7,13 @@ const { resolveCredit } = require('./photoCredit');
 const pLimit = require('p-limit');
 const { db } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
-const { generateThumbnail, generateVideoPlaceholder } = require('./imageProcessor');
+const { generateThumbnail, generateVideoPlaceholder, withProcessableImage } = require('./imageProcessor');
 const logger = require('../utils/logger');
 const { isVideoMimeType } = require('./videoProcessor');
 const mime = require('mime-types');
+const { isRawFilename } = require('../utils/rawFormats');
+const { normalizeUploadMimeType } = require('../utils/fileSecurityUtils');
+const { getAllowedExtensions } = require('./uploadSettings');
 const downloadZipService = require('./downloadZipService');
 
 const { getStoragePath } = require('../config/storage');
@@ -134,12 +137,23 @@ async function processNewPhoto(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const detectedMime = mime.lookup(filePath) || '';
   const isVideo = isVideoMimeType(detectedMime, filePath) || ['.mp4', '.mov', '.webm'].includes(ext);
-  if (!isVideo && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) return;
+  const isRaw = !isVideo && isRawFilename(filePath);
+  if (!isVideo && !isRaw && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) return;
   
   // Skip temporary upload files
   const filename = path.basename(filePath);
   if (filename.startsWith('temp_')) {
     logger.debug(`Skipping temporary upload file: ${filename}`);
+    return;
+  }
+
+  // RAW is opt-in, the same switch the upload gate reads. Checked by
+  // extension, not through the MIME map: nothing here came from a browser, so
+  // there is no client MIME to validate, and the map does not know every RAW
+  // extension yet. A skip is logged because the file stays in the folder and
+  // nothing else would say why it never showed up.
+  if (isRaw && !(await getAllowedExtensions()).has(ext.slice(1))) {
+    logger.warn(`[fileWatcher] Skipping ${relativePath}: ${ext.slice(1)} is not in general_allowed_file_types`);
     return;
   }
   
@@ -152,34 +166,42 @@ async function processNewPhoto(filePath) {
   
   // Generate thumbnail or placeholder
   let thumbnailPath = null;
-  if (isVideo) {
-    thumbnailPath = await generateVideoPlaceholder(filename);
-  } else {
-    thumbnailPath = await generateThumbnail(filePath);
-  }
-  
-  // Calculate relative thumbnail path
-  const relativeThumbPath = thumbnailPath; // thumbnailPath is already relative to storage root
-  const mimeType = detectedMime || (isVideo ? 'video/mp4' : 'image/jpeg');
-
   // Capture image dimensions so aspect-aware layouts (masonry / mosaic /
   // justified) can size each card to the photo's real proportions
   // instead of the 800×600 fallback in MasonryGalleryLayout (#447).
   // Skip videos — those would need ffprobe.
   let dimensions = null;
-  if (!isVideo) {
+  if (isVideo) {
+    thumbnailPath = await generateVideoPlaceholder(filename);
+  } else {
+    // sharp cannot decode a RAW, so thumbnail and measure its embedded
+    // preview instead. Pass-through for ordinary images.
+    const proc = await withProcessableImage(filePath, filename);
     try {
-      const metadata = await sharp(filePath).metadata();
-      // Oriented, not raw — see imageProcessor.orientedDimensions (#1185).
-      const dims = require('./imageProcessor').orientedDimensions(metadata);
-      if (dims.width && dims.height) {
-        dimensions = { width: dims.width, height: dims.height };
+      thumbnailPath = await generateThumbnail(proc.path, { outputBasename: proc.outputBasename });
+      try {
+        const metadata = await sharp(proc.path).metadata();
+        // Oriented, not raw — see imageProcessor.orientedDimensions (#1185).
+        const dims = require('./imageProcessor').orientedDimensions(metadata);
+        if (dims.width && dims.height) {
+          dimensions = { width: dims.width, height: dims.height };
+        }
+      } catch (err) {
+        if (require('./imageResourcePolicy').isResourceError(err)) throw err;
+        logger.debug(`Could not read image dimensions for ${filename}: ${err.message}`);
       }
-    } catch (err) {
-      if (require('./imageResourcePolicy').isResourceError(err)) throw err;
-      logger.debug(`Could not read image dimensions for ${filename}: ${err.message}`);
+    } finally {
+      await proc.cleanup();
     }
   }
+  
+  // Calculate relative thumbnail path
+  const relativeThumbPath = thumbnailPath; // thumbnailPath is already relative to storage root
+  // mime-db knows few RAW types and calls .dcr a Director file, so a RAW is
+  // typed from its extension alone.
+  const mimeType = isRaw
+    ? (normalizeUploadMimeType(filename, '') || 'application/octet-stream')
+    : (detectedMime || (isVideo ? 'video/mp4' : 'image/jpeg'));
 
   // Check if photo already exists.
   //
@@ -212,13 +234,18 @@ async function processNewPhoto(filePath) {
     const insertResult = await db('photos').insert({
       event_id: event.id,
       filename: path.basename(filePath),
-      // The camera-original name. This path never sets original_filename, so
-      // without this the Lightroom round-trip (#745) has nothing to match a
-      // RAW against for auto-imported galleries.
+      // The camera-original name, the key the Lightroom round-trip (#745)
+      // matches a RAW against for auto-imported galleries.
       source_filename: path.basename(filePath),
+      original_filename: path.basename(filePath),
       path: relativePath,
       thumbnail_path: relativeThumbPath,
       type: isVideo ? 'video' : photoType,
+      // Written out rather than left to the column defaults, which file every
+      // row as an image, video or not.
+      media_type: isVideo ? 'video' : 'image',
+      source_origin: 'managed',
+      processing_status: 'complete',
       size_bytes: stats.size,
       mime_type: mimeType,
       ...(dimensions && { width: dimensions.width, height: dimensions.height }),
@@ -270,4 +297,4 @@ async function removePhoto(filePath) {
   logger.info(`Removed photo: ${relativePath}`);
 }
 
-module.exports = { stopFileWatcher, startFileWatcher, findExistingPhoto };
+module.exports = { stopFileWatcher, startFileWatcher, findExistingPhoto, processNewPhoto };
