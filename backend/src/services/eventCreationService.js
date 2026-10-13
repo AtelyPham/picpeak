@@ -92,6 +92,8 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
     keybind_mode: keybindModeInput,
     // "Finish selection" (issue 1733): off unless the form switches it on.
     allow_selection_submit = false,
+    // Drawing on a comment (issue 1733): no global default, off unless sent.
+    allow_annotations = false,
     require_name_email = false,
     moderate_comments = true,
     show_feedback_to_guests = true,
@@ -552,6 +554,7 @@ async function createEvent(data, { actor, source = 'admin', frontendUrl } = {}) 
         allow_decisions: formatBoolean(feedbackDefaults.allow_decisions),
         allow_selection_submit: formatBoolean(allow_selection_submit),
         keybind_mode: feedbackDefaults.keybind_mode,
+        allow_annotations: formatBoolean(allow_annotations),
         require_name_email: formatBoolean(require_name_email),
         moderate_comments: formatBoolean(moderate_comments),
         show_feedback_to_guests: formatBoolean(show_feedback_to_guests),

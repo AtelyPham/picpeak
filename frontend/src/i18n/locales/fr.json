@@ -3143,7 +3143,9 @@
       "decisions": "Approuver / refuser chaque photo",
       "decisionsDesc": "Les invités approuvent ou refusent chaque photo, en indiquant éventuellement pourquoi. Vous filtrez et exportez selon leur décision",
       "selectionSubmit": "Terminer la sélection",
-      "selectionSubmitDesc": "Les invités remettent leurs « j’aime » ou favoris lorsqu’ils ont terminé. Leur sélection est alors verrouillée jusqu’à ce que vous la rouvriez, et vous êtes averti"
+      "selectionSubmitDesc": "Les invités remettent leurs « j’aime » ou favoris lorsqu’ils ont terminé. Leur sélection est alors verrouillée jusqu’à ce que vous la rouvriez, et vous êtes averti",
+      "annotations": "Dessin sur les photos",
+      "annotationsDesc": "Les invités peuvent dessiner sur une photo et joindre le dessin à leur commentaire. Nécessite les commentaires"
     },
     "settingsUpdated": "Paramètres de commentaires mis à jour",
     "settingsUpdateError": "Échec de la mise à jour des paramètres",
@@ -3268,6 +3270,24 @@
       "reopenConfirm": "Rouvrir cet envoi ? L’invité pourra de nouveau modifier sa sélection et devra l’envoyer à nouveau.",
       "reopened": "Envoi rouvert",
       "reopenError": "Impossible de rouvrir l’envoi"
+    },
+    "annotation": {
+      "draw": "Dessiner sur la photo",
+      "edit": "Modifier le dessin",
+      "remove": "Retirer le dessin",
+      "attached": "Dessin joint",
+      "inProgress": "Terminez le dessin sur la photo, puis envoyez votre commentaire.",
+      "show": "Afficher le dessin",
+      "hide": "Masquer le dessin",
+      "toolbar": "Outils de dessin",
+      "toolFree": "Main levée",
+      "toolArrow": "Flèche",
+      "color": "Couleur {{number}}",
+      "undo": "Annuler le dernier trait",
+      "clear": "Tout effacer",
+      "done": "Terminé",
+      "limitReached": "Un dessin peut contenir au maximum {{max}} traits.",
+      "overlayLabel": "Dessin sur la photo"
     }
   },
   "filter": {

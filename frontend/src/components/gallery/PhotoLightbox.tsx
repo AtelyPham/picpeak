@@ -25,6 +25,10 @@ import { lockBodyScroll } from '../../utils/scrollLock';
 import { LightboxFilmStrip, LightboxScrubStandIn } from './LightboxFilmStrip';
 import { useLightboxScrub } from './hooks/useLightboxScrub';
 import { exifLine } from '../../utils/photoExif';
+import { useLightboxAnnotation } from './annotation/useLightboxAnnotation';
+import { CommentAnnotationContext } from './annotation/CommentAnnotationContext';
+import { ImageAnnotationOverlay } from './annotation/ImageAnnotationOverlay';
+import { AnnotationToolbar } from './annotation/AnnotationToolbar';
 
 interface PhotoLightboxProps {
   photos: Photo[];
@@ -127,6 +131,24 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
     show_feedback_to_guests?: boolean;
     require_name_email?: boolean;
   } | null>(null);
+  // The photo whose slide shows its fallback thumbnail instead of itself.
+  const [fallbackPhotoId, setFallbackPhotoId] = useState<Photo['id'] | null>(null);
+  // Annotate mode (issue 1733): drawing on the photo for a comment. While it
+  // is on, every navigation and zoom gesture below stands down.
+  const annotation = useLightboxAnnotation({
+    photoId: photos[currentIndex]?.id,
+    // Not on a video, and not while the thumbnail stands in for a picture
+    // that did not load: the overlay stays off it, so there is nothing to
+    // draw on.
+    canDraw: photos[currentIndex]?.media_type !== 'video' && fallbackPhotoId !== photos[currentIndex]?.id,
+    panelOpen: showFeedback,
+    onStart: () => resetZoom(),
+    // On a phone the panel covers the photo: step aside to show the drawing.
+    onShow: () => { if (isSmallScreen) setShowFeedback(false); },
+  });
+  const annotating = annotation.drawing;
+  const annotationRef = useRef(annotation);
+  annotationRef.current = annotation;
   const [myLiked, setMyLiked] = useState<boolean>(false);
   const [myRating, setMyRating] = useState<number>(0);
   const [myColorLabel, setMyColorLabel] = useState<ColorLabel | null>(null);
@@ -358,6 +380,12 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
   });
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Annotate mode (issue 1733): Escape leaves the mode, not the lightbox,
+      // and no other key navigates, zooms, downloads or rates.
+      if (annotationRef.current.drawing) {
+        if (e.key === 'Escape') annotationRef.current.cancel();
+        return;
+      }
       // A held arrow key: the scrub steps at its own rate. Not from a field,
       // where the key moves the caret and the scrub would take the field's
       // panel away from under it; and not in a gallery of one, where it
@@ -681,11 +709,13 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
   };
 
   const goToPrevious = () => {
+    if (annotating) return;
     setCurrentIndex((prev) => (prev > 0 ? prev - 1 : photos.length - 1));
     resetZoom();
   };
 
   const goToNext = () => {
+    if (annotating) return;
     setCurrentIndex((prev) => (prev < photos.length - 1 ? prev + 1 : 0));
     resetZoom();
   };
@@ -701,6 +731,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
   };
 
   const handleZoomIn = () => {
+    if (annotating) return;
     // Through the ref: the keydown listener holds a handler from an older render.
     setZoom((prev) => Math.min(prev + 0.5, fullZoomLive.current.maxZoom));
   };
@@ -768,6 +799,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
     if (!el || currentPhoto?.media_type === 'video') return;
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
+      if (annotationRef.current.drawing) return;
       const { zoom: prevZoom, dragOffset: prevOffset } = wheelStateRef.current;
       // Normalise deltaY to pixels: deltaMode 1 = lines (Firefox),
       // deltaMode 2 = pages (rare; deltaY is ±1 per notch there).
@@ -823,6 +855,9 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
   // carousel-style swipe nav. Swipe is suppressed while zoomed in so the
   // user can pan instead. The carousel is also disabled mid-animation.
   const handleTouchStart = (e: React.TouchEvent) => {
+    // Annotate mode (issue 1733): no pinch, pan or swipe starts, so the move
+    // and end handlers below have nothing to continue.
+    if (annotating) return;
     fullZoom.onTouchStart(e);
     if (e.touches.length === 2) {
       pinchRef.current = { distance: touchSpan(e.touches), zoom };
@@ -1042,6 +1077,9 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
          disappear under the camera/dynamic-island. */}
       <button
         onClick={onClose}
+        // Not while drawing (issue 1733): it sits on the photo's corner, where
+        // a stroke would close the lightbox. Cancel is the way out then.
+        hidden={annotating}
         className="absolute p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-30"
         aria-label="Close"
         style={{
@@ -1055,6 +1093,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
       {/* Navigation buttons */}
       <button
         onClick={goToPrevious}
+        hidden={annotating}
         className="absolute left-4 top-1/2 -translate-y-1/2 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-20"
         aria-label="Previous photo"
       >
@@ -1064,6 +1103,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
       {!showFeedback || !isSmallScreen ? (
         <button
           onClick={goToNext}
+          hidden={annotating}
           className="absolute top-1/2 -translate-y-1/2 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-30"
           aria-label="Next photo"
           style={{ right: isDesktopFeedback ? `${desktopFeedbackWidth + 16}px` : '1rem' }}
@@ -1083,7 +1123,13 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
         className="absolute bottom-0 left-0 bg-black px-3 pt-3 pb-3 sm:p-4 z-20"
         style={{
           right: isDesktopFeedback ? `${desktopFeedbackWidth}px` : 0,
-          paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))'
+          paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+          // The drawing toolbar lies over this one while annotating (issue
+          // 1733). Covered is not enough: Tab would still reach Download, Like
+          // and the feedback toggle, and the last one throws the drawing
+          // away. Hidden this way it leaves the tab order but keeps its
+          // height, which the photo area and the drawing toolbar build on.
+          visibility: annotating ? 'hidden' : undefined,
         }}
       >
         <LightboxFilmStrip
@@ -1457,6 +1503,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
                 // which reports no load: the stand-in leaves here instead.
                 onError={scrub.handlePreviewLoaded}
                 useCanvasRendering={useCanvasRendering || protectionLevel === 'maximum'}
+                onFallbackChange={(shown) => setFallbackPhotoId((prev) => (shown ? photo.id : prev === photo.id ? null : prev))}
                 onProtectionViolation={(violationType) => {
                   console.warn(`Protection violation in lightbox for photo ${photo.id}: ${violationType}`);
 
@@ -1469,6 +1516,27 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
                 }}
               />
               <FullResolutionImage overlay={fullZoom.overlay} style={imageStyle} />
+              {/* A drawing on this photo (issue 1733): the strokes being
+                  drawn, or a stored one picked from the comments. It shares
+                  the image's centre and transform, so it follows zoom and
+                  pan, and rides the track with the slide. It comes after the
+                  image on purpose: the image has to stay this slide's first
+                  child, as it is on a neighbouring slide, or React remounts
+                  it (and fetches it again) when a prefetched neighbour
+                  becomes the slide on screen. */}
+              {(annotating || annotation.visible) && (
+                <ImageAnnotationOverlay
+                  annotation={annotation.visible}
+                  label={t('feedback.annotation.overlayLabel', 'Drawing on the photo')}
+                  svgStyle={{
+                    transform: `scale(${zoom}) translate(${dragOffset.x / zoom}px, ${dragOffset.y / zoom}px)`,
+                    transition: isDragging || isPinching ? 'none' : 'transform 0.2s',
+                  }}
+                  draw={annotating && !annotation.atLimit
+                    ? { tool: annotation.tool, color: annotation.color, onStroke: annotation.addStroke }
+                    : undefined}
+                />
+              )}
             </div>
           );
         };
@@ -1491,7 +1559,8 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
               right: isDesktopFeedback ? `${desktopFeedbackWidth}px` : 0,
               // Stop above the opaque toolbar so it never masks the
               // photo (#888).
-              bottom: `${toolbarHeight}px`,
+              // The drawing toolbar (issue 1733) can be taller.
+              bottom: `${Math.max(toolbarHeight, annotation.toolbarHeight)}px`,
               // Tell the browser we handle horizontal gestures ourselves so
               // it doesn't fight us with edge-swipe back navigation, native
               // pinch-zoom, etc. Videos keep default touch behaviour.
@@ -1564,8 +1633,21 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
       })()}
 
       {/* Feedback Panel */}
+      {/* Drawing controls (issue 1733), over the toolbar while annotating. */}
+      {annotating && (
+        <AnnotationToolbar
+          annotation={annotation}
+          style={{ right: isDesktopFeedback ? `${desktopFeedbackWidth}px` : 0, minHeight: toolbarHeight }}
+        />
+      )}
+
       {showFeedback && (
-        <div className="absolute right-0 top-0 bottom-0 w-full sm:w-[26rem] bg-surface text-theme shadow-xl z-20 overflow-y-auto flex flex-col border-l border-border-token">
+        <div
+          className="absolute right-0 top-0 bottom-0 w-full sm:w-[26rem] bg-surface text-theme shadow-xl z-20 overflow-y-auto flex flex-col border-l border-border-token"
+          // On a phone the panel covers the photo: out of the way while
+          // drawing, but still mounted so the comment being written is kept.
+          style={annotating && isSmallScreen ? { display: 'none' } : undefined}
+        >
           <div className="sticky top-0 bg-surface border-b border-border-token px-4 py-3 flex items-center justify-between">
             <h3 className="font-semibold text-theme">{t('feedback.panelTitle', 'Photo feedback')}</h3>
             <button
@@ -1578,15 +1660,17 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
             </button>
           </div>
           <div className="p-4 flex-1 overflow-y-auto" {...feedbackHold}>
-            <PhotoFeedback
-              photoId={String(feedbackPhotoIdRef.current ?? currentPhoto.id)}
-              gallerySlug={slug}
-              showComments={true}
-              className="space-y-4"
-              // Only when someone above refreshes the row; otherwise the
-              // panel's buttons invalidate the list themselves.
-              onFeedbackUpdate={onFeedbackChange ? (toggledPhotoId) => onFeedbackChange(toggledPhotoId) : undefined}
-            />
+            <CommentAnnotationContext.Provider value={annotation.context}>
+              <PhotoFeedback
+                photoId={String(feedbackPhotoIdRef.current ?? currentPhoto.id)}
+                gallerySlug={slug}
+                showComments={true}
+                className="space-y-4"
+                // Only when someone above refreshes the row; otherwise the
+                // panel's buttons invalidate the list themselves.
+                onFeedbackUpdate={onFeedbackChange ? (toggledPhotoId) => onFeedbackChange(toggledPhotoId) : undefined}
+              />
+            </CommentAnnotationContext.Provider>
           </div>
         </div>
       )}

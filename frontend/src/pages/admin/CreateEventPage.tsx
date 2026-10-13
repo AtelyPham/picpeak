@@ -96,6 +96,7 @@ interface FormData {
     allow_color_labels: boolean;
     allow_decisions?: boolean;
     allow_selection_submit?: boolean;
+    allow_annotations?: boolean;
     // Optional, mirroring the shared FeedbackSettings contract — the
     // <FeedbackSettings> editor's onChange emits that shape.
     keybind_mode?: 'colors' | 'lightroom';
@@ -637,6 +638,7 @@ export const CreateEventPage: React.FC = () => {
       allow_color_labels: feedbackSettings.allow_color_labels,
       allow_decisions: feedbackSettings.allow_decisions,
       allow_selection_submit: feedbackSettings.allow_selection_submit,
+      allow_annotations: feedbackSettings.allow_annotations,
       keybind_mode: feedbackSettings.keybind_mode,
       require_name_email: feedbackSettings.require_name_email,
       moderate_comments: feedbackSettings.moderate_comments,

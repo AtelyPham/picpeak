@@ -3101,7 +3101,9 @@
       "decisions": "Goedkeuren / afwijzen per foto",
       "decisionsDesc": "Gasten keuren elke foto goed of wijzen hem af, eventueel met een reden. Jij filtert en exporteert op hun beslissing",
       "selectionSubmit": "Selectie afronden",
-      "selectionSubmitDesc": "Gasten leveren hun likes of favorieten in wanneer ze klaar zijn. Hun selectie is dan vergrendeld tot je haar heropent, en je krijgt een melding"
+      "selectionSubmitDesc": "Gasten leveren hun likes of favorieten in wanneer ze klaar zijn. Hun selectie is dan vergrendeld tot je haar heropent, en je krijgt een melding",
+      "annotations": "Tekenen op foto's",
+      "annotationsDesc": "Gasten kunnen op een foto tekenen en de tekening aan hun opmerking toevoegen. Vereist opmerkingen"
     },
     "settingsUpdated": "Feedbackinstellingen bijgewerkt",
     "settingsUpdateError": "Bijwerken instellingen mislukt",
@@ -3226,6 +3228,24 @@
       "reopenConfirm": "Deze inzending heropenen? De gast kan de selectie weer wijzigen en moet haar opnieuw indienen.",
       "reopened": "Inzending heropend",
       "reopenError": "Inzending kon niet worden heropend"
+    },
+    "annotation": {
+      "draw": "Op foto tekenen",
+      "edit": "Tekening bewerken",
+      "remove": "Tekening verwijderen",
+      "attached": "Tekening toegevoegd",
+      "inProgress": "Maak de tekening op de foto af en verstuur daarna je opmerking.",
+      "show": "Tekening tonen",
+      "hide": "Tekening verbergen",
+      "toolbar": "Tekengereedschap",
+      "toolFree": "Vrije hand",
+      "toolArrow": "Pijl",
+      "color": "Kleur {{number}}",
+      "undo": "Ongedaan maken",
+      "clear": "Alles wissen",
+      "done": "Klaar",
+      "limitReached": "Een tekening kan maximaal {{max}} lijnen bevatten.",
+      "overlayLabel": "Tekening op de foto"
     }
   },
   "filter": {

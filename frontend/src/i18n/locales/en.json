@@ -6311,7 +6311,9 @@
       "decisions": "Approve / reject per photo",
       "decisionsDesc": "Guests approve or reject each photo, optionally saying why. You filter and export by their decision",
       "selectionSubmit": "Finish selection",
-      "selectionSubmitDesc": "Guests hand in their likes or favorites when they are done. Their picks are then locked until you reopen them, and you are notified"
+      "selectionSubmitDesc": "Guests hand in their likes or favorites when they are done. Their picks are then locked until you reopen them, and you are notified",
+      "annotations": "Drawing on photos",
+      "annotationsDesc": "Guests can draw on a photo and attach the drawing to their comment. Needs comments"
     },
     "moderated": "Feedback moderated",
     "deleted": "Feedback deleted",
@@ -6448,6 +6450,24 @@
       "reopenConfirm": "Reopen this submission? The guest can change their picks again and has to submit them anew.",
       "reopened": "Submission reopened",
       "reopenError": "Failed to reopen the submission"
+    },
+    "annotation": {
+      "draw": "Draw on photo",
+      "edit": "Edit drawing",
+      "remove": "Remove drawing",
+      "attached": "Drawing attached",
+      "inProgress": "Finish the drawing on the photo, then send your comment.",
+      "show": "Show drawing",
+      "hide": "Hide drawing",
+      "toolbar": "Drawing tools",
+      "toolFree": "Freehand",
+      "toolArrow": "Arrow",
+      "color": "Colour {{number}}",
+      "undo": "Undo",
+      "clear": "Clear",
+      "done": "Done",
+      "limitReached": "A drawing can have up to {{max}} strokes.",
+      "overlayLabel": "Drawing on the photo"
     }
   },
   "filter": {

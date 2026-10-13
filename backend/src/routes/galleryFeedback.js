@@ -17,6 +17,7 @@ const {
   checkValidation,
   validateGuestRequirements
 } = require('../utils/feedbackValidation');
+const { normalizeAnnotation } = require('../utils/photoAnnotation');
 
 // Most photos one bulk rating request may name (issue 1733).
 const BULK_RATING_MAX_PHOTOS = 200;
@@ -95,6 +96,8 @@ router.get('/:slug/feedback-settings',
         allow_reactions: Boolean(settings.allow_reactions),
         allow_color_labels: Boolean(settings.allow_color_labels),
         allow_decisions: Boolean(settings.allow_decisions),
+        // Drawing on a comment (issue 1733).
+        allow_annotations: Boolean(settings.allow_annotations),
         // Which lightbox shortcut scheme this gallery uses (#1044).
         keybind_mode: settings.keybind_mode || 'colors',
         require_name_email: Boolean(settings.require_name_email),
@@ -290,6 +293,23 @@ router.post('/:slug/photos/:photoId/feedback',
 
       const guestIdentifier = await generateGuestIdentifier(req);
 
+      // A drawing (issue 1733) belongs to a comment and needs its own switch.
+      // Validated here into a fresh structure; anything off is a 400 and the
+      // client's own string is never stored.
+      let annotation = null;
+      if (req.body.annotation !== undefined && req.body.annotation !== null) {
+        if (feedbackType !== 'comment') {
+          return res.status(400).json({ error: 'An annotation needs a comment', code: 'INVALID_ANNOTATION' });
+        }
+        if (!settings.allow_annotations) {
+          return res.status(403).json({ error: 'Annotations are not enabled', code: 'ANNOTATIONS_DISABLED' });
+        }
+        annotation = normalizeAnnotation(req.body.annotation);
+        if (!annotation) {
+          return res.status(400).json({ error: 'Invalid annotation', code: 'INVALID_ANNOTATION' });
+        }
+      }
+
       // Verify photo belongs to event
       const photo = await db('photos')
         .where({ id: photoId, event_id: event.id })
@@ -329,6 +349,7 @@ router.post('/:slug/photos/:photoId/feedback',
         reaction: req.body.reaction,
         color_label: req.body.color_label,
         decision: req.body.decision,
+        annotation,
         ...feedbackAuthor(req, settings)
       };
       

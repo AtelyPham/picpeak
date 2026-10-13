@@ -7,6 +7,7 @@ const { isValidDecision } = require('../constants/photoDecisions');
 const { resolveEventFeedbackDefaults, DEFAULT_KEYBIND_MODE, KEYBIND_MODES } = require('./feedbackDefaults');
 const { applyPhotoVisibilityFilter } = require('../utils/photoVisibility');
 const selectionSubmissions = require('./selectionSubmissions');
+const { serializeAnnotation, withParsedAnnotation } = require('../utils/photoAnnotation');
 
 // The camera-original name, for the feedback exports (#1224). Both exports
 // used to carry only `photos.filename` — the sanitized stored name
@@ -49,6 +50,7 @@ const FEEDBACK_SETTINGS_COLUMNS = [
   'allow_color_labels',
   'allow_decisions',
   'allow_selection_submit',
+  'allow_annotations',
   'keybind_mode',
   'require_name_email',
   'moderate_comments',
@@ -144,6 +146,9 @@ class FeedbackService {
           event_id: eventId,
           feedback_enabled: false,
           ...globals,
+          // Drawing on a comment (issue 1733) has no global default: it is a
+          // modifier of comments, off until the gallery switches it on.
+          allow_annotations: false,
           require_name_email: false,
           moderate_comments: true,
           show_feedback_to_guests: true,
@@ -759,6 +764,10 @@ class FeedbackService {
         }
       }
 
+      const storedAnnotation = feedback_type === 'comment' && feedbackData.annotation
+        ? serializeAnnotation(feedbackData.annotation)
+        : null;
+
       // Insert new feedback
       const insertFeedback = (executor) => executor('photo_feedback').insert({
         photo_id: photoId,
@@ -771,6 +780,9 @@ class FeedbackService {
         reaction: feedback_type === 'reaction' ? reaction : null,
         color_label: feedback_type === 'color_label' ? color_label : null,
         decision: feedback_type === 'decision' ? decision : null,
+        // A drawing belongs to a comment (issue 1733). Re-serialised from the
+        // validated structure here, whatever the caller handed over.
+        ...(storedAnnotation ? { annotation: storedAnnotation } : {}),
         guest_name,
         guest_email,
         guest_identifier: guestIdentifier,
@@ -867,7 +879,7 @@ class FeedbackService {
       // Newest first; the id breaks a same-second tie.
       const feedback = await query
         .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-        .select('id', 'feedback_type', 'rating', 'comment_text', 'reaction', 'color_label', 'decision', 'guest_name', 'created_at', 'updated_at', 'is_approved', 'is_hidden');
+        .select('id', 'feedback_type', 'rating', 'comment_text', 'reaction', 'color_label', 'decision', 'annotation', 'guest_name', 'created_at', 'updated_at', 'is_approved', 'is_hidden');
 
       // Rating rows are re-ranked among themselves by last mutation, so the
       // viewer's own rating (the first rating row the route finds) is the
@@ -880,7 +892,9 @@ class FeedbackService {
       let nextRating = 0;
       return rows.map((row) => {
         const { updated_at: _updatedAt, ...rest } = row.feedback_type === 'rating' ? ratings[nextRating++] : row;
-        return rest;
+        // The drawing rides on its comment row (issue 1733), so every gate a
+        // caller applies to the row applies to it; parsed, never raw.
+        return withParsedAnnotation(rest);
       });
     } catch (error) {
       logger.error('Error getting photo feedback:', error);
@@ -1276,7 +1290,7 @@ class FeedbackService {
         )
         .orderBy('photo_feedback.created_at', 'desc');
       
-      return pending;
+      return pending.map(withParsedAnnotation);
     } catch (error) {
       logger.error('Error getting pending moderation:', error);
       throw error;

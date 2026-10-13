@@ -15,6 +15,7 @@ const {
   checkValidation
 } = require('../utils/feedbackValidation');
 const { requireEventOwnership, canAccessEvent, scopeEventsQuery } = require('../middleware/ownership');
+const { withParsedAnnotation } = require('../utils/photoAnnotation');
 
 // Get event feedback settings
 router.get('/events/:eventId/feedback-settings',
@@ -151,7 +152,9 @@ router.get('/events/:eventId/feedback',
         .offset(offset);
       
       res.json({
-        feedback,
+        // photo_feedback.* carries the raw annotation text (issue 1733):
+        // hand out the parsed structure only.
+        feedback: feedback.map(withParsedAnnotation),
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),

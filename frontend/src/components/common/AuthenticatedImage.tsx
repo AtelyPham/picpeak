@@ -20,6 +20,11 @@ interface AuthenticatedImageProps extends Omit<React.ImgHTMLAttributes<HTMLImage
   /** Dimensions of the loaded rendition, which can differ from the original. */
   onLoad?: (dimensions: { width: number; height: number }) => void;
   /**
+   * Told whether `fallbackSrc` is what is on screen instead of `src`, when it
+   * changes and when the callback is first handed over.
+   */
+  onFallbackChange?: (showsFallback: boolean) => void;
+  /**
    * Priority in the shared fetch queue (#1287). NOT the native `fetchPriority`
    * DOM attribute, which stays available on this component and takes
    * "low"|"high"|"auto" — hence the distinct name.
@@ -104,6 +109,7 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
   useCanvasRendering,
   onProtectionViolation,
   onLoad,
+  onFallbackChange,
   queuePriority = 'normal',
   ...props
 }) => {
@@ -111,6 +117,18 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
   const [imageSrc, setImageSrc] = useState<string>('');
   const [error, setError] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  // What is on screen is `fallbackSrc`, not `src`. Marked on the element as
+  // data-fallback: a fallback thumbnail can be a centre crop, so anything
+  // positioned relative to the whole picture must not trust it.
+  const [showsFallback, setShowsFallback] = useState(false);
+  // Either way the fallback gets on screen: fetched, or as a plain <img>.
+  const fallbackShown = showsFallback || (error && !!fallbackSrc);
+  const onFallbackChangeRef = useRef(onFallbackChange);
+  onFallbackChangeRef.current = onFallbackChange;
+  const reportsFallback = !!onFallbackChange;
+  useEffect(() => {
+    if (reportsFallback) onFallbackChangeRef.current?.(fallbackShown);
+  }, [fallbackShown, reportsFallback]);
   const [canvasReady, setCanvasReady] = useState(false);
   const [canvasFailed, setCanvasFailed] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -243,6 +261,7 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
     // Determine which token to use based on context
     if (!src) {
       setImageSrc(fallbackSrc || '');
+      setShowsFallback(!!fallbackSrc);
       setError(false);
       setIsLoading(false);
       setFetching(false);
@@ -337,6 +356,7 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
         const primaryUrl = await fetchWithAuth(src);
         if (!aborted) {
           setImageSrc(primaryUrl);
+          setShowsFallback(false);
           setError(false);
           fetchFailedRef.current = false;
           if (standInUrlRef.current) {
@@ -372,6 +392,7 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
               standInUrlRef.current = fallbackUrl;
               setStandIn(true);
               setImageSrc(fallbackUrl);
+              setShowsFallback(true);
               setError(false);
             }
             return;
@@ -563,7 +584,7 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
   }
 
   if (error && fallbackSrc) {
-    return <img ref={(el) => { retryRef.current = el; }} src={fallbackSrc} alt={alt} {...props} />;
+    return <img ref={(el) => { retryRef.current = el; }} src={fallbackSrc} alt={alt} data-fallback="true" {...props} />;
   }
 
   if (error) {
@@ -604,6 +625,7 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
         }}
         aria-label={alt}
         role="img"
+        data-fallback={showsFallback ? 'true' : undefined}
       />
     );
   }
@@ -617,6 +639,7 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
       ref={(el) => { if (standIn) retryRef.current = el; }}
       src={imageSrc}
       alt={alt}
+      data-fallback={showsFallback ? 'true' : undefined}
       onLoad={(event) => {
         srcDecoded(imageSrc);
         onLoad?.({

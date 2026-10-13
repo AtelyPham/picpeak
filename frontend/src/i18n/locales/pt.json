@@ -3248,7 +3248,9 @@
       "decisions": "Aprovar / rejeitar cada foto",
       "decisionsDesc": "Os convidados aprovam ou rejeitam cada foto, opcionalmente com um motivo. Pode filtrar e exportar pela decisão deles",
       "selectionSubmit": "Concluir seleção",
-      "selectionSubmitDesc": "Os convidados entregam suas curtidas ou favoritos quando terminam. A seleção fica bloqueada até você reabri-la, e você é avisado"
+      "selectionSubmitDesc": "Os convidados entregam suas curtidas ou favoritos quando terminam. A seleção fica bloqueada até você reabri-la, e você é avisado",
+      "annotations": "Desenhar nas fotos",
+      "annotationsDesc": "Os convidados podem desenhar numa foto e anexar o desenho ao comentário. Requer comentários"
     },
     "settingsUpdated": "Configurações de feedback atualizadas",
     "settingsUpdateError": "Falha ao atualizar as configurações",
@@ -3389,6 +3391,24 @@
       "reopenConfirm": "Reabrir este envio? O convidado poderá alterar a seleção novamente e terá de enviá-la de novo.",
       "reopened": "Envio reaberto",
       "reopenError": "Não foi possível reabrir o envio"
+    },
+    "annotation": {
+      "draw": "Desenhar na foto",
+      "edit": "Editar desenho",
+      "remove": "Remover desenho",
+      "attached": "Desenho anexado",
+      "inProgress": "Termine o desenho na foto e depois envie o seu comentário.",
+      "show": "Mostrar desenho",
+      "hide": "Ocultar desenho",
+      "toolbar": "Ferramentas de desenho",
+      "toolFree": "Mão livre",
+      "toolArrow": "Seta",
+      "color": "Cor {{number}}",
+      "undo": "Desfazer",
+      "clear": "Limpar tudo",
+      "done": "Concluir",
+      "limitReached": "Um desenho pode ter no máximo {{max}} traços.",
+      "overlayLabel": "Desenho sobre a foto"
     }
   },
   "filter": {
