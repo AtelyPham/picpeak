@@ -737,6 +737,8 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, viaC
         // Image dimensions for layout calculations
         width: photo.width || null,
         height: photo.height || null,
+        // Blurred tile placeholder (issue 1733): a base64 ThumbHash, or null.
+        thumb_hash: photo.thumb_hash || null,
         // EXIF capture date
         captured_at: toIso(photo.captured_at) || null,
         // Camera details (issue 1733, D1), only when the gallery shows them

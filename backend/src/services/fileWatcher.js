@@ -206,6 +206,7 @@ async function processNewPhoto(filePath) {
   
   // Generate thumbnail or placeholder
   let thumbnailPath = null;
+  const thumbMeta = {};
   // Capture image dimensions so aspect-aware layouts (masonry / mosaic /
   // justified) can size each card to the photo's real proportions
   // instead of the 800×600 fallback in MasonryGalleryLayout (#447).
@@ -218,7 +219,7 @@ async function processNewPhoto(filePath) {
     // preview instead. Pass-through for ordinary images.
     const proc = await withProcessableImage(filePath, filename);
     try {
-      thumbnailPath = await generateThumbnail(proc.path, { outputBasename: proc.outputBasename });
+      thumbnailPath = await generateThumbnail(proc.path, { outputBasename: proc.outputBasename, meta: thumbMeta });
       try {
         const metadata = await sharp(proc.path).metadata();
         // Oriented, not raw — see imageProcessor.orientedDimensions (#1185).
@@ -263,6 +264,7 @@ async function processNewPhoto(filePath) {
     original_filename: path.basename(filePath),
     path: relativePath,
     thumbnail_path: relativeThumbPath,
+    thumb_hash: thumbMeta.thumbHash || null,
     type: isVideo ? 'video' : photoType,
     // The column defaults to 'image', so a watched video was filed as a
     // photo. Migration 286 corrects the rows imported before this.
