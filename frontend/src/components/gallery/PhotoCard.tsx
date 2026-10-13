@@ -7,6 +7,7 @@ import { thumbnailUrlForTile } from './imageTiers';
 import { TileImage } from './TileImage';
 import { FeedbackIdentityModal } from './FeedbackIdentityModal';
 import { feedbackService } from '../../services/feedback.service';
+import { feedbackLockKind } from '../../utils/feedbackLock';
 import { ColorLabelBadge } from './ColorLabelBadge';
 import { TileRating } from './TileRating';
 import { FirstLookBadge, FolderHintPill } from './GalleryTileBadges';
@@ -354,7 +355,10 @@ export const PhotoCard: React.FC<PhotoCardProps> = ({
           feedback_type: 'like',
         });
       } catch (err) {
-        console.warn('Like submit failed, keeping optimistic UI', err);
+        // Refused by a finished selection (issue 1733): nothing was written,
+        // so the heart goes back. Any other failure keeps the optimistic UI.
+        if (feedbackLockKind(err)) onLikeSuccess?.();
+        else console.warn('Like submit failed, keeping optimistic UI', err);
       }
       if (onFeedbackChange) onFeedbackChange(photo.id);
       hideOverlay();
@@ -383,8 +387,10 @@ export const PhotoCard: React.FC<PhotoCardProps> = ({
         guest_email: savedIdentityValue?.email,
       });
     } catch (err) {
-      // Keep optimistic state; a refresh will reconcile
-      console.warn('Like submit failed, keeping optimistic UI', err);
+      // A locked pick goes back; otherwise keep the optimistic state, a
+      // refresh will reconcile.
+      if (feedbackLockKind(err)) onLikeSuccess?.();
+      else console.warn('Like submit failed, keeping optimistic UI', err);
     }
     if (onFeedbackChange) onFeedbackChange(photo.id);
     hideOverlay();
@@ -564,11 +570,17 @@ export const PhotoCard: React.FC<PhotoCardProps> = ({
                     if (pendingAction.type === 'like' && onLikeSuccess) {
                       onLikeSuccess();
                     }
-                    await feedbackService.submitFeedback(slug!, String(pendingAction.photoId), {
-                      feedback_type: pendingAction.type,
-                      guest_name: name,
-                      guest_email: email,
-                    });
+                    try {
+                      await feedbackService.submitFeedback(slug!, String(pendingAction.photoId), {
+                        feedback_type: pendingAction.type,
+                        guest_name: name,
+                        guest_email: email,
+                      });
+                    } catch (err) {
+                      // Refused by a finished selection: the heart goes back.
+                      if (!feedbackLockKind(err)) throw err;
+                      if (pendingAction.type === 'like') onLikeSuccess?.();
+                    }
                     if (onFeedbackChange) onFeedbackChange(pendingAction.photoId);
                     setPendingAction(null);
                   }

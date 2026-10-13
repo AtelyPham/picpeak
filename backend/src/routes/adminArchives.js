@@ -915,6 +915,7 @@ router.delete('/:id', adminAuth, requirePermission('archives.delete'), requireEv
     const hasDownloadGrants = await db.schema.hasTable('event_download_grants');
     const hasAdminAssignments = await db.schema.hasTable('event_admin_assignments');
     const hasDownloadRecipients = await db.schema.hasTable('download_job_recipients');
+    const hasSelectionSubmissions = await db.schema.hasTable('selection_submissions');
     await db.transaction(async (trx) => {
       // Event row first (issue 1560): the download-limit grants lock the
       // event row and then grant/photo rows, so taking them here in the
@@ -943,6 +944,9 @@ router.delete('/:id', adminAuth, requirePermission('archives.delete'), requireEv
           .whereIn('job_id', trx('download_jobs').where('event_id', req.params.id).select('id')).del();
       }
       await trx('feedback_rate_limits').where('event_id', req.params.id).del();
+      if (hasSelectionSubmissions) {
+        await trx('selection_submissions').where('event_id', req.params.id).del();
+      }
       await trx('photos').where('event_id', req.params.id).del();
       await deleteWithAccountingHistory(trx, 'events', { id: req.params.id },
         { actor: req.admin.id, source: 'archive.delete' });

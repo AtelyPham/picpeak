@@ -68,6 +68,7 @@ import { GuestRecoveryModal } from './GuestRecoveryModal';
 import { PeopleStrip } from './PeopleStrip';
 import { PeopleSheet } from './PeopleSheet';
 import { GuestIdentityProvider } from '../../contexts/GuestIdentityContext';
+import { SelectionSubmitBar, selectionStateKey, useSelectionPickRefresh } from './SelectionSubmitBar';
 import { DownloadQuotaProvider, buildDownloadQuotaValue } from '../../contexts/DownloadQuotaContext';
 import { isDownloadLimitError, quotaFromEvent, showDownloadLimitReached, type QuotaPhoto } from '../../utils/downloadLimit';
 import { DownloadQuotaNotice } from './DownloadQuotaNotice';
@@ -542,15 +543,41 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
   // — gating on activeFilters would leave "Liked (0)" stale until the user
   // clicks the chip, which is the same UX cliff bug 1 was reporting.
   const isGuestIdentityMode = feedbackSettings?.identity_mode === 'guest';
+
+  // Finish selection / approve edited photos (issue 1733, A1): the viewer's
+  // own state. Its "x of y selected" counter is fed from /my-feedback below,
+  // in every identity mode, so it follows each like without a request of its
+  // own; galleries without a counter keep /my-feedback to guest mode.
+  const { data: selectionState } = useQuery({
+    queryKey: selectionStateKey(slug),
+    queryFn: () => feedbackService.getSelectionState(slug),
+    enabled: !!slug && !!feedbackSettings?.feedback_enabled,
+    staleTime: 30 * 1000,
+  });
+  const selectionCounterOn = !!selectionState?.selection.counter;
+  useSelectionPickRefresh(slug, !!selectionState);
+
   const { data: myFeedbackRows } = useQuery<Array<{
     photo_id: number;
     feedback_type: 'like' | 'favorite' | 'rating' | 'comment';
   }>>({
     queryKey: ['my-feedback', slug],
     queryFn: () => feedbackService.getMyFeedback(slug),
-    enabled: isGuestIdentityMode && !!slug,
+    enabled: (isGuestIdentityMode || selectionCounterOn) && !!slug,
     staleTime: 30 * 1000,
   });
+
+  // One pick per photo, whichever of the gallery's pick types marks it.
+  const selectionUsed = useMemo(() => {
+    if (!selectionState) return 0;
+    if (!myFeedbackRows) return selectionState.selection.used;
+    const pickTypes: string[] = selectionState.selection.pick_types;
+    return new Set(
+      myFeedbackRows.filter((row) => pickTypes.includes(row.feedback_type)).map((row) => row.photo_id),
+    ).size;
+  }, [selectionState, myFeedbackRows]);
+  const selectionBarShown = !!selectionState
+    && (selectionState.selection.counter || selectionState.approval.can_submit);
 
   const myFeedbackPhotoIds = useMemo(() => {
     const sets = {
@@ -1483,22 +1510,37 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
   const gridKey = viewAll ? 'all' : openFolder ? `folder-${openFolder.id}` : 'root';
 
   // For full-page layouts, render just the PhotoGridWithLayouts without any wrappers
+  const identityMode: 'simple' | 'guest' =
+    feedbackSettings?.identity_mode === 'guest' ? 'guest' : 'simple';
+
   if (isFullPageLayout) {
     return (
+      // The same identity flow as the standard layout below (issue 1733):
+      // Premium and Story already ask for it (ensureIdentity) before a like,
+      // and finishing a selection needs it too. Without the provider a guest
+      // in guest identity mode was never asked for a name and got a 401.
+      <GuestIdentityProvider slug={slug} identityMode={identityMode}>
       <DownloadQuotaProvider slug={slug} event={data?.event}>
       <GalleryTileBadgesProvider value={tileBadges}>
+        <GuestNamePromptModal requireEmail={!!feedbackSettings?.require_name_email} />
+        <GuestRecoveryModal />
         {/* #1160: these layouts return early and render edge-to-edge, but they
             still get `filteredPhotos`, so without this the foldered photos
             would be hidden with no way in. Contained width so the folder strip
             reads as chrome against the full-bleed grid below it. */}
-        {(hasFolderNav || (copyFilenames.photos.length > 0 && theme.galleryLayout !== 'gallery-story')) && (
+        {(hasFolderNav || selectionBarShown || (copyFilenames.photos.length > 0 && theme.galleryLayout !== 'gallery-story')) && (
           // Story's `.story-nav` is fixed across this same band at z-index 50.
           // Raising the strip above it is necessary for the chips to be
           // clickable at all, but the strip is mostly empty space — so the
           // container itself must not take hits, or it would block the nav's own
           // search/favourites/logout underneath. Only the real controls opt back
           // in via pointer-events-auto.
-          <div className="relative z-[60] pointer-events-none max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center gap-3 flex-wrap">
+          // With the selection bar (issue 1733) the band starts below that
+          // nav in Story: the bar is wider than the gap the nav leaves, and on
+          // a phone it would cover the nav's logout and favourites.
+          <div className={`relative z-[60] pointer-events-none max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center gap-3 flex-wrap ${
+            selectionBarShown && theme.galleryLayout === 'gallery-story' ? 'pt-20' : ''
+          }`}>
             {hasFolderNav && (
               <div className="pointer-events-auto flex items-center gap-3 flex-wrap">
                 {buildFolderNav(true)}
@@ -1547,6 +1589,14 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
                 {t('gallery.copyFilenames.button', 'Copy filenames')} ({copyFilenames.photos.length})
               </Button>
             )}
+            {/* Counter and hand-over (issue 1733, A1): the same band, for the
+                reason given above. */}
+            <SelectionSubmitBar
+              slug={slug}
+              state={selectionState}
+              used={selectionUsed}
+              className="pointer-events-auto"
+            />
           </div>
         )}
         <PhotoGridWithLayouts
@@ -1669,11 +1719,9 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
         )}
       </GalleryTileBadgesProvider>
       </DownloadQuotaProvider>
+      </GuestIdentityProvider>
     );
   }
-
-  const identityMode: 'simple' | 'guest' =
-    feedbackSettings?.identity_mode === 'guest' ? 'guest' : 'simple';
 
   return (
     <GuestIdentityProvider slug={slug} identityMode={identityMode}>
@@ -1841,6 +1889,10 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
         {showUrgentWarning && event.expires_at && (
           <ExpirationBanner daysRemaining={daysUntilExpiration} expiresAt={event.expires_at} />
         )}
+
+        {/* "x of y selected", Finish selection, Approve edited photos
+            (issue 1733, A1). */}
+        <SelectionSubmitBar slug={slug} state={selectionState} used={selectionUsed} className="mt-4" />
 
         {/* Client Access Banner (#172) */}
         {isClient && (

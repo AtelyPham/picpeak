@@ -133,6 +133,8 @@ const TEMPLATE_DISPLAY_NAMES: Record<string, string> = {
   gallery_completed: 'Complete Gallery Ready',
   delivery_due_reminder: 'Full Gallery Due (Admin)',
   download_ready: 'Download Ready',
+  // finish selection / approve edited photos (issue 1733)
+  selection_submitted: 'Selection Finished / Photos Approved (Admin)',
   // core / admin
   admin_invitation: 'Admin Invitation',
   admin_password_reset: 'Admin Password Reset',

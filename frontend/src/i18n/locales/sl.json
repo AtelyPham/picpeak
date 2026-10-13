@@ -1474,7 +1474,30 @@
     "downloadNotify": "Obvestite me po e-pošti, ko bo pripravljen",
     "downloadNotifyRequested": "Ko bo prenos pripravljen, vam bomo poslali e-pošto. To okno lahko zaprete.",
     "downloadNotifyFailed": "E-poštnega obvestila ni bilo mogoče nastaviti. To okno pustite odprto.",
-    "downloadGone": "Ta prenos ni več na voljo. Zahtevajte ga znova."
+    "downloadGone": "Ta prenos ni več na voljo. Zahtevajte ga znova.",
+    "selection": {
+      "counterCapped": "Izbrano: {{used}} od {{cap}}",
+      "counter": "Izbrano: {{used}}",
+      "finish": "Zaključi izbor",
+      "finishTitle": "Želite zaključiti izbor?",
+      "finishCount": "Izbrane fotografije: {{count}}",
+      "finishBody": "Vaš izbor bo poslan fotografu. Potem ga ne morete več spreminjati; fotograf ga lahko za vas znova odpre.",
+      "finishSuccess": "Vaš izbor je bil poslan fotografu",
+      "finishedOn": "Izbor zaključen {{date}}. Vaš izbor je zaklenjen.",
+      "approve": "Odobri obdelane fotografije",
+      "approveTitle": "Želite odobriti obdelane fotografije?",
+      "approveBody": "Potrjujete, da so obdelane fotografije v redu takšne, kot so, in da lahko fotograf nadaljuje. Potem svojih odobritev in zavrnitev ne morete več spreminjati; fotograf jih lahko za vas znova odpre.",
+      "approveRejected": "Fotografije, ki so še označene kot zavrnjene: {{count}}",
+      "approveConfirm": "Odobri",
+      "approveSuccess": "Vaša odobritev je bila poslana fotografu",
+      "approvedOn": "Obdelane fotografije odobrene {{date}}",
+      "noteLabel": "Opomba za fotografa (neobvezno)",
+      "noteBlocked": "Vaša opomba vsebuje besede, ki tukaj niso dovoljene.",
+      "nothingSelected": "Najprej izberite vsaj eno fotografijo",
+      "submitError": "Pošiljanje ni uspelo. Poskusite znova.",
+      "lockedSelection": "Vaš izbor je zaključen in ga ni več mogoče spreminjati. Prosite fotografa, naj ga znova odpre.",
+      "lockedApproval": "Obdelane fotografije ste odobrili, zato odobritev in zavrnitev ni več mogoče spreminjati. Prosite fotografa, naj jih znova odpre."
+    }
   },
   "categories": {
     "title": "Kategorije fotografij",
@@ -3927,7 +3950,10 @@
       "guestUploadsPendingReview_few": "{{count}} nalaganja gostov čakajo na pregled v {{eventName}}",
       "guestUploadsPendingReview_other": "{{count}} nalaganj gostov čaka na pregled v {{eventName}}",
       "photoDecision": "Fotografija odobrena ali zavrnjena v {{eventName}}",
-      "guestFeedbackDecision": "Gost je odobril ali zavrnil fotografijo v {{eventName}}"
+      "guestFeedbackDecision": "Gost je odobril ali zavrnil fotografijo v {{eventName}}",
+      "selectionSubmitted": "{{guestName}} je zaključil(a) izbor v {{eventName}} (fotografije: {{count}})",
+      "approvalSubmitted": "{{guestName}} je odobril(a) obdelane fotografije v {{eventName}}",
+      "selectionReopened": "Oddaja gosta {{guestName}} znova odprta v {{eventName}}"
     },
     "notificationToasts": {
       "markedAllRead": "Vsa obvestila so označena kot prebrana",
@@ -4315,7 +4341,10 @@
       "guest_uploads_pending_review_one": "{{count}} nalaganje gosta čaka na pregled v {{eventName}}",
       "guest_uploads_pending_review_two": "{{count}} nalaganji gostov čakata na pregled v {{eventName}}",
       "guest_uploads_pending_review_few": "{{count}} nalaganja gostov čakajo na pregled v {{eventName}}",
-      "guest_uploads_pending_review_other": "{{count}} nalaganj gostov čaka na pregled v {{eventName}}"
+      "guest_uploads_pending_review_other": "{{count}} nalaganj gostov čaka na pregled v {{eventName}}",
+      "selection_submitted": "{{guestName}} je zaključil(a) izbor v {{eventName}} (fotografije: {{count}})",
+      "approval_submitted": "{{guestName}} je odobril(a) obdelane fotografije v {{eventName}}",
+      "selection_reopened": "Oddaja gosta {{guestName}} znova odprta v {{eventName}}"
     },
     "people": {
       "title": "Osebe v tej galeriji",
@@ -5490,7 +5519,9 @@
       "timeWindow": "Časovno okno (minute)",
       "maxRequests": "Največ zahtev",
       "decisions": "Odobri / zavrni posamezno fotografijo",
-      "decisionsDesc": "Gostje vsako fotografijo odobrijo ali zavrnejo, po želji z razlogom. Po njihovi odločitvi lahko filtrirate in izvažate"
+      "decisionsDesc": "Gostje vsako fotografijo odobrijo ali zavrnejo, po želji z razlogom. Po njihovi odločitvi lahko filtrirate in izvažate",
+      "selectionSubmit": "Zaključek izbora",
+      "selectionSubmitDesc": "Gostje oddajo svoje všečke ali priljubljene, ko končajo. Njihov izbor je nato zaklenjen, dokler ga znova ne odprete, vi pa prejmete obvestilo"
     },
     "settingsUpdated": "Nastavitve povratnih informacij posodobljene",
     "settingsUpdateError": "Nastavitev ni bilo mogoče posodobiti",
@@ -5613,7 +5644,20 @@
     "decisionError": "Odločitve ni bilo mogoče shraniti",
     "decisionType": "vašo odločitev",
     "youApproved": "To fotografijo ste odobrili",
-    "youRejected": "To fotografijo ste zavrnili"
+    "youRejected": "To fotografijo ste zavrnili",
+    "submissions": {
+      "title": "Zaključeni izbori in odobritve",
+      "selection": "Izbor",
+      "approval": "Odobritev obdelanih fotografij",
+      "photoCount": "Fotografije: {{count}}",
+      "submittedOn": "Oddano {{date}}",
+      "reopenedOn": "Znova odprto {{date}}",
+      "note": "Opomba: {{note}}",
+      "reopen": "Znova odpri",
+      "reopenConfirm": "Želite to oddajo znova odpreti? Gost lahko znova spreminja izbor in ga mora ponovno oddati.",
+      "reopened": "Oddaja znova odprta",
+      "reopenError": "Oddaje ni bilo mogoče znova odpreti"
+    }
   },
   "filter": {
     "feedbackFilters": "Filtri povratnih informacij",
