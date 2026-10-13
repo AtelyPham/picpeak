@@ -51,6 +51,7 @@ import {
   type LightboxPhotoChangeReason,
 } from './photoLink';
 import { DownloadResolutionModal } from './DownloadResolutionModal';
+import { clearDownloadJobParam, readDownloadJobParam } from './downloadJobLink';
 import { CopyFilenamesDialog } from './CopyFilenamesDialog';
 import { ExpirationBanner } from './ExpirationBanner';
 import { CountdownTimer } from './CountdownTimer';
@@ -164,6 +165,10 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
   // Filename list dialog (issue 1733, A3d).
   const [showCopyFilenames, setShowCopyFilenames] = useState(false);
   const [resolutionPickerIds, setResolutionPickerIds] = useState<number[] | null>(null);
+  // The job a "your download is ready" mail links to (issue 1733). This view
+  // only mounts behind the gallery's own access check. The token leaves the
+  // address bar when its dialog is closed.
+  const [resumeJobToken, setResumeJobToken] = useState<string | null>(() => readDownloadJobParam());
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'date' | 'name' | 'size' | 'rating' | 'capture_date'>('date');
   const [sortDesc, setSortDesc] = useState(true);
@@ -1361,16 +1366,19 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
         )}
 
         {/* Download size picker (#858) — "download all", or a selection. */}
-        {(showResolutionPicker || resolutionPickerIds) && (
+        {(showResolutionPicker || resolutionPickerIds || resumeJobToken) && (
           <DownloadResolutionModal
             slug={slug}
             choices={downloadChoices}
             standardResolution={data?.event?.download_resolution?.standard}
             photoIds={resolutionPickerIds || undefined}
             quotaPhotos={resolutionPickerIds ? photosForIds(resolutionPickerIds) : allDownloadablePhotos}
+            resumeToken={resumeJobToken || undefined}
             onClose={() => {
               setShowResolutionPicker(false);
               setResolutionPickerIds(null);
+              setResumeJobToken(null);
+              clearDownloadJobParam();
             }}
           />
         )}
@@ -1633,16 +1641,19 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
         {newPhotosPill}
 
         {/* Download size picker (#858) — "download all", or a selection. */}
-        {(showResolutionPicker || resolutionPickerIds) && (
+        {(showResolutionPicker || resolutionPickerIds || resumeJobToken) && (
           <DownloadResolutionModal
             slug={slug}
             choices={downloadChoices}
             standardResolution={data?.event?.download_resolution?.standard}
             photoIds={resolutionPickerIds || undefined}
             quotaPhotos={resolutionPickerIds ? photosForIds(resolutionPickerIds) : allDownloadablePhotos}
+            resumeToken={resumeJobToken || undefined}
             onClose={() => {
               setShowResolutionPicker(false);
               setResolutionPickerIds(null);
+              setResumeJobToken(null);
+              clearDownloadJobParam();
             }}
           />
         )}
@@ -2111,16 +2122,19 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
         {newPhotosPill}
 
         {/* Download size picker (#858) — "download all", or a selection. */}
-        {(showResolutionPicker || resolutionPickerIds) && (
+        {(showResolutionPicker || resolutionPickerIds || resumeJobToken) && (
           <DownloadResolutionModal
             slug={slug}
             choices={downloadChoices}
             standardResolution={data?.event?.download_resolution?.standard}
             photoIds={resolutionPickerIds || undefined}
             quotaPhotos={resolutionPickerIds ? photosForIds(resolutionPickerIds) : allDownloadablePhotos}
+            resumeToken={resumeJobToken || undefined}
             onClose={() => {
               setShowResolutionPicker(false);
               setResolutionPickerIds(null);
+              setResumeJobToken(null);
+              clearDownloadJobParam();
             }}
           />
         )}
