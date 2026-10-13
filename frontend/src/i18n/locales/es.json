@@ -995,7 +995,9 @@
       "customerLink": "Abrir Ajustes",
       "publish": "Publicar la galería",
       "publishLink": "Publicar"
-    }
+    },
+    "showExifToGuests": "Mostrar los datos de cámara a los invitados",
+    "showExifToGuestsHelp": "La cámara, el objetivo, la distancia focal, la apertura, la velocidad de obturación y el ISO aparecen bajo la foto en la vista a pantalla completa. La ubicación y los números de serie nunca se guardan ni se muestran."
   },
   "settings": {
     "title": "Ajustes del sistema",
@@ -1427,6 +1429,9 @@
       "retention": "Conservar las descargas preparadas durante (horas)",
       "retentionHint": "Cuánto tiempo sigue disponible una descarga preparada en un tamaño personalizado antes de eliminarse. Un plazo más largo permite a los invitados volver a por ella más tarde, pero cada descarga preparada ocupa aproximadamente tanto espacio en disco como las fotos que contiene. Se aplica a las descargas que se preparen a partir de ahora.",
       "retentionInvalid": "Introduce un número entero de horas entre {{min}} y {{max}}."
+    },
+    "captureDates": {
+      "pendingDetails": "Fotos pendientes de esta ejecución: {{photos}}. También lee los datos de cámara (cámara, objetivo, exposición) de las fotos que aún no los tienen registrados."
     }
   },
   "analytics": {
@@ -2004,7 +2009,8 @@
       "noPosterFrame": "Sin fotograma de portada",
       "noPosterFrameRetry": "Volver a tomar el fotograma de portada",
       "approvedBy": "Aprobada: {{value}}",
-      "rejectedBy": "Rechazada: {{value}}"
+      "rejectedBy": "Rechazada: {{value}}",
+      "cameraDetails": "Datos de cámara"
     },
     "guests": {
       "columns": {

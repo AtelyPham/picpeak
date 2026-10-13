@@ -21,6 +21,8 @@ export type EditFormState = {
   show_credits_to_guests: boolean;
   // Live refresh of an open gallery (issue 1733, C5)
   live_refresh: boolean;
+  // Camera details in the guest lightbox (issue 1733, D1)
+  show_exif_to_guests: boolean;
   hero_photo_id: number | null;
   customer_name: string;
   customer_email: string;

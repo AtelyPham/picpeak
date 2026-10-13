@@ -2129,7 +2129,9 @@
       "customerLink": "Odpri nastavitve",
       "publish": "Objavite galerijo",
       "publishLink": "Objavi"
-    }
+    },
+    "showExifToGuests": "Pokaži podatke o fotoaparatu gostom",
+    "showExifToGuestsHelp": "Fotoaparat, objektiv, goriščna razdalja, zaslonka, čas osvetlitve in ISO so prikazani pod fotografijo v celozaslonskem pogledu. Lokacija in serijske številke se nikoli ne shranijo in ne prikažejo."
   },
   "settings": {
     "title": "Sistemske nastavitve",
@@ -3097,7 +3099,8 @@
       "skipped": "{{count}} fotografij je bilo med zagonom spremenjenih drugje in zato niso bile posodobljene.",
       "description": "Dopolni »datum zajema« iz EXIF za fotografije, uvožene pred njegovim branjem. Zunanji uvozi ga niso zabeležili, zato se te galerije razvrščajo po vrstnem redu uvoza namesto po času zajema.",
       "skipped_one": "{{count}} fotografij je bilo med zagonom spremenjenih drugje in zato niso bile posodobljene.",
-      "skipped_other": "{{count}} fotografij je bilo med zagonom spremenjenih drugje in zato niso bile posodobljene."
+      "skipped_other": "{{count}} fotografij je bilo med zagonom spremenjenih drugje in zato niso bile posodobljene.",
+      "pendingDetails": "Fotografije, ki čakajo na ta zagon: {{photos}}. Prebere tudi podatke o fotoaparatu (fotoaparat, objektiv, osvetlitev) za fotografije, ki jih še nimajo."
     },
     "orientationBackfill": {
       "title": "Usmerjenost fotografij",
@@ -3942,7 +3945,8 @@
         "filterNone": "Brez imena"
       },
       "approvedBy": "Odobreno: {{value}}",
-      "rejectedBy": "Zavrnjeno: {{value}}"
+      "rejectedBy": "Zavrnjeno: {{value}}",
+      "cameraDetails": "Podatki o fotoaparatu"
     },
     "events": {
       "tabs": {

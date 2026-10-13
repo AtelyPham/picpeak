@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const { db } = require('../database/db');
 const { generateThumbnail, generateVideoPlaceholder, extractCaptureDate, withLocalCopy, withProcessableImage } = require('./imageProcessor');
+const { exifColumn } = require('./photoExif');
 const { generatePhotoFilename } = require('../utils/filenameSanitizer');
 const { processUploadedVideo, extractVideoMetadata, isVideoMimeType, posterFrameError } = require('./videoProcessor');
 const { getStorage } = require('./storage');
@@ -223,6 +224,9 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
       // Content hash (issue 1733, C2), likewise before the move; the chunked
       // route has already computed it for its duplicate check.
       const contentSha256 = file.contentSha256 || await sha256File(tempPath);
+      // Camera details (issue 1733, D1), from the same temp file: this path
+      // completes the row itself, so the worker never reads them.
+      const exif = isVideo ? {} : await exifColumn(tempPath);
 
       // Now upload the original through the storage backend and remove the
       // local temp copy.
@@ -277,7 +281,8 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
         ...(isVideo && webCopyEnabled ? { web_status: 'pending' } : {}),
         ...(processingError ? { processing_error: processingError } : {}),
         ...placement,
-        ...credit
+        ...credit,
+        ...exif
       };
 
       // Add video-specific metadata if applicable
@@ -662,6 +667,11 @@ async function processPhoto(photoId) {
       } catch (e) {
         logger.warn(`processPhoto: EXIF extraction failed for ${photoId}`, { error: e.message });
       }
+    }
+
+    // Camera details (issue 1733, D1), from the same original.
+    if (!photo.exif_json && !isVideo) {
+      Object.assign(updateData, await exifColumn(localPath));
     }
 
     if (isVideo) {

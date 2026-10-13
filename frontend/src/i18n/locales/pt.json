@@ -1102,7 +1102,9 @@
       "customerLink": "Abrir Configurações",
       "publish": "Publicar a galeria",
       "publishLink": "Publicar"
-    }
+    },
+    "showExifToGuests": "Mostrar os dados da câmera aos convidados",
+    "showExifToGuestsHelp": "Câmera, lente, distância focal, abertura, velocidade do obturador e ISO aparecem abaixo da foto na visualização em tela cheia. A localização e os números de série nunca são armazenados nem exibidos."
   },
   "settings": {
     "title": "Configurações do Sistema",
@@ -1661,6 +1663,9 @@
       "retention": "Manter os downloads preparados por (horas)",
       "retentionHint": "Por quanto tempo um download preparado em um tamanho personalizado fica disponível antes de ser excluído. Um prazo maior permite que os convidados voltem para buscá-lo depois, mas cada download preparado ocupa aproximadamente o mesmo espaço em disco que as fotos que contém. Vale para os downloads preparados a partir de agora.",
       "retentionInvalid": "Informe um número inteiro de horas entre {{min}} e {{max}}."
+    },
+    "captureDates": {
+      "pendingDetails": "Fotos aguardando esta execução: {{photos}}. Ela também lê os dados da câmera (câmera, lente, exposição) das fotos que ainda não os têm registrados."
     }
   },
   "analytics": {
@@ -2184,7 +2189,8 @@
         "filterNone": "Sem nome"
       },
       "approvedBy": "Aprovada: {{value}}",
-      "rejectedBy": "Rejeitada: {{value}}"
+      "rejectedBy": "Rejeitada: {{value}}",
+      "cameraDetails": "Dados da câmera"
     },
     "events": {
       "tabs": {

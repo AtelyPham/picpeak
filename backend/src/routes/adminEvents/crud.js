@@ -979,6 +979,7 @@ module.exports = (router) => {
         // Uploader names are part of the gallery's configuration (#1561).
         guest_name_mode: source.guest_name_mode || 'off',
         show_credits_to_guests: formatBoolean(parseBooleanInput(source.show_credits_to_guests, false)),
+        show_exif_to_guests: formatBoolean(parseBooleanInput(source.show_exif_to_guests, false)),
         // Folder structure is configuration (issue 1786); the delivery state
         // of the source (issue 1562) is not — a copy starts complete.
         folder_structure: formatBoolean(parseBooleanInput(source.folder_structure, false)),
@@ -1155,6 +1156,8 @@ module.exports = (router) => {
     body('show_credits_to_guests').optional().isBoolean(),
     // Live refresh of an open gallery (issue 1733, C5).
     body('live_refresh').optional().isBoolean(),
+    // Camera details in the guest lightbox (issue 1733, D1).
+    body('show_exif_to_guests').optional().isBoolean(),
     // Reveal mode (#838): hide the gallery from guests until reveal.
     body('reveal_mode').optional().isBoolean(),
     body('reveal_at').optional({ nullable: true, checkFalsy: true }).isISO8601(),
@@ -1903,6 +1906,9 @@ module.exports = (router) => {
       }
       if (Object.prototype.hasOwnProperty.call(updates, 'live_refresh')) {
         updates.live_refresh = formatBoolean(parseBooleanInput(updates.live_refresh, false));
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'show_exif_to_guests')) {
+        updates.show_exif_to_guests = formatBoolean(parseBooleanInput(updates.show_exif_to_guests, false));
       }
 
       // Reveal mode (#838). Turning the toggle ON from off clears
