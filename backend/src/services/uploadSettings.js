@@ -274,6 +274,11 @@ const extensionsToMimeTypes = (extString) => {
 
 // The stored general_allowed_file_types value, unwrapped from its JSON
 // encoding when it has one. Throws if the database read fails.
+//
+// Two caches sit on this one row, with opposite failure rules. The upload
+// gate (getAllowedMimeTypes) falls back to the defaults, because the browser
+// can send the file again. The watcher (getAllowedExtensions) gets the error,
+// because a watched file is announced only once.
 const readAllowedFileTypesSetting = async () => {
   const setting = await db('app_settings')
     .where({ setting_key: 'general_allowed_file_types' })
@@ -315,9 +320,10 @@ const getAllowedMimeTypes = async () => {
  * and an extension the MIME map does not know yet (CR3, RAF, RW2) is still a
  * deliberate choice by the admin.
  *
- * Throws when the database read fails, unlike getAllowedMimeTypes. A watched
- * file is announced once, so a failed read passed off as "not allowed" would
- * skip it for good. Nothing is cached on failure.
+ * Throws when the database read fails, unlike getAllowedMimeTypes, and caches
+ * nothing. A failed read passed off as "not allowed" used to skip every RAW
+ * for the next minute with a misleading warning. The caller decides whether
+ * to retry.
  */
 const getAllowedExtensions = async () => {
   if (Date.now() < allowedExtensionsCacheExpiresAt && cachedAllowedExtensions) {

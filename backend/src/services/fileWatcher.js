@@ -124,6 +124,19 @@ async function findExistingPhoto(eventId, basename, relativePath) {
     .first();
 }
 
+// A database error is not a code retryTransient repeats, and nothing
+// announces this file again, so the settings read is retried here.
+const SETTINGS_READ_ATTEMPTS = 3;
+const SETTINGS_READ_PAUSE_MS = 1000;
+async function readAllowedExtensions() {
+  for (let attempt = 1; ; attempt++) {
+    try { return await getAllowedExtensions(); } catch (error) {
+      if (attempt >= SETTINGS_READ_ATTEMPTS) throw error;
+      await new Promise(resolve => setTimeout(resolve, SETTINGS_READ_PAUSE_MS));
+    }
+  }
+}
+
 async function processNewPhoto(filePath) {
   const relativePath = path.relative(WATCH_PATH(), filePath);
   const pathParts = relativePath.split(path.sep);
@@ -152,8 +165,9 @@ async function processNewPhoto(filePath) {
   // there is no client MIME to validate, and the map does not know every RAW
   // extension yet. A skip is logged because the file stays in the folder and
   // nothing else would say why it never showed up.
-  if (isRaw && !(await getAllowedExtensions()).has(ext.slice(1))) {
-    logger.warn(`[fileWatcher] Skipping ${relativePath}: ${ext.slice(1)} is not in general_allowed_file_types`);
+  if (isRaw && !(await readAllowedExtensions()).has(ext.slice(1))) {
+    logger.warn(`[fileWatcher] Skipping ${relativePath}: ${ext.slice(1)} is not in general_allowed_file_types. `
+      + 'Add it under Settings, then restart the backend or copy the file again.');
     return;
   }
   
@@ -247,8 +261,8 @@ async function processNewPhoto(filePath) {
     path: relativePath,
     thumbnail_path: relativeThumbPath,
     type: isVideo ? 'video' : photoType,
-    // Written out rather than left to the column defaults, which file every
-    // row as an image, video or not.
+    // The column defaults to 'image', so a watched video was filed as a
+    // photo. Migration 285 corrects the rows imported before this.
     media_type: isVideo ? 'video' : 'image',
     source_origin: 'managed',
     processing_status: 'complete',

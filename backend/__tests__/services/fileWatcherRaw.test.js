@@ -154,13 +154,27 @@ describe('fileWatcher camera RAW import', () => {
     warn.mockRestore();
   });
 
-  // chokidar announces a file once. A failed settings read that passed for
-  // "not allowed" skipped the RAW for good, and the cached deny skipped every
-  // other RAW for the next minute.
-  it('does not treat a failed settings read as a deny', async () => {
+  // chokidar announces a file once, so a settings read that fails during a
+  // database blip is retried in place rather than losing the file.
+  it('retries a failed settings read and imports the RAW', async () => {
     await setAllowedTypes('jpg,jpeg,png,webp,arw');
-    clearAllowedTypesCache();
     const filePath = drop('DSC03380.ARW', Buffer.from('II*\0not really a sony raw'));
+
+    await db.raw('ALTER TABLE app_settings RENAME TO app_settings_offline');
+    const restore = new Promise(resolve => setTimeout(resolve, 300))
+      .then(() => db.raw('ALTER TABLE app_settings_offline RENAME TO app_settings'));
+    try {
+      await processNewPhoto(filePath);
+    } finally {
+      await restore;
+    }
+
+    expect(await db('photos').where({ event_id: eventId })).toHaveLength(1);
+  });
+
+  it('gives up with an error, not a skip, when the settings stay unreadable', async () => {
+    await setAllowedTypes('jpg,jpeg,png,webp,arw');
+    const filePath = drop('DSC03381.ARW', Buffer.from('II*\0not really a sony raw'));
 
     await db.raw('ALTER TABLE app_settings RENAME TO app_settings_offline');
     try {
@@ -168,9 +182,7 @@ describe('fileWatcher camera RAW import', () => {
     } finally {
       await db.raw('ALTER TABLE app_settings_offline RENAME TO app_settings');
     }
-
-    await processNewPhoto(filePath);
-    expect(await db('photos').where({ event_id: eventId })).toHaveLength(1);
+    expect(await db('photos').where({ event_id: eventId })).toHaveLength(0);
   });
 
   // Not RAW, but the same insert: the column defaults to 'image', so a watched
