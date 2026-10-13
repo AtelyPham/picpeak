@@ -1,8 +1,10 @@
 import { useGalleryFiltering, resolveMediaType } from './hooks/useGalleryFiltering';
 import { useGalleryUpload } from './hooks/useGalleryUpload';
+import { useLiveRefresh } from './hooks/useLiveRefresh';
 import { useGallerySelection } from './hooks/useGallerySelection';
 import { useFeedbackChange } from './hooks/useFeedbackChange';
 import { UploadProcessingNotice } from './UploadProcessingNotice';
+import { NewPhotosPill } from './NewPhotosPill';
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { differenceInDays, parseISO } from 'date-fns';
 import { useQuery } from '@tanstack/react-query';
@@ -395,6 +397,24 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
     refetchInterval: (query) => (query.state.data?.scan?.in_progress ? 5000 : false),
     staleTime: 30_000,
   });
+  // Live refresh (issue 1733, C5), per-gallery opt-in. Stands down while
+  // something else already keeps the list current: the reveal poll, the
+  // viewer's own upload being followed, a people scan refetching the photos.
+  const loadedMaxId = useMemo(
+    () => (data?.photos || []).reduce<number | null>((max, p) => (max === null || p.id > max ? p.id : max), null),
+    [data?.photos],
+  );
+  const newPhotoCount = useLiveRefresh({
+    slug,
+    // revealArmed too: the reveal poll above keeps refetching the list after
+    // the reveal, for as long as the mode is on.
+    enabled: data?.event?.live_refresh === true && !hiddenUntilReveal && !revealArmed && !uploadProcessing
+      && !peopleData?.scan?.in_progress,
+    loadedCount: data?.photos?.length ?? 0,
+    loadedMaxId,
+  });
+  const newPhotosPill = <NewPhotosPill count={newPhotoCount} onClick={() => { void refetch(); }} />;
+
   // Memoised so the `people` recount below isn't invalidated by a fresh []
   // identity on every render.
   const allPeople = useMemo(() => peopleData?.people || [], [peopleData?.people]);
@@ -1610,6 +1630,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
           />
         )}
         {uploadProcessingNotice}
+        {newPhotosPill}
 
         {/* Download size picker (#858) — "download all", or a selection. */}
         {(showResolutionPicker || resolutionPickerIds) && (
@@ -2087,6 +2108,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
           />
         )}
         {uploadProcessingNotice}
+        {newPhotosPill}
 
         {/* Download size picker (#858) — "download all", or a selection. */}
         {(showResolutionPicker || resolutionPickerIds) && (

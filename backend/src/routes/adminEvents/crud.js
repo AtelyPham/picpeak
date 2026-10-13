@@ -980,6 +980,8 @@ module.exports = (router) => {
         // of the source (issue 1562) is not — a copy starts complete.
         folder_structure: formatBoolean(parseBooleanInput(source.folder_structure, false)),
         delivery_badge_label: source.delivery_badge_label || null,
+        // Live refresh is guest-facing behaviour of the gallery (issue 1733).
+        live_refresh: formatBoolean(parseBooleanInput(source.live_refresh, false)),
         allow_downloads: source.allow_downloads,
         disable_right_click: source.disable_right_click,
         enable_devtools_protection: source.enable_devtools_protection,
@@ -1141,6 +1143,8 @@ module.exports = (router) => {
     // Uploader names (#1561).
     body('guest_name_mode').optional().isIn(GUEST_NAME_MODES),
     body('show_credits_to_guests').optional().isBoolean(),
+    // Live refresh of an open gallery (issue 1733, C5).
+    body('live_refresh').optional().isBoolean(),
     // Reveal mode (#838): hide the gallery from guests until reveal.
     body('reveal_mode').optional().isBoolean(),
     body('reveal_at').optional({ nullable: true, checkFalsy: true }).isISO8601(),
@@ -1880,6 +1884,9 @@ module.exports = (router) => {
       // Written through formatBoolean like the other event flags (#1561).
       if (Object.prototype.hasOwnProperty.call(updates, 'show_credits_to_guests')) {
         updates.show_credits_to_guests = formatBoolean(parseBooleanInput(updates.show_credits_to_guests, false));
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'live_refresh')) {
+        updates.live_refresh = formatBoolean(parseBooleanInput(updates.live_refresh, false));
       }
 
       // Reveal mode (#838). Turning the toggle ON from off clears
