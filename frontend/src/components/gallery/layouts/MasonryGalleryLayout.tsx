@@ -6,13 +6,13 @@ import { firstLookAboveChips } from '../GalleryTileBadges';
 import {
   calculateJustifiedLayout,
   createJustifiedPhotos,
-  type JustifiedLayoutItem,
 } from '../../../utils/justifiedLayoutCalculator';
 // Flickr's justified-layout library
 import justifiedLayout from 'justified-layout';
 import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import type { Photo } from '../../../types';
 import { useLazyBands } from './lazyBands';
+import { useWindowedItems, WINDOW_MIN_PHOTOS } from './rowWindow';
 
 // Count-style feedback indicators shared by all masonry modes (top-left).
 // `withTitles` matches the columns-mode markup, which carries title attributes.
@@ -326,14 +326,14 @@ export const MasonryGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
     });
   }, [mode, photos, containerWidth, targetRowHeight, gutter, lastRowBehavior]);
 
-  // Create a map for quick lookup of layout items by photo ID (rows mode)
-  const layoutItemMap = useMemo(() => {
-    const map = new Map<number, JustifiedLayoutItem>();
-    for (const item of rowsLayout.items) {
-      map.set(item.photoId, item);
-    }
-    return map;
-  }, [rowsLayout.items]);
+  // Rows mode mounts only the rows near the viewport in a large gallery
+  // (issue 1733); the other modes never have items here.
+  const { visible: visibleRowItems } = useWindowedItems(
+    containerRef,
+    rowsLayout.items,
+    containerWidth,
+    mode === 'rows' && photos.length >= WINDOW_MIN_PHOTOS,
+  );
 
   // Calculate Flickr justified layout
   const flickrLayout = useMemo(() => {
@@ -438,9 +438,10 @@ export const MasonryGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
               <div key={photo.id} className="aspect-square bg-border-token rounded-lg animate-pulse" />
             ))}
           </div>
-        ) : photos.map((photo, index) => {
-          const layoutItem = layoutItemMap.get(photo.id);
-          if (!layoutItem) return null;
+        ) : visibleRowItems.map((layoutItem) => {
+          const index = photoIndexById.get(layoutItem.photoId);
+          if (index === undefined) return null;
+          const photo = photos[index];
 
           return (
             <PhotoCard
