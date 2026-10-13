@@ -856,6 +856,9 @@ router.delete('/:eventId/photos/:photoId', adminAuth, requirePermission('photos.
     // (issue 1187) does not re-import it on its next pass.
     await require('../services/externalImportService').recordExclusions(Number(eventId), [photo]);
     await db('photos').where({ id: photoId }).delete();
+    // Adaptive streaming ladder (issue 1733): derived as well. After the row,
+    // so a transcode still running cannot publish one behind the sweep.
+    await require('../services/videoHlsService').deleteLadder(photo);
 
     // Log activity (event was fetched above for storage key resolution)
     await logActivity('photo_deleted',
@@ -1120,10 +1123,21 @@ router.post('/:eventId/photos/bulk-delete', adminAuth, requirePermission('photos
     // Delete from database
     // Same as the single delete: keep the watcher from bringing these back.
     await require('../services/externalImportService').recordExclusions(Number(eventId), photos);
+    // Adaptive streaming ladders (issue 1733). Their state is read again
+    // here: the loop above runs for minutes on a large batch, long enough
+    // for the queue to give a video the ladder the rows read at the top do
+    // not know of.
+    const laddered = await db('photos')
+      .whereIn('id', photoIds)
+      .where('event_id', eventId)
+      .whereNotNull('hls_status')
+      .select('id', 'hls_status', 'hls_path');
     await db('photos')
       .whereIn('id', photoIds)
       .where('event_id', eventId)
       .delete();
+    // After the rows, as in the single delete.
+    for (const photo of laddered) await require('../services/videoHlsService').deleteLadder(photo);
 
     // Webhook (#327): one photo.deleted per row in the bulk batch.
     try {

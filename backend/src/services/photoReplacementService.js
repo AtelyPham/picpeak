@@ -283,6 +283,14 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
       web_status: isVideoReplacement && await videoRendition.isEnabled() ? 'pending' : null,
       web_started_at: null,
       web_error: null,
+      // The ladder starts over the same way; the queue picks a video up.
+      hls_path: null,
+      hls_status: null,
+      hls_attempt_id: null,
+      hls_attempts: 0,
+      hls_retry_at: null,
+      hls_started_at: null,
+      hls_error: null,
       // The replacement lives in the managed backend, so the row has to say
       // so. resolvePhotoStorageKey gives photo.source_origin precedence over
       // everything and returns null for 'reference'/'external' — so leaving
@@ -324,6 +332,12 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
       });
     }
 
+    // The adaptive streaming ladder (issue 1733) describes the old bytes too.
+    // Its files are listed now and removed once the row has started over:
+    // by then a transcode of the old file has lost its claim and cannot
+    // publish behind the sweep, and whatever another replica writes for the
+    // new file in between is not on the list.
+    const sweepOldLadder = await require('./videoHlsService').captureLadder(existingPhoto);
     if (object) {
       await uploadQuota.commitObject(object, 'photo', async conn => {
         if (await conn('photos').where({ id: existingPhoto.id, event_id: event.id }).update(updates) !== 1) {
@@ -332,6 +346,7 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
         return existingPhoto.id;
       });
     } else await db('photos').where({ id: existingPhoto.id }).update(updates);
+    await sweepOldLadder();
     if (autoCredit) {
       // Fenced like the upload worker: a manual credit set meanwhile wins,
       // and so does a replacement that installed another file since.
