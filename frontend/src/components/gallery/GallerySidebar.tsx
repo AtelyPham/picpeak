@@ -13,6 +13,7 @@ import { useDownloadQuota } from '../../contexts/DownloadQuotaContext';
 import type { QuotaPhoto } from '../../utils/downloadLimit';
 import { selectLabel } from '../../utils/mediaCounts';
 import { DownloadQuotaNotice } from './DownloadQuotaNotice';
+import { BulkRating } from './BulkRating';
 import { GallerySidebarFolderTree, type SidebarFolderTreeProps } from './GallerySidebarFolderTree';
 import { GallerySidebarSelectionTray } from './GallerySidebarSelectionTray';
 import { lockBodyScroll } from '../../utils/scrollLock';
@@ -79,6 +80,8 @@ interface GallerySidebarProps {
   minRating?: number | null;
   onMinRatingChange?: (minRating: number | null) => void;
   minRatingCounts?: Partial<Record<number, number>>;
+  // "Rate selected" (issue 1733): set when ratings are on for the gallery.
+  bulkRating?: { slug: string; photoIds: number[]; requireNameEmail?: boolean };
   mediaFilter?: 'all' | 'photo' | 'video';
   onMediaFilterChange?: (filter: 'all' | 'photo' | 'video') => void;
   showMediaFilter?: boolean;
@@ -150,6 +153,7 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
   minRating = null,
   onMinRatingChange,
   minRatingCounts = {},
+  bulkRating,
   mediaFilter = 'all',
   onMediaFilterChange,
   showMediaFilter = false,
@@ -182,7 +186,12 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
   useEffect(() => {
     if (isMobile && isOpen) {
       const handleClickOutside = (event: MouseEvent) => {
-        if (sidebarRef.current && !sidebarRef.current.contains(event.target as Node)) {
+        const target = event.target as Element;
+        // A dialog opened from the drawer is portalled to the body (the
+        // drawer's transform would confine it); a press in it is not a press
+        // on the page behind the drawer.
+        if (target.closest?.('[role="dialog"]')) return;
+        if (sidebarRef.current && !sidebarRef.current.contains(target)) {
           onClose();
         }
       };
@@ -351,6 +360,15 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
                   <DownloadQuotaNotice photos={selectedPhotosForQuota} />
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Rate the selection (issue 1733). Its own section, like the
+              filename list below: with downloads off the tile checkboxes
+              still select, and rating is what a proofing gallery is for. */}
+          {isSelectionMode && bulkRating && bulkRating.photoIds.length > 0 && (
+            <div className="gallery-sidebar-section gallery-sidebar-bulk-rating p-4 border-b border-border-token">
+              <BulkRating {...bulkRating} />
             </div>
           )}
 
