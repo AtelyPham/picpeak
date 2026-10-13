@@ -5,7 +5,7 @@ import { KEEP_BAND_VIEWPORTS } from './lazyBands';
 
 /**
  * Row windowing for the layouts that position every tile from a precomputed
- * box (Justified, Masonry rows) — issue 1733, step 2.
+ * box (Masonry rows) — issue 1733, step 2.
  *
  * Only the rows near the viewport are in the DOM. The grid container keeps
  * the layout's full height and the tiles stay absolutely positioned at their
@@ -88,8 +88,6 @@ interface ScrollAnchor {
 export interface WindowedItems {
   /** The items to render, in layout order. */
   visible: JustifiedLayoutItem[];
-  /** Keep a photo's row, and the rows next to it, mounted while its tile has focus. */
-  pin: (photoId: number | null) => void;
 }
 
 /**
@@ -123,7 +121,6 @@ export function useWindowedItems(
 
   // The rows in the window, and the layout they were measured in.
   const [win, setWin] = useState({ model, start: 0, end: 0 });
-  const [pinned, setPinned] = useState<number | null>(null);
   const modelRef = useRef(model);
   const anchorRef = useRef<ScrollAnchor | null>(null);
   const widthRef = useRef(width);
@@ -229,14 +226,9 @@ export function useWindowedItems(
   }, [enabled, measure, markAnchor]);
 
   const visible = useMemo(() => {
-    const { items, rows, rowOf, indexOf } = model;
+    const { items, rows, indexOf } = model;
     if (!enabled) return items;
     const { start, end } = win;
-    const pinnedRow = pinned === null ? undefined : rowOf.get(pinned);
-    // The focused row and its two neighbours, so Tab and Shift+Tab land on
-    // the next photo (and scroll to it) wherever the window has gone since.
-    const keepStart = Math.max(0, (pinnedRow ?? 0) - 1);
-    const keepEnd = Math.min(rows.length, (pinnedRow ?? 0) + 2);
     if (win.model !== model) {
       // The window predates this layout for one unpainted render. Its row
       // numbers mean other photos here; mounting those would unmount every
@@ -251,21 +243,10 @@ export function useWindowedItems(
         const index = indexOf.get(item.photoId);
         if (index !== undefined) keep.add(index);
       }
-      if (pinnedRow !== undefined) {
-        for (let i = rows[keepStart].from; i < rows[keepEnd - 1].to; i++) keep.add(i);
-      }
       return [...keep].sort((a, b) => a - b).map((index) => items[index]);
     }
-    const take = (from: number, to: number) => (from < to ? items.slice(rows[from].from, rows[to - 1].to) : []);
-    if (pinnedRow === undefined) return take(start, end);
-    if (start === end || (keepStart <= end && keepEnd >= start)) {
-      return start === end ? take(keepStart, keepEnd) : take(Math.min(start, keepStart), Math.max(end, keepEnd));
-    }
-    // Document order stays photo order.
-    return keepEnd < start
-      ? [...take(keepStart, keepEnd), ...take(start, end)]
-      : [...take(start, end), ...take(keepStart, keepEnd)];
-  }, [enabled, model, win, pinned]);
+    return start < end ? items.slice(rows[start].from, rows[end - 1].to) : [];
+  }, [enabled, model, win]);
 
-  return { visible, pin: setPinned };
+  return { visible };
 }
