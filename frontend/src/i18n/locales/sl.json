@@ -2114,6 +2114,18 @@
       "label": "Hitra izbira poteka",
       "days": "{{days}} dni",
       "fromToday": "Od danes:"
+    },
+    "nextSteps": {
+      "title": "Pred deljenjem",
+      "progress": "Opravljeno: {{done}} od {{total}}",
+      "done": "Opravljeno",
+      "todo": "Odprto",
+      "photos": "Dodajte fotografije",
+      "photosLink": "Odpri Fotografije",
+      "customer": "Dodajte e-pošto ali račun stranke",
+      "customerLink": "Odpri nastavitve",
+      "publish": "Objavite galerijo",
+      "publishLink": "Objavi"
     }
   },
   "settings": {

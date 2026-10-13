@@ -959,6 +959,18 @@
       "label": "Snelkeuze voor de vervaldatum",
       "days": "{{days}} dagen",
       "fromToday": "Vanaf vandaag:"
+    },
+    "nextSteps": {
+      "title": "Voordat je deelt",
+      "progress": "{{done}} van {{total}} klaar",
+      "done": "Klaar",
+      "todo": "Te doen",
+      "photos": "Foto's toevoegen",
+      "photosLink": "Foto's openen",
+      "customer": "E-mailadres of account van de klant toevoegen",
+      "customerLink": "Instellingen openen",
+      "publish": "Galerij publiceren",
+      "publishLink": "Publiceren"
     }
   },
   "settings": {

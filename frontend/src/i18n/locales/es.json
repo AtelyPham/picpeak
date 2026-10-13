@@ -980,7 +980,19 @@
       "days": "{{days}} días",
       "fromToday": "Desde hoy:"
     },
-    "neverExpires": "Nunca"
+    "neverExpires": "Nunca",
+    "nextSteps": {
+      "title": "Antes de compartir",
+      "progress": "{{done}} de {{total}} completados",
+      "done": "Hecho",
+      "todo": "Pendiente",
+      "photos": "Añadir fotos",
+      "photosLink": "Abrir Fotos",
+      "customer": "Añadir un correo o una cuenta de cliente",
+      "customerLink": "Abrir Ajustes",
+      "publish": "Publicar la galería",
+      "publishLink": "Publicar"
+    }
   },
   "settings": {
     "title": "Ajustes del sistema",

@@ -1087,6 +1087,18 @@
       "label": "Seleção rápida de expiração",
       "days": "{{days}} dias",
       "fromToday": "A partir de hoje:"
+    },
+    "nextSteps": {
+      "title": "Antes de compartilhar",
+      "progress": "{{done}} de {{total}} concluídos",
+      "done": "Concluído",
+      "todo": "A fazer",
+      "photos": "Adicionar fotos",
+      "photosLink": "Abrir Fotos",
+      "customer": "Adicionar um e-mail ou uma conta de cliente",
+      "customerLink": "Abrir Configurações",
+      "publish": "Publicar a galeria",
+      "publishLink": "Publicar"
     }
   },
   "settings": {
