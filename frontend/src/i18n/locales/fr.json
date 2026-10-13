@@ -316,6 +316,10 @@
     "cancelSelection": "Annuler la sélection",
     "selectAll": "Tout sélectionner",
     "deselectAll": "Tout désélectionner",
+    "selectionTray": {
+      "title": "Sélection ({{count}})",
+      "remove": "Retirer {{name}} de la sélection"
+    },
     "copyFilenames": {
       "button": "Copier les noms de fichiers",
       "title": "Copier les noms de fichiers",
