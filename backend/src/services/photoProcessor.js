@@ -427,6 +427,8 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
  *                       worker then never reads EXIF for the row
  *   - heldForReview     store the rows hidden and pending review (a guest
  *                       upload to a moderated gallery, issue 1733)
+ *   - clientCapturedAt  Date a guest's browser read before scaling the photo
+ *                       down; stored only for an image with no EXIF date
  *
  * Returns: { uploadId, photos: [{id, filename, size, category_id}], errors: [{filename, error}] }
  */
@@ -436,6 +438,7 @@ async function queueFilesForProcessing(files, options = {}) {
   const {
     eventId, photoType = 'individual', categoryId = null, folderId = null, uploadId: providedUploadId, photoCap = null,
     uploadedBy = 'admin', credit = {}, uploadReservation = null, heldForReview = false,
+    clientCapturedAt = null,
   } = options;
   const uploadId = providedUploadId || crypto.randomBytes(16).toString('hex');
 
@@ -504,6 +507,12 @@ async function queueFilesForProcessing(files, options = {}) {
       // already holds.
       const contentSha256 = await sha256File(tempPath);
 
+      // Read here, while the file is still local: a date in the file always
+      // wins, and the worker reads it as for any other upload.
+      const capturedAt = clientCapturedAt && !isVideo && !(await extractCaptureDate(tempPath))
+        ? clientCapturedAt.toISOString()
+        : null;
+
       if (uploadReservation) {
         uploadCharge = await require('./publicUploadQuota').prepareObject(uploadReservation, finalKey, tempStats.size);
       }
@@ -533,7 +542,7 @@ async function queueFilesForProcessing(files, options = {}) {
         folder_id: folderId,
         size_bytes: tempStats.size,
         content_sha256: contentSha256,
-        captured_at: null,
+        captured_at: capturedAt,
         media_type: isVideo ? 'video' : 'image',
         mime_type: file.mimetype,
         processing_status: 'pending',

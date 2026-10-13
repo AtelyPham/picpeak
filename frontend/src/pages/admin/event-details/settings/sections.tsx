@@ -19,7 +19,7 @@ import { usePermission } from '../../../../hooks/usePermission';
 import type { FeedbackSettings as FeedbackSettingsType } from '../../../../services/feedback.service';
 import { ExternalFolderPicker } from '../ExternalFolderPicker';
 import { useExternalImport } from '../useExternalImport';
-import { emailNeedsPassword, type EventFields } from './draft';
+import { emailNeedsPassword, GUEST_UPLOAD_MIN_EDGE, GUEST_UPLOAD_MAX_EDGE, type EventFields } from './draft';
 import { radioGroupKeyDown } from '../../../../utils/ariaKeyboard';
 
 export interface FieldsProps {
@@ -360,6 +360,21 @@ export const GuestsSection: React.FC<FieldsProps & {
             ))}
           </select>
           <p className="text-xs text-muted mt-1">{t('events.uploadCategoryHelp')}</p>
+          <label className={`${labelClass} mt-4`} htmlFor="event-guest-upload-max-edge">
+            {t('events.guestUploadMaxEdge', 'Longest edge of guest photos (px)')}
+          </label>
+          <input
+            id="event-guest-upload-max-edge"
+            type="number"
+            value={f.guest_upload_max_edge}
+            onChange={(e) => set({ guest_upload_max_edge: e.target.value })}
+            min={GUEST_UPLOAD_MIN_EDGE}
+            max={GUEST_UPLOAD_MAX_EDGE}
+            className={inputClass}
+          />
+          <p className="text-xs text-muted mt-1">
+            {t('events.guestUploadMaxEdgeHelp', 'Larger JPEG, PNG and WebP photos are scaled down on the guest\'s device before upload, which saves data and storage. Leave empty to keep originals. Other formats and videos are always sent as they are.')}
+          </p>
         </div>
       )}
       {/* Approval of guest uploads (issue 1733) — only meaningful with them on */}

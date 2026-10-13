@@ -11,6 +11,7 @@ const categoryScope = require('../../utils/categoryScope');
 const { guestNameModeOf, guestCreditFields } = require('../../services/photoCredit');
 const { withPublicUpload } = require('../../middleware/publicUploadStream');
 const { holdsGuestUploads, notifyGuestUploadsPending } = require('../../services/uploadReviewService');
+const { parseClientCaptureDate } = require('../../services/guestUploadDownscale');
 
 router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, resolveGuest, async (req, res) => {
   try {
@@ -100,7 +101,8 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, resolve
       limits: {
         fileSize: maxFileSizeBytes,
         files: maxFiles,
-        // The only text field this route reads is category_id. Without these
+        // The only text fields this route reads are category_id and
+        // captured_at. Without these
         // caps an unbounded number of ~1 MiB text parts is held in memory
         // before the handler runs (Codex security audit 2026-09-30).
         fields: 5,
@@ -191,6 +193,10 @@ router.post('/:eventId/upload', verifyGalleryAccess, denySlideshowToken, resolve
           credit,
           uploadReservation,
           heldForReview,
+          // The date the browser read before scaling the photo down (issue
+          // 1733). One field, so it only speaks for a one-file request, which
+          // is what the guest UI sends.
+          clientCapturedAt: req.files.length === 1 ? parseClientCaptureDate(req.body.captured_at) : null,
         });
         if (heldForReview && result.photos.length > 0) {
           await notifyGuestUploadsPending(req.event, result.photos.length);
