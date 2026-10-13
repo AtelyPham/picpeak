@@ -262,7 +262,7 @@ async function processNewPhoto(filePath) {
     thumbnail_path: relativeThumbPath,
     type: isVideo ? 'video' : photoType,
     // The column defaults to 'image', so a watched video was filed as a
-    // photo. Migration 285 corrects the rows imported before this.
+    // photo. Migration 286 corrects the rows imported before this.
     media_type: isVideo ? 'video' : 'image',
     source_origin: 'managed',
     processing_status: 'complete',

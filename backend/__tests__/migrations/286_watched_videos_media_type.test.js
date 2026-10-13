@@ -1,11 +1,11 @@
 /**
- * Migration 285: watched videos stored as images get media_type 'video';
+ * Migration 286: watched videos stored as images get media_type 'video';
  * nothing else changes.
  */
 const knex = require('knex');
-const migration = require('../../migrations/core/285_watched_videos_media_type');
+const migration = require('../../migrations/core/286_watched_videos_media_type');
 
-describe('migration 285 on SQLite', () => {
+describe('migration 286 on SQLite', () => {
   let db;
 
   beforeEach(async () => {

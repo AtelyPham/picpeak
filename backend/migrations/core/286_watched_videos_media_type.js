@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Migration 285: videos imported by the watch folder before the fix were
+ * Migration 286: videos imported by the watch folder before the fix were
  * stored with media_type 'image', because that insert never set the column
  * and it defaults to 'image'. The gallery then treated them as photos.
  *
