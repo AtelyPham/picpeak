@@ -40,8 +40,10 @@ function useDesktopViewport(): boolean {
     const query = window.matchMedia(DESKTOP_QUERY);
     const onChange = () => setMatches(query.matches);
     onChange();
-    query.addEventListener('change', onChange);
-    return () => query.removeEventListener('change', onChange);
+    // Optional calls: a media query list that cannot notify (older Safari)
+    // has neither method, and the strip must not take the lightbox down.
+    query.addEventListener?.('change', onChange);
+    return () => query.removeEventListener?.('change', onChange);
   }, []);
   return matches;
 }

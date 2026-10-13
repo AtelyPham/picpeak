@@ -22,6 +22,7 @@ const { getQuota, grantedPhotoIds, drawsOnQuota } = require('./downloadQuota');
 const { guestNameModeOf, creditVisibleToGuest } = require('./photoCredit');
 const { guestUploadMaxEdgeOf } = require('./guestUploadDownscale');
 const { applyPhotoVisibilityFilter } = require('../utils/photoVisibility');
+const { galleryFullResolutionDenial } = require('./galleryAssetPolicy');
 /**
  * The photos a viewer's list is made of, before sorting and paging: this
  * event's processed photos, the viewer's visibility rule, the slideshow pin
@@ -524,6 +525,8 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, viaC
   // not use, and no resolution picker: a job would build originals.
   const downloadPreviewOnly = !!downloadQuota && !drawsOnQuota({ accessLevel, viaCustomer });
   const quotaForViewer = downloadPreviewOnly ? null : downloadQuota;
+  // Full-resolution zoom (issue 1733): the same rule the photo route enforces.
+  const fullResolutionAllowed = !(await galleryFullResolutionDenial(event, accessLevel));
 
   // Uploader names / photo credits (#1561). Recorded for the admin; a guest
   // sees them only when the per-event switch is on, and a guest-given name
@@ -710,6 +713,12 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, viaC
         slideshow_url: photo.media_type !== 'video'
             && (!photo.mime_type || !photo.mime_type.startsWith('video/'))
           ? `/api/gallery/${slug}/preview/${photo.id}${wmQuery}`
+          : null,
+        // Full-resolution zoom (issue 1733): where the lightbox may load the
+        // original once the viewer zooms in, null where it may not. Only a
+        // hint; the route decides again on every request.
+        full_resolution_url: fullResolutionAllowed && !isVideo && !downloadDisabled && !originalNeedsPreview(photo)
+          ? `/api/gallery/${slug}/photo/${photo.id}?${[imgQuery, 'zoom=1'].filter(Boolean).join('&')}`
           : null,
         type: photo.type,
         category_id: filterCategoryIdOf(photo),
