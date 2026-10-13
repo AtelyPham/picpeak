@@ -666,7 +666,8 @@ router.post('/:id/restore', adminAuth, requirePermission('archives.restore'), re
         let folderId = null;
         if (manifestEntry?.folder_path) {
           const segments = String(manifestEntry.folder_path).split('/').filter(Boolean);
-          ({ folderId } = await folderTree.ensurePath(archive.id, segments, { canCreate: true }));
+          // foldAtLimit: a restore never drops a photo over the folder cap.
+          ({ folderId } = await folderTree.ensurePath(archive.id, segments, { canCreate: true, foldAtLimit: true }));
         }
         if (categoryId) {
           const resolved = await db('photo_categories').where('id', categoryId).first('is_folder');

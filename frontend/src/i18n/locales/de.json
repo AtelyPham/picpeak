@@ -843,7 +843,11 @@
     "hidePassword": "Passwort verbergen",
     "showPassword": "Passwort anzeigen",
     "loadFailed": "Konnte nicht geladen werden",
-    "moreActions": "Weitere Aktionen"
+    "moreActions": "Weitere Aktionen",
+    "previousMonth": "Vorheriger Monat",
+    "nextMonth": "Nächster Monat",
+    "today": "Heute",
+    "chooseDate": "Datum wählen"
   },
   "upload": {
     "capacity": {
@@ -973,7 +977,11 @@
       "firstLookCallout_other": "First-look-Ordner gefunden: „{{name}}“. Seine {{count}} Fotos werden als „First look“ markiert, und die Galerie wechselt zur zweistufigen Auslieferung: Gäste sehen, dass weitere Fotos unterwegs sind, bis Sie die vollständige Galerie als fertig markieren.",
       "firstLookSettings": "Fälligkeit und Badge: Einstellungen dieser Galerie → Ordner & Auslieferung. Stichwörter: Einstellungen → Events.",
       "nothingToUpload": "Keine der ausgewählten Dateien kann hochgeladen werden: Alle liegen in versteckten oder übersprungenen Ordnern.",
-      "keptForNext": "Dateien, die während der Vorbereitung der Ordner hinzukamen, sind noch ausgewählt: {{count}}."
+      "keptForNext": "Dateien, die während der Vorbereitung der Ordner hinzukamen, sind noch ausgewählt: {{count}}.",
+      "overFolderLimit_one": "Dieser Upload würde {{adding}} Ordner anlegen, die Galerie hat aber schon {{current}} von höchstens {{limit}}. Schalten Sie „Ordnerstruktur übernehmen“ aus oder entfernen Sie zuerst Ordner.",
+      "overFolderLimit_other": "Dieser Upload würde {{adding}} Ordner anlegen, die Galerie hat aber schon {{current}} von höchstens {{limit}}. Schalten Sie „Ordnerstruktur übernehmen“ aus oder entfernen Sie zuerst Ordner.",
+      "overRequestLimit_one": "Dieser Upload würde {{adding}} Ordneranfrage stellen, die Galerie hat aber schon {{current}} von höchstens {{limit}} offenen. Bitten Sie eine Administratorin oder einen Administrator, zuerst einige zu genehmigen oder abzulehnen, oder schalten Sie „Ordnerstruktur übernehmen“ aus.",
+      "overRequestLimit_other": "Dieser Upload würde {{adding}} Ordneranfragen stellen, die Galerie hat aber schon {{current}} von höchstens {{limit}} offenen. Bitten Sie eine Administratorin oder einen Administrator, zuerst einige zu genehmigen oder abzulehnen, oder schalten Sie „Ordnerstruktur übernehmen“ aus."
     },
     "largeFileReplaceSkipped": "Ersetzen nach Dateiname ist für Dateien über der Stapelgröße nicht möglich; laden Sie die Datei ohne Ersetzen hoch.",
     "removeFile": "{{name}} entfernen"
@@ -1949,6 +1957,8 @@
     "commented": "Kommentiert",
     "needHelp": "Hilfe benötigt? Kontaktieren Sie uns unter",
     "noPhotosFound": "Keine Fotos gefunden",
+    "noPhotosMatch": "Keine Fotos passen zu Ihrer Suche oder Ihren Filtern.",
+    "noPhotosYet": "Hier gibt es noch keine Fotos.",
     "failedToLoad": "Fotos konnten nicht geladen werden",
     "tryAgain": "Erneut versuchen",
     "passwordChangeRequired": "Ändern Sie Ihr Passwort im Admin-Bereich, bevor Sie diese Galerie in der Vorschau ansehen.",
@@ -2215,6 +2225,7 @@
     "revealMode": "Reveal-Modus (Galerie bis zur Freigabe verbergen)",
     "revealModeHelp": "Gäste können hochladen, sehen aber keine Fotos, bis Sie die Galerie freigeben — manuell oder zum geplanten Zeitpunkt. Diashow und Kundenzugang funktionieren weiter.",
     "revealAt": "Geplante Freigabe (optional)",
+    "revealAtTime": "Uhrzeit der Freigabe",
     "revealAtHelp": "Leer lassen, um manuell mit „Jetzt freigeben\" freizugeben.",
     "revealModeStatus": "Reveal-Modus",
     "revealed": "Freigegeben",
@@ -2720,7 +2731,8 @@
       "structureApplied_one": "{{count}} Foto in Ordner verschoben",
       "structureApplied_other": "{{count}} Fotos in Ordner verschoben",
       "structureNothing": "Alle Fotos aus Unterordnern liegen bereits in einem Ordner",
-      "structureFailed": "Die Ordnerstruktur konnte nicht übernommen werden"
+      "structureFailed": "Die Ordnerstruktur konnte nicht übernommen werden",
+      "structureLimited": "Die Galerie hat ihre Höchstzahl an Ordnern erreicht: Einige Fotos liegen im nächstgelegenen vorhandenen Ordner."
     },
     "header": {
       "moreActions": "Weitere Aktionen"
@@ -6637,7 +6649,17 @@
       "moveToFolderTitle_other": "{{count}} Fotos in einen Ordner verschieben",
       "photosMoved_one": "{{count}} Foto nach {{folder}} verschoben",
       "photosMoved_other": "{{count}} Fotos nach {{folder}} verschoben",
-      "moveFailed": "Die Fotos konnten nicht verschoben werden"
+      "moveFailed": "Die Fotos konnten nicht verschoben werden",
+      "errors": {
+        "exists": "Hier gibt es bereits einen Ordner mit diesem Namen.",
+        "deleteNameClash": "Der Unterordner «{{name}}» kann nicht eine Ebene höher: Dort gibt es bereits einen Ordner mit diesem Namen. Benennen Sie ihn zuerst um oder verschieben Sie ihn.",
+        "tooDeep": "Ordner lassen sich höchstens {{limit}} Ebenen tief verschachteln.",
+        "notFound": "Dieser Ordner existiert nicht mehr. Laden Sie die Seite neu.",
+        "cycle": "Ein Ordner kann nicht in sich selbst oder einen seiner Unterordner verschoben werden.",
+        "limitReached": "Diese Galerie hat die Höchstzahl von {{limit}} Ordnern erreicht.",
+        "requestLimitReached": "Diese Galerie hat die Höchstzahl von {{limit}} offenen Ordneranfragen erreicht. Bitten Sie eine Administratorin oder einen Administrator, zuerst einige zu genehmigen oder abzulehnen.",
+        "requestNotFound": "Über diese Ordneranfrage wurde bereits entschieden, oder sie existiert nicht mehr."
+      }
     },
     "folderRequests": {
       "title_one": "{{count}} Ordneranfrage",

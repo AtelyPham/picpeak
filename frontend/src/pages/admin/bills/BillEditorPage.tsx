@@ -34,6 +34,7 @@ import { userManagementService } from '../../../services/userManagement.service'
 import { settingsService } from '../../../services/settings.service';
 import { useAdminAuth } from '../../../contexts/AdminAuthContext';
 import { toast } from 'react-toastify';
+import { todayIsoDate } from '../../../utils/localDate';
 
 function toMinor(amount: number) {
   return Math.round((Number(amount) || 0) * 100);
@@ -80,7 +81,7 @@ export const BillForm = forwardRef<BillFormHandle, BillFormProps>(({ invoiceId, 
   const [customerIsPassive, setCustomerIsPassive] = useState(false);
   // Customer search + inline-create state moved into <CustomerPicker> (C.5).
   const [currency, setCurrency] = useState('CHF');
-  const [issueDate, setIssueDate] = useState(new Date().toISOString().slice(0, 10));
+  const [issueDate, setIssueDate] = useState(todayIsoDate());
   const [dueDate, setDueDate] = useState('');
   // Due date is normally view-only: it auto-tracks (send date else issue
   // date) + the selected Net-days template, so the payment clock starts

@@ -7,7 +7,7 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff, Lock, RefreshCw } from 'lucide-react';
 import type { Event } from '../../../../types';
-import { Button, Input, LocalizedDateInput, PasswordGenerator, Notice } from '../../../../components/common';
+import { Button, Input, LocalizedDateInput, PasswordGenerator, Notice, TimeField } from '../../../../components/common';
 import { FeedbackSettings } from '../../../../components/admin';
 import { CustomerAccountPicker } from '../../../../components/admin/CustomerAccountPicker';
 import { TeamMemberPicker } from '../../../../components/admin/TeamMemberPicker';
@@ -18,6 +18,7 @@ import type { FeedbackSettings as FeedbackSettingsType } from '../../../../servi
 import { ExternalFolderPicker } from '../ExternalFolderPicker';
 import { useExternalImport } from '../useExternalImport';
 import { emailNeedsPassword, type EventFields } from './draft';
+import { radioGroupKeyDown } from '../../../../utils/ariaKeyboard';
 
 export interface FieldsProps {
   f: EventFields;
@@ -356,12 +357,25 @@ export const GuestsSection: React.FC<FieldsProps & {
           {f.reveal_mode && (
             <div className="mt-2 ml-6">
               <label className={labelClass}>{t('events.revealAt', 'Scheduled reveal (optional)')}</label>
-              <input
-                type="datetime-local"
-                value={f.reveal_at}
-                onChange={(e) => set({ reveal_at: e.target.value })}
-                className="px-3 py-2 border border-line-strong bg-panel text-heading rounded-lg focus:ring-2 focus:ring-accent"
-              />
+              {/* Date and time fields instead of a native datetime-local:
+                  those follow the general date and time formats. reveal_at
+                  stays the local "yyyy-MM-ddTHH:mm" string. */}
+              <div className="flex flex-wrap gap-2">
+                <div className="w-44">
+                  <LocalizedDateInput
+                    ariaLabel={t('events.revealAt', 'Scheduled reveal (optional)')}
+                    value={f.reveal_at.slice(0, 10)}
+                    onChange={(date) => set({ reveal_at: date ? `${date}T${f.reveal_at.slice(11, 16) || '00:00'}` : '' })}
+                  />
+                </div>
+                <TimeField
+                  className="w-28"
+                  ariaLabel={t('events.revealAtTime', 'Reveal time')}
+                  value={f.reveal_at.slice(11, 16)}
+                  disabled={!f.reveal_at}
+                  onChange={(time) => f.reveal_at && set({ reveal_at: `${f.reveal_at.slice(0, 10)}T${time}` })}
+                />
+              </div>
               <p className="text-xs text-muted mt-1">
                 {t('events.revealAtHelp', 'Leave empty to reveal manually with the "Reveal now" button.')}
               </p>
@@ -444,11 +458,12 @@ export const SourceSection: React.FC<FieldsProps & { event: Event; canEdit?: boo
     <SectionCard
       description={t('events.sourceModeHelp', 'Use managed mode for direct uploads or point to a mounted /external-media folder when using local storage.')}
     >
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3" role="radiogroup" aria-label={t('events.sourceMode', 'Source Mode')}>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3" role="radiogroup" aria-label={t('events.sourceMode', 'Source Mode')} onKeyDown={radioGroupKeyDown}>
         <button
           type="button"
           role="radio"
           aria-checked={f.source_mode === 'managed'}
+          tabIndex={f.source_mode === 'managed' ? 0 : -1}
           className={option(f.source_mode === 'managed')}
           onClick={() => set({ source_mode: 'managed', external_path: '' })}
         >
@@ -459,6 +474,7 @@ export const SourceSection: React.FC<FieldsProps & { event: Event; canEdit?: boo
           type="button"
           role="radio"
           aria-checked={f.source_mode === 'reference'}
+          tabIndex={f.source_mode === 'reference' ? 0 : -1}
           className={option(f.source_mode === 'reference')}
           onClick={() => set({ source_mode: 'reference', external_path: f.external_path || event.external_path || '' })}
         >

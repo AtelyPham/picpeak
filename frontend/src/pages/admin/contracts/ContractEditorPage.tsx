@@ -32,6 +32,7 @@ import { describeSaveError, newIdempotencyKey, type SaveErrorView } from './cont
 import { contractTemplatesService } from '../../../services/contractTemplates.service';
 import { AttachmentListEditor, type AttachmentRow } from '../../../components/admin/AttachmentListEditor';
 import { SignersEditorCard } from './SignersEditorCard';
+import { todayIsoDate } from '../../../utils/localDate';
 
 const CRM_DISCLAIMER_URL = 'https://docs.picpeak.app/features/crm/disclaimers';
 
@@ -94,7 +95,7 @@ export const ContractForm = forwardRef<ContractFormHandle, ContractFormProps>(({
   const [introText, setIntroText] = useState('');
   const [outroText, setOutroText] = useState('');
   const [language, setLanguage] = useState('de');
-  const [issueDate, setIssueDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [issueDate, setIssueDate] = useState(todayIsoDate);
   const [validUntil, setValidUntil] = useState('');
   const [projectId, setProjectId] = useState<number | null>(null);
   const [blocks, setBlocks] = useState<BlockRow[]>([]);

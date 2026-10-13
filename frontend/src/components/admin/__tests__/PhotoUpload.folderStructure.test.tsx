@@ -80,7 +80,7 @@ const resolveAnswer = (canManage: boolean, dryRun: boolean): ResolveResponse => 
   },
 });
 
-const setup = (canManage: boolean) => {
+const setup = (canManage: boolean, limit: ResolveResponse['limit'] = null) => {
   getMock.mockImplementation((url: string) =>
     Promise.resolve({
       data: url.endsWith('/folders')
@@ -89,7 +89,10 @@ const setup = (canManage: boolean) => {
     })
   );
   postMock.mockImplementation((url: string, body: { dry_run?: boolean }) => {
-    if (url.endsWith('/folders/resolve')) return Promise.resolve({ data: resolveAnswer(canManage, body.dry_run === true) });
+    if (url.endsWith('/folders/resolve')) {
+      const dryRun = body.dry_run === true;
+      return Promise.resolve({ data: { ...resolveAnswer(canManage, dryRun), limit: dryRun ? limit : undefined } });
+    }
     return Promise.resolve({ data: { count: 1, upload_id: `u${postMock.mock.calls.length}`, errors: [] } });
   });
 };
@@ -116,6 +119,19 @@ describe('PhotoUpload folder structure', () => {
   beforeEach(() => {
     postMock.mockReset();
     getMock.mockReset();
+  });
+
+  it('says before the upload when it would go past the folder limit, and holds the button', async () => {
+    setup(true, { code: 'FOLDER_LIMIT_REACHED', limit: 1000, current: 1000, adding: 1 });
+    const { container } = renderWithUploadSession(<PhotoUpload eventId={7} folderStructureDefault />);
+    const user = await pickFolder(container);
+    await waitFor(() => expect(screen.getByText('upload.structure.overFolderLimit')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'upload.structure.uploadIntoFolders' })).toBeDisabled();
+
+    // Without the structure everything lands in one place: no new folders, no hold.
+    await user.click(screen.getByRole('switch'));
+    await waitFor(() => expect(screen.queryByText('upload.structure.overFolderLimit')).not.toBeInTheDocument());
+    expect(uploads()).toHaveLength(0);
   });
 
   it('previews the structure, then uploads one batch per placement', async () => {

@@ -168,7 +168,9 @@ export type EventSortBy =
   | 'expires_at'
   | 'slug'
   | 'photo_count'
-  | 'status';
+  | 'status'
+  // Two-stage delivery (issue 1562): the dashboard's awaiting-delivery card.
+  | 'delivery_due_at';
 
 interface EventsListResponse {
   events: Event[];

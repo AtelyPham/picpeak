@@ -47,6 +47,7 @@ import { settingsService } from '../../../services/settings.service';
 import { useAdminAuth } from '../../../contexts/AdminAuthContext';
 import { toast } from 'react-toastify';
 import { quoteErrorText } from '../../../utils/quoteErrors';
+import { todayIsoDate } from '../../../utils/localDate';
 
 interface FormState {
   customerAccountId: number | null;
@@ -97,7 +98,7 @@ const empty: FormState = {
   customerIsPassive: false,
   language: 'de',
   currency: 'CHF',
-  issueDate: new Date().toISOString().slice(0, 10),
+  issueDate: todayIsoDate(),
   validUntil: '',
   eventName: '',
   eventDate: '',

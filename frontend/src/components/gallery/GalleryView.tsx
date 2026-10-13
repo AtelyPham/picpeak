@@ -77,6 +77,7 @@ import { feedbackService, type ColorLabel } from '../../services/feedback.servic
 import { useWatermarkSettings } from '../../hooks/useWatermarkSettings';
 import { useGalleryCustomCss } from '../../hooks/useGalleryCustomCss';
 import { usePublicSettings } from '../../hooks/usePublicSettings';
+import { useLocalizedDate } from '../../hooks/useLocalizedDate';
 import type { Photo } from '../../types';
 import { GALLERY_THEME_PRESETS } from '../../types/theme.types';
 import { useQueryClient } from '@tanstack/react-query';
@@ -139,6 +140,7 @@ const parseDefaultPhotoSort = (defaultSort?: string): { sortBy: 'date' | 'name' 
 
 export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresPassword = true }) => {
   const { t } = useTranslation();
+  const { formatDateTime } = useLocalizedDate();
   const { logout, isClient, viaCustomer } = useGalleryAuth();
   const { setTheme, theme } = useTheme();
   const queryClient = useQueryClient();
@@ -812,6 +814,9 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
     // allow_ratings as it was, and the chips hide with feedbackEnabled.
     minRating: feedbackSettings?.feedback_enabled && feedbackSettings?.allow_ratings ? minRating : null,
   });
+  // `scopedPhotos` is the same scope with every search and filter off: tells
+  // "nothing matches" from "nothing here yet" when the grid comes out empty.
+  const emptyIsFiltered = filteredPhotos.length === 0 && scopedPhotos.length > 0;
   const creditsVisible = data?.event?.credits_visible === true;
 
   // Resolve a `?photo=` against the photos this viewer has loaded (issue
@@ -1292,7 +1297,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
           {data.reveal_at && (
             <p className="text-sm text-muted-theme mb-6">
               {t('gallery.revealScheduledFor', 'Reveal scheduled for {{date}}', {
-                date: new Date(data.reveal_at).toLocaleString(),
+                date: formatDateTime(data.reveal_at),
               })}
             </p>
           )}
@@ -1520,6 +1525,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
           // component for the full-bleed layouts, so a folder-only root must
           // silence the empty message without unmounting the shell (#1160).
           suppressEmptyState={rootIsFoldersOnly}
+          emptyIsFiltered={emptyIsFiltered}
           // Event-wide, so a layout's own Download All neither skips foldered
           // photos nor truncates at the 500-id cap (#1160).
           eventPhotoCount={data?.photos?.length || 0}
@@ -1997,6 +2003,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
             openPhotoId={linkedPhotoId}
             onLightboxPhotoChange={handleLightboxPhotoChange}
             suppressEmptyState={rootIsFoldersOnly}
+            emptyIsFiltered={emptyIsFiltered}
             slug={slug}
             people={peopleEnabled ? people : undefined}
             onSelectPerson={togglePerson} 

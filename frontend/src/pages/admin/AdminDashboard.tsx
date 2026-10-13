@@ -134,13 +134,15 @@ export const AdminDashboard: React.FC = () => {
   // Two-stage delivery (issue 1562): galleries whose first look is out and
   // whose full delivery is still owed, soonest promise first. The card only
   // renders when there are any.
+  // The server orders by due date (no date last) before LIMIT, so these five
+  // are the soonest of all of them, not of whichever 20 came back first.
   const { data: awaitingData } = useQuery({
     queryKey: ['admin-events-summary', 'awaiting_delivery'],
-    queryFn: () => eventsService.getEvents({ limit: 20, status: 'awaiting_delivery' }),
+    queryFn: () => eventsService.getEvents({
+      limit: 5, status: 'awaiting_delivery', sortBy: 'delivery_due_at', sortOrder: 'asc',
+    }),
   });
-  const awaitingEvents = [...(awaitingData?.events || [])]
-    .sort((a, b) => (Date.parse(a.delivery_due_at || '') || Infinity) - (Date.parse(b.delivery_due_at || '') || Infinity))
-    .slice(0, 5);
+  const awaitingEvents = awaitingData?.events ?? [];
 
   // Keep the "expiring soon" card honest when a row crosses its expiry while
   // the dashboard sits open (#909 review). Filtering client-side desynced the
@@ -424,7 +426,7 @@ export const AdminDashboard: React.FC = () => {
                   );
                 })}
               </div>
-              {(awaitingData?.events?.length || 0) > 5 && (
+              {(awaitingData?.pagination?.total ?? awaitingEvents.length) > awaitingEvents.length && (
                 <button
                   onClick={() => navigate('/admin/events?filter=awaiting_delivery')}
                   className="w-full mt-4 text-sm text-accent hover:opacity-80 font-medium"

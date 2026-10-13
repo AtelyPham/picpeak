@@ -843,7 +843,11 @@
     "hidePassword": "Hide password",
     "showPassword": "Show password",
     "loadFailed": "Could not load this",
-    "moreActions": "More actions"
+    "moreActions": "More actions",
+    "previousMonth": "Previous month",
+    "nextMonth": "Next month",
+    "today": "Today",
+    "chooseDate": "Choose date"
   },
   "upload": {
     "capacity": {
@@ -973,7 +977,11 @@
       "firstLookCallout_other": "First-look folder found: \"{{name}}\". Its {{count}} photos are badged \"First look\", and this gallery switches to two-stage delivery: guests see that more photos are on their way until you mark the full gallery as ready.",
       "firstLookSettings": "Due date and badge: this gallery’s Settings → Folders & delivery. Keywords: Settings → Events.",
       "nothingToUpload": "None of the selected files can be uploaded: they are all in hidden or skipped folders.",
-      "keptForNext": "Files added while the folders were prepared are still selected: {{count}}."
+      "keptForNext": "Files added while the folders were prepared are still selected: {{count}}.",
+      "overFolderLimit_one": "This upload would add {{adding}} folder, but the gallery already has {{current}} of at most {{limit}}. Turn off “Keep folder structure” or remove folders first.",
+      "overFolderLimit_other": "This upload would add {{adding}} folders, but the gallery already has {{current}} of at most {{limit}}. Turn off “Keep folder structure” or remove folders first.",
+      "overRequestLimit_one": "This upload would open {{adding}} folder request, but the gallery already has {{current}} of at most {{limit}} open. Ask an administrator to approve or reject some first, or turn off “Keep folder structure”.",
+      "overRequestLimit_other": "This upload would open {{adding}} folder requests, but the gallery already has {{current}} of at most {{limit}} open. Ask an administrator to approve or reject some first, or turn off “Keep folder structure”."
     },
     "largeFileReplaceSkipped": "Replace-by-name is not supported for files above the batch size; upload it without replace.",
     "removeFile": "Remove {{name}}"
@@ -1355,6 +1363,8 @@
     "favorites": "Favorites",
     "needHelp": "Need help? Contact us at",
     "noPhotosFound": "No photos found",
+    "noPhotosMatch": "No photos match your search or filters.",
+    "noPhotosYet": "There are no photos here yet.",
     "failedToLoad": "Failed to load photos",
     "tryAgain": "Try Again",
     "passwordChangeRequired": "Change your password in the admin area before previewing this gallery.",
@@ -1622,6 +1632,7 @@
     "revealMode": "Reveal mode (hide gallery until reveal)",
     "revealModeHelp": "Guests can upload but see no photos until you reveal the gallery — manually or at the scheduled time. Slideshow and client access keep working.",
     "revealAt": "Scheduled reveal (optional)",
+    "revealAtTime": "Reveal time",
     "revealAtHelp": "Leave empty to reveal manually with the \"Reveal now\" button.",
     "revealModeStatus": "Reveal mode",
     "revealed": "Revealed",
@@ -2127,7 +2138,8 @@
       "structureApplied_one": "{{count}} photo moved into folders",
       "structureApplied_other": "{{count}} photos moved into folders",
       "structureNothing": "Every photo from a subfolder is in a folder already",
-      "structureFailed": "The folder structure could not be applied"
+      "structureFailed": "The folder structure could not be applied",
+      "structureLimited": "The gallery reached its folder limit: some photos went into the closest existing folder."
     },
     "header": {
       "moreActions": "More actions"
@@ -6672,7 +6684,17 @@
       "moveToFolderTitle_other": "Move {{count}} photos to a folder",
       "photosMoved_one": "{{count}} photo moved to {{folder}}",
       "photosMoved_other": "{{count}} photos moved to {{folder}}",
-      "moveFailed": "The photos could not be moved"
+      "moveFailed": "The photos could not be moved",
+      "errors": {
+        "exists": "A folder with this name already exists here.",
+        "deleteNameClash": "The subfolder \"{{name}}\" cannot move up: a folder with this name already exists there. Rename or move it first.",
+        "tooDeep": "Folders can be nested at most {{limit}} levels deep.",
+        "notFound": "This folder no longer exists. Reload the page.",
+        "cycle": "A folder cannot be moved into itself or one of its subfolders.",
+        "limitReached": "This gallery has reached its limit of {{limit}} folders.",
+        "requestLimitReached": "This gallery has reached its limit of {{limit}} open folder requests. Ask an administrator to approve or reject some first.",
+        "requestNotFound": "This folder request was already decided or no longer exists."
+      }
     },
     "folderRequests": {
       "title_one": "{{count}} folder request",

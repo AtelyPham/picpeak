@@ -14,6 +14,7 @@ import { collectDroppedEntries, pickedFromInput, type PickedFile } from '../../u
 import { buildUploadPreview, groupFilesByPlacement, hasDirectories, uniqueDirectories } from '../../utils/uploadStructure';
 import { childFolders, folderPathLabel } from '../../utils/folderTree';
 import { UploadStructurePreview } from './UploadStructurePreview';
+import { folderErrorMessage } from './folders/folderQueries';
 
 interface PhotoUploadProps {
   eventId: number;
@@ -340,6 +341,12 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({
     staleTime: 10_000,
   });
   const resolved = withFolders ? previewQuery.data : undefined;
+  // The upload would go past the folder or request limit: the real resolve
+  // would create what fits and then refuse, so say it now and hold the button.
+  const overLimit = keepStructure ? resolved?.limit ?? null : null;
+  // While a new preview loads the previous answer is still shown; it may be
+  // for another selection or toggle, so the button waits for the new one.
+  const limitUnknown = withFolders && keepStructure && previewQuery.isPlaceholderData;
   const preview = useMemo(
     () => (resolved ? buildUploadPreview(selectedFiles, resolved, { skipOuter, keepStructure }) : null),
     [resolved, selectedFiles, skipOuter, keepStructure]
@@ -412,8 +419,7 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({
           looseFolderId,
         }).groups;
       } catch (error: unknown) {
-        const e = error as { response?: { data?: { error?: string } } };
-        toast.error(e.response?.data?.error || t('upload.structure.resolveFailed', 'The folders for this upload could not be prepared. Nothing was uploaded.'));
+        toast.error(folderErrorMessage(error, t) || t('upload.structure.resolveFailed', 'The folders for this upload could not be prepared. Nothing was uploaded.'));
         return;
       } finally {
         setResolving(false);
@@ -623,6 +629,13 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({
           looseTargetLabel={looseTargetLabel}
         />
       )}
+      {withFolders && overLimit && !limitUnknown && (
+        <Notice tone="warning">
+          {overLimit.code === 'FOLDER_REQUEST_LIMIT_REACHED'
+            ? t('upload.structure.overRequestLimit', 'This upload would open {{adding}} folder requests, but the gallery already has {{current}} of at most {{limit}} open. Ask an administrator to approve or reject some first, or turn off “Keep folder structure”.', { count: overLimit.adding, adding: overLimit.adding, current: overLimit.current, limit: overLimit.limit })
+            : t('upload.structure.overFolderLimit', 'This upload would add {{adding}} folders, but the gallery already has {{current}} of at most {{limit}}. Turn off “Keep folder structure” or remove folders first.', { count: overLimit.adding, adding: overLimit.adding, current: overLimit.current, limit: overLimit.limit })}
+        </Notice>
+      )}
 
       {/* Selected Files */}
       {selectedFiles.length > 0 && (
@@ -668,7 +681,7 @@ export const PhotoUpload: React.FC<PhotoUploadProps> = ({
         <Button
           variant="primary"
           onClick={handleUpload}
-          disabled={selectedFiles.length === 0 || isUploading || pendingWalks > 0 || resolving}
+          disabled={selectedFiles.length === 0 || isUploading || pendingWalks > 0 || resolving || !!overLimit || limitUnknown}
           isLoading={pendingWalks > 0 || resolving}
           leftIcon={<Upload className="w-4 h-4" />}
         >
