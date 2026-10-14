@@ -1,9 +1,10 @@
 /**
- * A camera RAW in an external folder can be the event's cover image.
+ * A camera RAW in an external folder gets its cover image and lightbox
+ * previews, like the same photo uploaded through the admin.
  *
- * The external branch of the hero generator handed the RAW straight to sharp,
- * which cannot decode it, so the cover came back null while the same photo
- * uploaded through the admin got one from its embedded preview.
+ * The external branches of the hero and preview generators handed the RAW
+ * straight to sharp, which cannot decode it, so each came back null: no
+ * cover, no lightbox preview, and no face scan, which reads the preview.
  *
  * exiftool is not a dev dependency and there is no RAW fixture in the repo,
  * so exiftool is stood in for at the subprocess, as in
@@ -33,16 +34,16 @@ const EXTERNAL_ROOT = path.join(os.tmpdir(), `picpeak-hero-extraw-${process.pid}
 process.env.EXTERNAL_MEDIA_ROOT = EXTERNAL_ROOT;
 
 jest.mock('../../src/database/db', () => {
-  const state = { event: null, updates: [] };
+  const state = { event: null, updates: [], rows: {} };
   const api = (table) => {
     if (table === 'events') return { where: () => ({ first: async () => state.event }) };
     if (table === 'photos') {
       // A RAW hero is a bounded derivative: it checks the row still holds the
       // same source before and after the work, then publishes through that
-      // same match.
+      // same match. A preview tier reads the row back before keeping its file.
       return {
         where: (criteria) => ({
-          first: async () => ({ id: criteria.id }),
+          first: async () => state.rows[criteria.id] || { id: criteria.id },
           update: async (values) => { state.updates.push({ criteria, values }); return 1; },
         }),
       };
@@ -60,7 +61,7 @@ const { db } = require('../../src/database/db');
 
 const EVENT = { id: 7, slug: 'nas-wedding', source_mode: 'reference', external_path: 'weddings/2026-08' };
 
-describe('ensureHeroImage, external camera RAW', () => {
+describe('derivatives of an external camera RAW', () => {
   let storage; let storageRoot; let imageProcessor;
 
   beforeAll(async () => {
@@ -89,20 +90,27 @@ describe('ensureHeroImage, external camera RAW', () => {
     await fs.rm(EXTERNAL_ROOT, { recursive: true, force: true }).catch(() => {});
   });
 
-  beforeEach(() => { db.__state.event = EVENT; db.__state.updates = []; });
+  beforeEach(() => { db.__state.event = EVENT; db.__state.updates = []; db.__state.rows = {}; });
 
-  it('cuts the cover from the embedded preview', async () => {
-    const name = 'DSC03991.ARW';
+  const externalRaw = async (id) => {
+    const name = `DSC0${id}.ARW`;
     // Not decodable by sharp, like a real ARW.
     await fs.writeFile(path.join(EXTERNAL_ROOT, EVENT.external_path, name), Buffer.from('II*\0not really a sony raw'));
-    const photo = {
-      id: 401,
+    const row = {
+      id,
       event_id: EVENT.id,
       source_origin: 'external',
       external_relpath: path.join(EVENT.external_path, name),
       filename: name,
       hero_path: null,
+      preview_path: null,
     };
+    db.__state.rows[id] = row;
+    return row;
+  };
+
+  it('cuts the cover from the embedded preview', async () => {
+    const photo = await externalRaw(401);
 
     const key = await imageProcessor.ensureHeroImage(photo);
 
@@ -114,5 +122,25 @@ describe('ensureHeroImage, external camera RAW', () => {
       criteria: expect.objectContaining({ id: photo.id }),
       values: { hero_path: key, hero_anchor: '50% 50%' },
     }]);
+  });
+
+  it('renders the lightbox preview from the embedded preview', async () => {
+    const photo = await externalRaw(402);
+
+    const key = await imageProcessor.ensurePreviewImage(photo);
+
+    expect(key).toBeTruthy();
+    const preview = await sharp(path.join(storageRoot, key)).metadata();
+    expect(Math.max(preview.width, preview.height)).toBe(1920);
+  });
+
+  it('renders a narrower preview tier from the embedded preview', async () => {
+    const photo = await externalRaw(403);
+
+    const key = await imageProcessor.ensurePreviewImageAtWidth(photo, 640);
+
+    expect(key).toBeTruthy();
+    const preview = await sharp(path.join(storageRoot, key)).metadata();
+    expect(Math.max(preview.width, preview.height)).toBe(640);
   });
 });
