@@ -1747,9 +1747,14 @@ async function ensurePreviewImageAtWidthUnguarded(photo, width) {
   try {
     if (isExternal) {
       const localPath = resolvePhotoFilePath(event, photo);
-      return await generatePreviewImage(localPath, {
-        regenerate: true, outputBasename, longEdge: width, interactive: true,
-      });
+      const proc = await withProcessableImage(localPath, photo.external_relpath || photo.filename);
+      try {
+        return await generatePreviewImage(proc.path, {
+          regenerate: true, outputBasename, longEdge: width, interactive: true,
+        });
+      } finally {
+        await proc.cleanup();
+      }
     }
     const sourceKey = resolvePhotoStorageKey(event, photo);
     if (!sourceKey) return null;
@@ -1822,7 +1827,13 @@ async function regeneratePreviewImage(photo) {
     const sourceBasename = path.basename(photo.external_relpath || photo.filename || `photo-${photo.id}`);
     const outputBasename = derivativeBasename(`ext${photo.id}_${sourceBasename}`);
     logger.info(`Ensuring preview for external photo ${photo.id} from ${localPath}`);
-    newPreviewPath = await generatePreviewImage(localPath, { regenerate: true, outputBasename });
+    // A camera RAW is rendered from its embedded preview; sharp cannot decode it.
+    const proc = await withProcessableImage(localPath, sourceBasename);
+    try {
+      newPreviewPath = await generatePreviewImage(proc.path, { regenerate: true, outputBasename });
+    } finally {
+      await proc.cleanup();
+    }
   } else {
     let sourceKey;
     try {
