@@ -27,11 +27,14 @@ const { assertRealpathUnder } = require('../utils/fileSecurityUtils');
 const {
   IMAGE_EXTENSIONS,
   VIDEO_EXTENSIONS,
+  CAMERA_RAW_EXTENSIONS,
   isVideoFile,
   videoMimeType,
+  rawMimeType,
   importableExtensions,
 } = require('./externalMediaTypes');
-const { generateThumbnail, extractCaptureDate, orientedDimensions } = require('./imageProcessor');
+const { generateThumbnail, extractCaptureDate, orientedDimensions, withProcessableImage } = require('./imageProcessor');
+const { isRawFilename } = require('../utils/rawFormats');
 const { exifColumn } = require('./photoExif');
 const { processUploadedVideo, posterFrameError, extractVideoMetadata } = require('./videoProcessor');
 const { isInterruption: isResourceError } = require('./mediaProcessPolicy');
@@ -715,13 +718,13 @@ async function importExternalFolder({
     const basePrefix = String(external_path).replace(/^\/+|\/+$/g, '');
     const toRootRelative = (rel) => (basePrefix ? path.join(basePrefix, rel) : rel);
 
-    // Collect files. Images always; videos only for the types this install
-    // accepts as uploads (see importableExtensions). The walk lists every
-    // media type: a file of a type that is no longer allowed is still
-    // visited when the gallery already has a row for it, so an edit to it is
-    // picked up (issue 2120). It is never imported new.
+    // Collect files. Images always; videos and camera RAW only for the types
+    // this install accepts as uploads (see importableExtensions). The walk
+    // lists every media type: a file of a type that is no longer allowed is
+    // still visited when the gallery already has a row for it, so an edit to
+    // it is picked up (issue 2120). It is never imported new.
     const extensions = await importableExtensions();
-    const mediaExtensions = [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS];
+    const mediaExtensions = [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...CAMERA_RAW_EXTENSIONS];
     const walkBudget = { entries: MAX_WALK_ENTRIES, truncated: false };
     const walked = recursive ? await walkDir(baseAbs, baseAbs, mediaExtensions, walkBudget, 0, access) : (await fs.readdir(baseAbs, { withFileTypes: true }))
       .filter(e => e.isFile())
@@ -978,6 +981,10 @@ async function importExternalFolder({
 
       const relFromRoot = toRootRelative(f.rel);
 
+      // What sharp reads for this file: the file itself, or for a camera RAW
+      // its embedded preview, extracted once for the dimensions and the
+      // thumbnail and removed when the file is done.
+      let proc = null;
       try {
         // Fast path only. This SELECT settles the common case — a re-import of
         // a folder already in the event — without paying for a stat and a
@@ -1025,16 +1032,28 @@ async function importExternalFolder({
         }
         const stats = await fs.stat(f.full);
         const isVideo = isVideoFile(f.name);
+        const isRaw = !isVideo && isRawFilename(f.name);
+
+        // sharp cannot decode a RAW. Without its preview the row would have
+        // no dimensions and no thumbnail, and the file still goes in: the
+        // thumbnail is retried on first view.
+        if (!isVideo) {
+          try {
+            proc = await withProcessableImage(f.full, f.name);
+          } catch (previewErr) {
+            logger.warn(`Could not extract the embedded preview of ${f.rel}: ${previewErr.message}`);
+          }
+        }
 
         // Extract dimensions via Sharp. A video gets them from ffprobe after
         // the insert, together with its poster frame and runtime.
         let width = null;
         let height = null;
-        if (!isVideo) {
+        if (proc) {
           try {
             // A busy image worker is asked again before the file goes in
             // without dimensions; it is never left out of the import for that.
-            const metadata = await retryTransient(() => sharp(f.full).metadata());
+            const metadata = await retryTransient(() => sharp(proc.path).metadata());
             // Oriented, not raw: a portrait shot from a body that tags rather
             // than rotates reports landscape dimensions, and the grid would size
             // its tile from those (#1185).
@@ -1122,6 +1141,7 @@ async function importExternalFolder({
             // serving route and every image-only job tells a video from a
             // photo by these two.
             ...(isVideo ? { media_type: 'video', mime_type: videoMimeType(f.name) } : {}),
+            ...(isRaw ? { mime_type: rawMimeType(f.name) } : {}),
             ...credit
           }, photoCap);
         } catch (insertErr) {
@@ -1159,11 +1179,15 @@ async function importExternalFolder({
         // doing this synchronously is ~100-300ms per image; for the
         // worst-case 1000-photo import that's still under the 5-minute
         // request timeout typical of the import flow.
-        if (photoId != null && !isVideo) {
+        if (photoId != null && !isVideo && !proc) {
+          // No preview to cut it from; the warning is above.
+          thumbnailsFailed++;
+        }
+        if (photoId != null && proc) {
           try {
             const outputBasename = `ext${photoId}_${path.basename(f.rel)}`;
             const meta = {};
-            const thumbnailPath = await generateThumbnail(f.full, { outputBasename, meta });
+            const thumbnailPath = await generateThumbnail(proc.path, { outputBasename, meta });
             if (thumbnailPath) {
               await db('photos').where({ id: photoId }).update({ thumbnail_path: thumbnailPath, thumb_hash: meta.thumbHash || null });
               thumbnailsGenerated++;
@@ -1230,6 +1254,8 @@ async function importExternalFolder({
       } catch (e) {
         if (e instanceof externalAccess.ExternalMediaAccessError || e.code === 'PATH_OUTSIDE_BASE') throw e;
         skipped++;
+      } finally {
+        if (proc) await proc.cleanup();
       }
     }
 

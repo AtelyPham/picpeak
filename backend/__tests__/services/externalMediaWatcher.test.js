@@ -89,6 +89,7 @@ describe('externalMediaWatcher (issue 1187)', () => {
       generateThumbnail: jest.fn(async () => 'thumbnails/mock.jpg'),
       extractCaptureDate: jest.fn(async () => null),
       orientedDimensions: (m) => ({ width: m.width, height: m.height }),
+      withProcessableImage: async (localPath) => ({ path: localPath, cleanup: () => {} }),
       ensureThumbnail: jest.fn(),
     }));
     jest.doMock('../../src/utils/logger', () => ({
@@ -230,6 +231,32 @@ describe('externalMediaWatcher (issue 1187)', () => {
     expect(arrived).toBe(true);
 
     await fs.promises.unlink(path.join(mediaRoot, 'nas', 'individual', 'c.jpg'));
+  }, 20000);
+
+  it('a camera RAW appearing in the folder triggers an import too', async () => {
+    const { clearAllowedTypesCache } = require('../../src/services/uploadSettings');
+    await db('app_settings').insert({
+      setting_key: 'general_allowed_file_types',
+      setting_value: JSON.stringify('jpg,jpeg,png,webp,arw'),
+      setting_type: 'general',
+    }).onConflict('setting_key').merge();
+    clearAllowedTypesCache();
+    const raw = path.join(mediaRoot, 'nas', 'individual', 'DSC03991.ARW');
+    try {
+      const eventId = await seedEvent();
+      await watcher.reconcile();
+      await watcher.sweep();
+      expect(await relpaths(eventId)).toEqual([path.join('nas', 'individual', 'a.jpg')]);
+
+      await fs.promises.writeFile(raw, 'II*\0not really a sony raw');
+
+      const arrived = await waitFor(async () => (await relpaths(eventId)).includes(path.join('nas', 'individual', 'DSC03991.ARW')));
+      expect(arrived).toBe(true);
+    } finally {
+      await fs.promises.unlink(raw).catch(() => {});
+      await db('app_settings').where({ setting_key: 'general_allowed_file_types' }).del();
+      clearAllowedTypesCache();
+    }
   }, 20000);
 
   it('stands down while another runner holds the claim for the event', async () => {
