@@ -65,6 +65,7 @@ const {
   IMAGE_EXTENSIONS,
   VIDEO_EXTENSIONS,
 } = require('./externalImportService');
+const { CAMERA_RAW_EXTENSIONS } = require('./externalMediaTypes');
 
 const envInt = (name, fallback) => {
   const parsed = Number.parseInt(process.env[name] || '', 10);
@@ -128,11 +129,11 @@ async function listWatchedEvents() {
     .select('id', 'slug', 'external_path');
 }
 
-// Which files are worth a pass. Every video extension counts here, allowed or
-// not: the pass itself reads the setting and takes only what it may
-// (importableExtensions), so a clip on an install without video costs one walk
-// that imports nothing.
-const MEDIA_EXTENSIONS = [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS];
+// Which files are worth a pass. Every video and camera RAW extension counts
+// here, allowed or not: the pass itself reads the setting and takes only what
+// it may (importableExtensions), so a clip on an install without video costs
+// one walk that imports nothing.
+const MEDIA_EXTENSIONS = [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...CAMERA_RAW_EXTENSIONS];
 const isMedia = (filePath) => MEDIA_EXTENSIONS.includes(path.extname(filePath).toLowerCase());
 
 /**
