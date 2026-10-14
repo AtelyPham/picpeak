@@ -1464,11 +1464,17 @@ async function regenerateHeroImage(photo, anchor) {
       return null;
     }
     const sourceBasename = path.basename(photo.external_relpath || photo.filename || `photo-${photo.id}`);
-    newHeroPath = await generateHeroImage(localPath, {
-      regenerate: true,
-      outputBasename: derivativeBasename(`ext${photo.id}_${versionTag(photo)}${sourceBasename}`),
-      anchor: heroAnchor,
-    });
+    // A camera RAW is cut from its embedded preview; sharp cannot decode it.
+    const proc = await withProcessableImage(localPath, sourceBasename);
+    try {
+      newHeroPath = await generateHeroImage(proc.path, {
+        regenerate: true,
+        outputBasename: derivativeBasename(`ext${photo.id}_${versionTag(photo)}${sourceBasename}`),
+        anchor: heroAnchor,
+      });
+    } finally {
+      await proc.cleanup();
+    }
     if (newHeroPath) {
       if (!await publishPhotoDerivative(photo, newHeroPath, { hero_path: newHeroPath, hero_anchor: heroAnchor })) return null;
       await dropSupersededHero(photo, newHeroPath);
