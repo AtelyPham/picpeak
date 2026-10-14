@@ -18,6 +18,14 @@ const {
   uniquifyZipNames,
 } = require('../utils/filenameSanitizer');
 
+// Written at the zip root by archiveEvent, next to the photos.
+const ARCHIVE_METADATA_FILES = [
+  'photos_manifest.json',
+  'feedback_data.json',
+  'feedback_data.csv',
+  'feedback_summary.json',
+];
+
 async function archiveEvent(event) {
   const storage = getStorage();
   const archiveName = `${event.slug}.zip`;
@@ -133,8 +141,16 @@ async function archiveEvent(event) {
     }
 
     // Stream every photo (and any other content under events/active/{slug}/) into
-    // the zip directly from the storage backend.
-    const photoEntries = await storage.list(eventPrefix);
+    // the zip directly from the storage backend. Two kinds of file under the
+    // prefix stay out of the zip but are still deleted with the originals:
+    // the "Download all" cache, a second copy of every photo, and the
+    // metadata files a restore wrote back, which are rebuilt fresh below and
+    // would otherwise go in twice under the same name.
+    const storedEntries = await storage.list(eventPrefix);
+    const leftOut = new Set(ARCHIVE_METADATA_FILES.map((name) => `${eventPrefix}/${name}`));
+    const photoEntries = storedEntries.filter((entry) => (
+      !leftOut.has(entry.key) && !entry.key.startsWith(`${eventPrefix}/.download-cache/`)
+    ));
 
     // #493: optionally rename zip entries to use original camera filenames.
     // Build a Map<storage_key, original_filename> from the photos table so we
@@ -281,7 +297,7 @@ async function archiveEvent(event) {
     } catch (e) { /* non-fatal */ }
 
     // Delete the originals from storage.
-    for (const entry of photoEntries) {
+    for (const entry of storedEntries) {
       await storage.delete(entry.key).catch((err) =>
         logger.warn(`Failed to delete archived original ${entry.key}: ${err.message}`)
       );
