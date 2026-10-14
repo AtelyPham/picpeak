@@ -20,7 +20,7 @@ const { db, logActivity } = require('../database/db');
 const logger = require('../utils/logger');
 const { isUniqueViolation } = require('../utils/dbErrors');
 const { toUtcIso } = require('../utils/queueTimestamps');
-const { applyPhotoVisibilityFilter } = require('../utils/photoVisibility');
+const { applyPhotoVisibilityFilter, joinLivePhotos } = require('../utils/photoVisibility');
 
 const KINDS = ['selection', 'approval'];
 const NOTE_MAX_LENGTH = 1000;
@@ -137,7 +137,7 @@ function visibleFeedback(eventId, viewer, executor) {
   return scopeToViewer(
     applyPhotoVisibilityFilter(
       executor('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         // Hidden rows are absent everywhere else, the cap included (#1150).
         .where({ 'photo_feedback.event_id': eventId, 'photo_feedback.is_hidden': false }),
       viewer.accessLevel,

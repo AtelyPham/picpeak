@@ -33,6 +33,8 @@ export interface GeneralSettings {
   /** Adaptive HLS streaming of videos (issue 1733). Off by default. */
   video_adaptive_streaming: boolean;
   max_files_per_upload: number;
+  /** Days a deleted photo stays in a gallery's trash (issue 1733); 0 deletes at once. */
+  photo_trash_retention_days: number;
   allowed_file_types: string;
   // #509 — re-added after the main-into-beta merge dropped it.
   max_upload_batch_size_mb: number;
@@ -186,6 +188,7 @@ export function useSettingsState() {
     video_web_rendition: false,
     video_adaptive_streaming: false,
     max_files_per_upload: 500,
+    photo_trash_retention_days: 30,
     allowed_file_types: 'jpg,jpeg,png,gif,webp',
     max_upload_batch_size_mb: 95,
     enable_analytics: true,
@@ -338,6 +341,7 @@ export function useSettingsState() {
           MAX_FILES_PER_UPLOAD_LIMIT,
           Math.max(1, toNumber(settings.general_max_files_per_upload, 500))
         ),
+        photo_trash_retention_days: Math.min(365, Math.max(0, toNumber(settings.general_photo_trash_retention_days, 30))),
         allowed_file_types: settings.general_allowed_file_types || 'jpg,jpeg,png,gif,webp',
         max_upload_batch_size_mb: toNumber(settings.general_max_upload_batch_size_mb, 95),
         enable_analytics: toBoolean(settings.general_enable_analytics, true),

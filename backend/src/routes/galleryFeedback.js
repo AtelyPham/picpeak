@@ -10,7 +10,7 @@ const feedbackModeration = require('../services/feedbackModeration');
 const selectionSubmissions = require('../services/selectionSubmissions');
 const { db, logActivity } = require('../database/db');
 const logger = require('../utils/logger');
-const { isPhotoHiddenFromViewer, applyPhotoVisibilityFilter } = require('../utils/photoVisibility');
+const { isPhotoHiddenFromViewer, applyPhotoVisibilityFilter, joinLivePhotos, livePhotos } = require('../utils/photoVisibility');
 const {
   validatePhotoId,
   validateFeedbackSubmission,
@@ -142,7 +142,7 @@ router.get('/:slug/photos/:photoId/feedback',
       }
       
       // Verify photo belongs to event
-      const photo = await db('photos')
+      const photo = await livePhotos(db)
         .where({ id: photoId, event_id: event.id })
         .first();
       
@@ -311,7 +311,7 @@ router.post('/:slug/photos/:photoId/feedback',
       }
 
       // Verify photo belongs to event
-      const photo = await db('photos')
+      const photo = await livePhotos(db)
         .where({ id: photoId, event_id: event.id })
         .first();
 
@@ -518,7 +518,7 @@ router.post('/:slug/feedback/bulk',
       const photoIds = [...new Set(req.body.photo_ids)];
       // Same two conditions as the single route: the photo is this event's,
       // and it is not hidden from this viewer.
-      const rows = await db('photos').whereIn('id', photoIds).where({ event_id: event.id });
+      const rows = await livePhotos(db).whereIn('id', photoIds).where({ event_id: event.id });
       const rateable = new Set(rows
         .filter(photo => !isPhotoHiddenFromViewer(photo, req.accessLevel))
         .map(photo => Number(photo.id)));
@@ -568,7 +568,7 @@ router.post('/:slug/feedback/bulk',
         // feedback is shared, the PIN client always. The frontend writes
         // this answer into that list without refetching it.
         if (settings.show_feedback_to_guests || req.accessLevel === 'client') {
-          const averages = await db('photos').whereIn('id', ratedIds).select('id', 'average_rating');
+          const averages = await livePhotos(db).whereIn('id', ratedIds).select('id', 'average_rating');
           const totals = await db('photo_feedback')
             .whereIn('photo_id', ratedIds)
             .where({ feedback_type: 'rating', is_hidden: false })
@@ -684,7 +684,7 @@ router.get('/:slug/my-feedback',
 
       const query = applyPhotoVisibilityFilter(
         db('photo_feedback')
-          .join('photos', 'photo_feedback.photo_id', 'photos.id')
+          .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
           .where('photo_feedback.event_id', event.id)
           // Hidden rows are absent for the guest who left them too (#1150). In
           // guest identity mode GalleryView builds its Liked/Favorited/Rated

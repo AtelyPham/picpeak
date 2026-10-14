@@ -7,6 +7,7 @@ const feedbackService = require('../services/feedbackService');
 const feedbackModeration = require('../services/feedbackModeration');
 const selectionSubmissions = require('../services/selectionSubmissions');
 const { db, logActivity } = require('../database/db');
+const { joinLivePhotos, livePhotos, wherePhotoLive } = require('../utils/photoVisibility');
 const logger = require('../utils/logger');
 const {
   validateEventId,
@@ -95,7 +96,7 @@ router.get('/events/:eventId/feedback',
       
       // Build query
       let query = db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         .where('photo_feedback.event_id', eventId)
         .select(
           'photo_feedback.*',
@@ -125,6 +126,7 @@ router.get('/events/:eventId/feedback',
       
       // Create a separate count query
       let countQuery = db('photo_feedback')
+        .modify(wherePhotoLive, 'photo_feedback.photo_id')
         .where('photo_feedback.event_id', eventId);
       
       if (type) {
@@ -292,12 +294,14 @@ router.get('/events/:eventId/feedback-analytics',
       
       // Calculate average rating and other summary stats
       const avgRatingResult = await db('photo_feedback')
+        .modify(wherePhotoLive, 'photo_feedback.photo_id')
         .where('event_id', eventId)
         .where('feedback_type', 'rating')
         .avg('rating as average_rating')
         .first();
       
       const pendingModeration = await db('photo_feedback')
+        .modify(wherePhotoLive, 'photo_feedback.photo_id')
         .where('event_id', eventId)
         .where('feedback_type', 'comment')
         .where('is_approved', false)
@@ -328,7 +332,7 @@ router.get('/events/:eventId/feedback-analytics',
       };
       
       // Get top-rated photos
-      const topRated = await db('photos')
+      const topRated = await livePhotos(db)
         .where('event_id', eventId)
         .where('average_rating', '>', 0)
         .orderBy('average_rating', 'desc')
@@ -337,7 +341,7 @@ router.get('/events/:eventId/feedback-analytics',
         .select('id', 'filename', 'average_rating', 'feedback_count', 'like_count');
       
       // Get most liked photos
-      const mostLiked = await db('photos')
+      const mostLiked = await livePhotos(db)
         .where('event_id', eventId)
         .where('like_count', '>', 0)
         .orderBy('like_count', 'desc')
@@ -346,7 +350,7 @@ router.get('/events/:eventId/feedback-analytics',
       
       // Get recent comments
       const recentComments = await db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         .where('photo_feedback.event_id', eventId)
         .where('photo_feedback.feedback_type', 'comment')
         .where('photo_feedback.is_approved', true)
@@ -362,6 +366,7 @@ router.get('/events/:eventId/feedback-analytics',
       
       // Get feedback timeline (last 7 days)
       const timeline = await db('photo_feedback')
+        .modify(wherePhotoLive, 'photo_feedback.photo_id')
         .where('event_id', eventId)
         .where('created_at', '>', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
         .select(

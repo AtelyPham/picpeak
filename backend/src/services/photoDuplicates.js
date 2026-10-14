@@ -10,6 +10,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const { db } = require('../database/db');
+const { livePhotos } = require('../utils/photoVisibility');
 
 /** Hex SHA-256 of a local file, streamed. */
 async function sha256File(filePath) {
@@ -18,9 +19,13 @@ async function sha256File(filePath) {
   return hash.digest('hex');
 }
 
-/** The oldest photo of this gallery with these bytes, or undefined. */
+/**
+ * The oldest photo of this gallery with these bytes, or undefined. A photo in
+ * the trash is not in the gallery: the same file can be uploaded again, and a
+ * restore then puts a second copy next to it.
+ */
 function findDuplicate(eventId, contentSha256) {
-  return db('photos')
+  return livePhotos(db)
     .where({ event_id: eventId, content_sha256: contentSha256 })
     .orderBy('id')
     .first('id', 'filename', 'original_filename');

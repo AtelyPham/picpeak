@@ -118,6 +118,24 @@ describe('Duplicate detection by content hash (issue 1733)', () => {
     expect((await photosOf(event)).map((p) => p.original_filename)).toEqual(['first.jpg', 'other.jpg']);
   });
 
+  it('a photo in the trash is not a duplicate: the file is stored again', async () => {
+    const event = await makeEvent();
+    await adminUpload(event, [['first.jpg', jpegA]]);
+    await db('photos').where({ event_id: event.id }).update({
+      deleted_at: new Date().toISOString(), purge_after: new Date(Date.now() + 86400000).toISOString(),
+    });
+
+    const res = await adminUpload(event, [['again.jpg', jpegA]], { detect_duplicates: 'true' });
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({ count: 1, duplicates: [], duplicateCount: 0 });
+    expect((await photosOf(event)).map((p) => p.original_filename)).toEqual(['first.jpg', 'again.jpg']);
+
+    // Restored, the older photo is the one a third upload is told about.
+    await db('photos').where({ event_id: event.id }).update({ deleted_at: null, purge_after: null });
+    const third = await adminUpload(event, [['third.jpg', jpegA]], { detect_duplicates: 'true' });
+    expect(third.body.duplicates).toEqual([{ index: 0, filename: 'third.jpg', duplicate_of: 'first.jpg' }]);
+  });
+
   it('catches the same file twice in one request', async () => {
     const event = await makeEvent();
     const res = await adminUpload(event, [['one.jpg', jpegA], ['two.jpg', jpegA]], { detect_duplicates: 'true' });

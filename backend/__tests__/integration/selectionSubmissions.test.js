@@ -161,6 +161,20 @@ describe('finish selection / approve edited photos (issue 1733)', () => {
       }
     });
 
+    it('leaves a pick on a photo in the trash out of the count and the hand-over', async () => {
+      await feedback('device-A', photoIds[0], { feedback_type: 'like' });
+      await feedback('device-A', photoIds[1], { feedback_type: 'like' });
+      await db('photos').where({ id: photoIds[1] }).update({
+        deleted_at: new Date().toISOString(), purge_after: new Date(Date.now() + 86400000).toISOString(),
+      });
+      try {
+        expect((await state('device-A')).selection.used).toBe(1);
+        expect((await submit('device-A')).body.submission.item_count).toBe(1);
+      } finally {
+        await db('photos').where({ id: photoIds[1] }).update({ deleted_at: null, purge_after: null });
+      }
+    });
+
     it('is off without a cap and without the switch', async () => {
       await setSettings({ allow_selection_submit: false });
       expect((await state('device-A')).selection).toMatchObject({ counter: false, can_submit: false });

@@ -263,6 +263,20 @@ describe('adaptive streaming routes (issue 1733)', () => {
       }
     });
 
+    test('a video in the trash has no stream, for the client either, and plays again once restored', async () => {
+      const id = await insertVideo('trashed.mp4');
+      await db('photos').where({ id }).update({
+        deleted_at: new Date().toISOString(), purge_after: new Date(Date.now() + 864e5).toISOString(),
+      });
+      for (const route of routes(id)) {
+        expect((await get(route)).status).toBe(404);
+        expect((await get(route, { headers: asClient })).status).toBe(404);
+      }
+      await db('photos').where({ id }).update({ deleted_at: null, purge_after: null });
+      expect((await get(`${id}/master.m3u8`)).status).toBe(200);
+      await db('photos').where({ id }).delete();
+    });
+
     test('a video of another gallery is not found under this one, whatever the token', async () => {
       for (const route of routes(elsewhere)) {
         expect((await get(route)).status).toBe(404);
@@ -502,6 +516,10 @@ describe('adaptive streaming routes (issue 1733)', () => {
       admin.use('/api/admin/photos', require('../../src/routes/adminPhotos'));
 
       const id = await insertVideo('late-ladder.mp4', { ladder: false });
+      // Retention 0: the delete is outright, as before the photo trash.
+      const retention = 'general_photo_trash_retention_days';
+      await db('app_settings').where({ setting_key: retention }).delete();
+      await db('app_settings').insert({ setting_key: retention, setting_value: JSON.stringify(0), setting_type: 'general' });
       const original = storage.delete;
       const remove = jest.spyOn(storage, 'delete').mockImplementation(async function (key) {
         const result = await original.call(this, key);
@@ -515,6 +533,7 @@ describe('adaptive streaming routes (issue 1733)', () => {
         expect(res.status).toBe(200);
       } finally {
         remove.mockRestore();
+        await db('app_settings').where({ setting_key: retention }).delete();
       }
       expect(await db('photos').where({ id }).first()).toBeUndefined();
       expect(await keysUnder(`hls/${id}`)).toEqual([]);
@@ -541,15 +560,11 @@ describe('adaptive streaming routes (issue 1733)', () => {
       // A transcode that overlaps the delete publishes against the row. Swept
       // first, its ladder would land after the sweep and outlive the row.
       const read = file => fs.readFileSync(path.join(__dirname, '../../src', file), 'utf8');
-      const admin = read('routes/adminPhotos.js');
-      const single = admin.indexOf('await db(\'photos\').where({ id: photoId }).delete();');
-      const bulk = admin.indexOf('.whereIn(\'id\', photoIds)\n      .where(\'event_id\', eventId)\n      .delete();');
-      const sweeps = [...admin.matchAll(/videoHlsService'\)\.deleteLadder\(photo\)/g)].map(match => match.index);
-      expect(single).toBeGreaterThan(0);
-      expect(bulk).toBeGreaterThan(single);
-      expect(sweeps[0]).toBeGreaterThan(single);
-      expect(sweeps[0]).toBeLessThan(bulk);
-      expect(sweeps[1]).toBeGreaterThan(bulk);
+      // An admin delete and a purge of the trash share one hard delete.
+      const trash = read('services/photoTrash.js');
+      const rowDelete = trash.indexOf('await db(\'photos\').where({ id: photo.id, event_id: photo.event_id }).delete();');
+      expect(rowDelete).toBeGreaterThan(0);
+      expect(trash.indexOf('videoHlsService\').deleteLadder(ladder)')).toBeGreaterThan(rowDelete);
       const archive = read('services/archiveService.js');
       expect(archive.indexOf('hls_attempt_id: null')).toBeGreaterThan(0);
       expect(archive.indexOf('deleteLadder(photo)')).toBeGreaterThan(archive.indexOf('hls_attempt_id: null'));
@@ -563,8 +578,8 @@ describe('adaptive streaming routes (issue 1733)', () => {
 
     test('every path that removes a video or its file names the ladder', () => {
       const read = file => fs.readFileSync(path.join(__dirname, '../../src', file), 'utf8');
-      expect(read('routes/adminPhotos.js').match(/videoHlsService'\)\.deleteLadder\(photo\)/g)).toHaveLength(2);
-      for (const file of ['routes/adminEvents/helpers.js', 'services/archiveService.js', 'services/fileWatcher.js', 'services/externalPhotoDedupe.js']) {
+      expect(read('routes/adminPhotos.js').match(/photoTrash\.deletePhotoForGood\(event, photo\)/g)).toHaveLength(2);
+      for (const file of ['services/photoTrash.js', 'routes/adminEvents/helpers.js', 'services/archiveService.js', 'services/fileWatcher.js', 'services/externalPhotoDedupe.js']) {
         expect(read(file)).toMatch(/deleteLadder\(/);
       }
       expect(read('services/photoReplacementService.js')).toMatch(/captureLadder\(/);

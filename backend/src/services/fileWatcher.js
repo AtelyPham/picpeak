@@ -300,15 +300,22 @@ async function removePhoto(filePath) {
   // Look up event before deleting to invalidate zip cache
   const photo = await db('photos').where({ path: relativePath }).first();
 
+  // A purge under way (issue 1733) removed this file itself and still needs
+  // the row to finish its cleanup, or to be found again after a crash.
+  if (photo && photo.deleted_at && photo.purge_after == null) return;
+
   // Remove from database
-  await db('photos').where({ path: relativePath }).delete();
+  await db('photos').where({ path: relativePath })
+    .whereNot(function () { this.whereNotNull('deleted_at').whereNull('purge_after'); })
+    .delete();
 
   if (photo) {
     await require('./videoHlsService').deleteLadder(photo);
     downloadZipService.invalidate(photo.event_id);
 
-    // Webhook (#327) — fire only if the row actually existed.
-    try {
+    // Webhook (#327) — fire only if the row actually existed. A photo in the
+    // trash (issue 1733) announced its deletion when it was trashed.
+    if (!photo.deleted_at) try {
       const event = await db('events').where({ id: photo.event_id }).first();
       const webhookService = require('./webhookService');
       await webhookService.fire('photo.deleted', {
@@ -321,4 +328,4 @@ async function removePhoto(filePath) {
   logger.info(`Removed photo: ${relativePath}`);
 }
 
-module.exports = { stopFileWatcher, startFileWatcher, findExistingPhoto, processNewPhoto };
+module.exports = { stopFileWatcher, startFileWatcher, findExistingPhoto, processNewPhoto, removePhoto };

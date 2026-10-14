@@ -116,6 +116,19 @@ test('a photo of another gallery or one hidden from the viewer is refused and co
   expect(await unitsSpent()).toEqual([1]);
 });
 
+test('a photo in the trash is refused and costs nothing', async () => {
+  const trashed = await insertPhoto(eventId, 'trashed.jpg', {
+    deleted_at: new Date().toISOString(), purge_after: new Date(Date.now() + 86400000).toISOString(),
+  });
+  const res = await bulk(request.agent(app), { photo_ids: [photoIds[0], trashed], rating: 5 }).expect(200);
+  expect(res.body.results).toEqual([
+    expect.objectContaining({ photo_id: photoIds[0], success: true }),
+    { photo_id: trashed, success: false, error: 'Photo not found' },
+  ]);
+  expect(await ratings()).toEqual({ [photoIds[0]]: 5 });
+  expect(await unitsSpent()).toEqual([1]);
+});
+
 test('a repeated id is rated and charged once', async () => {
   const res = await bulk(request.agent(app), { photo_ids: [photoIds[0], photoIds[0]], rating: 3 }).expect(200);
   expect(res.body.results).toHaveLength(1);

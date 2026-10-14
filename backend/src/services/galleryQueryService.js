@@ -21,7 +21,7 @@ const { applyFeedbackFilter } = require('./galleryPhotoQuery');
 const { getQuota, grantedPhotoIds, drawsOnQuota } = require('./downloadQuota');
 const { guestNameModeOf, creditVisibleToGuest } = require('./photoCredit');
 const { guestUploadMaxEdgeOf } = require('./guestUploadDownscale');
-const { applyPhotoVisibilityFilter } = require('../utils/photoVisibility');
+const { applyPhotoVisibilityFilter, livePhotos } = require('../utils/photoVisibility');
 const { galleryFullResolutionDenial } = require('./galleryAssetPolicy');
 /**
  * The photos a viewer's list is made of, before sorting and paging: this
@@ -31,7 +31,7 @@ const { galleryFullResolutionDenial } = require('./galleryAssetPolicy');
  */
 async function galleryListQuery({ event, query = {}, identity, accessLevel }) {
   const isClient = accessLevel === 'client';
-  let photosQuery = db('photos')
+  let photosQuery = livePhotos(db)
     .where('photos.event_id', event.id)
   // Guests/clients never see photos still being processed by the
   // background worker — the original is on disk but the thumbnail
@@ -374,7 +374,7 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, viaC
   // photos this viewer may see count, as for the folders below: a category
   // holding nothing but hidden photos, or a team upload under review
   // (issue 743), must not ship its name.
-  const usedFilterIds = hiddenForGuest ? [] : await applyPhotoVisibilityFilter(db('photos')
+  const usedFilterIds = hiddenForGuest ? [] : await applyPhotoVisibilityFilter(livePhotos(db)
     .where('event_id', event.id)
     .whereNotNull('category_id'), accessLevel)
     .distinct('category_id')
@@ -389,7 +389,7 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, viaC
     // Only folders holding a photo this viewer may see: a folder with
     // nothing but hidden or still-processing photos must not ship its name
     // (and its ancestors' names) to guests. Same rules as the photo list.
-    let directQuery = db('photos')
+    let directQuery = livePhotos(db)
       .where('event_id', event.id)
       .whereNotNull('folder_id')
       .where((q) => q.where('processing_status', 'complete').orWhereNull('processing_status'));

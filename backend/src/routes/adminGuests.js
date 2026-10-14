@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const archiver = require('archiver');
 const router = express.Router();
 const { db, logActivity } = require('../database/db');
+const { joinLivePhotos, livePhotos } = require('../utils/photoVisibility');
 const { adminAuth } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
 const { requireEventOwnership } = require('../middleware/ownership');
@@ -70,7 +71,10 @@ router.get(
 
       const rows = await db('gallery_guests')
         .leftJoin('photo_feedback', function () {
-          this.on('photo_feedback.guest_id', '=', 'gallery_guests.id');
+          // Feedback on photos in the trash is not counted, as in the guest's
+          // own list and exports below; the guest stays listed with zeros.
+          this.on('photo_feedback.guest_id', '=', 'gallery_guests.id')
+            .andOn(db.raw('NOT EXISTS (SELECT 1 FROM photos WHERE photos.id = photo_feedback.photo_id AND photos.deleted_at IS NOT NULL)'));
         })
         .where('gallery_guests.event_id', eventId)
         .where('gallery_guests.is_deleted', false)
@@ -170,7 +174,7 @@ router.get(
     try {
       const { eventId } = req.params;
 
-      const photos = await db('photos')
+      const photos = await livePhotos(db)
         .leftJoin('photo_feedback', function () {
           this.on('photo_feedback.photo_id', '=', 'photos.id')
             .andOn(db.raw('photo_feedback.feedback_type IN (\'like\',\'favorite\')'))
@@ -400,7 +404,7 @@ router.get(
 
       for (const g of guests) {
         const selections = await db('photo_feedback')
-          .join('photos', 'photo_feedback.photo_id', 'photos.id')
+          .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
           .where('photo_feedback.guest_id', g.id)
           .whereIn('photo_feedback.feedback_type', ['like', 'favorite'])
           .select('photos.filename', 'photos.original_filename', 'photo_feedback.feedback_type');
@@ -452,7 +456,7 @@ router.get(
       if (!guest) return;
 
       const feedback = await db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         .where('photo_feedback.guest_id', guestId)
         .select(
           'photo_feedback.id as feedback_id',
@@ -544,7 +548,7 @@ router.get(
       if (!guest) return;
 
       const selections = await db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         .where('photo_feedback.guest_id', guestId)
         .whereIn('photo_feedback.feedback_type', ['like', 'favorite'])
         .select('photos.filename', 'photos.original_filename', 'photo_feedback.feedback_type');

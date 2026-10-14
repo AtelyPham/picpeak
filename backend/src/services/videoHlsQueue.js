@@ -31,6 +31,7 @@ const { createInterruptibleSleep } = require('../utils/interruptibleSleep');
 const { isEnabled, queuePending, renderLadder } = require('./videoHlsService');
 const mediaAttempts = require('./mediaAttemptService');
 const { isTransient } = require('./imageResourcePolicy');
+const { livePhotos } = require('../utils/photoVisibility');
 
 const RETRY_BACKOFF_MS = 60000;
 const QUEUE_INTERVAL_MS = 60000;
@@ -49,9 +50,13 @@ let waits = null;
 let stopping = null;
 const sleep = (ms) => waits.sleep(ms);
 
-/** Whether an upload is still waiting for, or in, the photo queue. */
+/**
+ * Whether an upload is still waiting for, or in, the photo queue. Live photos
+ * only: the photo queue does not claim a trashed row, so one left pending
+ * would hold every ladder back until it is purged.
+ */
 async function uploadsBusy() {
-  return !!(await db('photos').whereIn('processing_status', ['pending', 'processing']).first('id'));
+  return !!(await livePhotos(db).whereIn('processing_status', ['pending', 'processing']).first('id'));
 }
 
 /** Atomically claim the oldest pending video. Returns the row or null. */

@@ -107,6 +107,18 @@ describe('adaptive streaming queue', () => {
     expect(service.renderLadder).toHaveBeenCalledWith(waiting);
   });
 
+  test('an upload in the trash, which the photo queue will not claim, holds no ladder back', async () => {
+    service.renderLadder.mockImplementation(async (photoId) => {
+      await db('photos').where({ id: photoId }).update({ hls_status: 'complete', hls_started_at: null });
+    });
+    await photo({ processing_status: 'pending', deleted_at: new Date().toISOString(),
+      purge_after: new Date(Date.now() + 86400000).toISOString() });
+    const waiting = await video({ hls_status: 'pending' });
+    queue.start();
+    await settle(async () => (await row(waiting)).hls_status === 'complete');
+    expect(service.renderLadder).toHaveBeenCalledWith(waiting);
+  });
+
   describe('leases', () => {
     test('two claims racing for one video: one gets it, with its own attempt id', async () => {
       const only = await video({ hls_status: 'pending' });

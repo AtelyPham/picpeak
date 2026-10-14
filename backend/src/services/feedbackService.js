@@ -5,7 +5,7 @@ const { REACTION_EMOJIS } = require('../constants/reactions');
 const { isValidColorLabel, SHARED_COLOR_LABEL_IDENTITY } = require('../constants/colorLabels');
 const { isValidDecision } = require('../constants/photoDecisions');
 const { resolveEventFeedbackDefaults, DEFAULT_KEYBIND_MODE, KEYBIND_MODES } = require('./feedbackDefaults');
-const { applyPhotoVisibilityFilter } = require('../utils/photoVisibility');
+const { applyPhotoVisibilityFilter, joinLivePhotos, livePhotos, wherePhotoLive } = require('../utils/photoVisibility');
 const selectionSubmissions = require('./selectionSubmissions');
 const { serializeAnnotation, withParsedAnnotation } = require('../utils/photoAnnotation');
 
@@ -240,6 +240,8 @@ class FeedbackService {
    */
   async countGuestFeedback(eventId, feedbackType, guestId, guestIdentifier, executor = db) {
     const query = executor('photo_feedback')
+      // Nor do likes on photos in the trash: the guest cannot see or undo them.
+      .modify(wherePhotoLive, 'photo_feedback.photo_id')
       // Hidden rows do not count against the guest's cap (#1150). They are
       // absent everywhere else — the heart is empty, the tallies skip them,
       // and submitFeedback now treats one as room for a fresh row. Counting
@@ -912,7 +914,7 @@ class FeedbackService {
    */
   async getEventFeedbackSummary(eventId, { viewerAccessLevel } = {}) {
     try {
-      const photos = await db('photos')
+      const photos = await livePhotos(db)
         .where('event_id', eventId)
         .select('id', 'filename', 'visibility', 'moderation_status', 'feedback_count', 'like_count', 'average_rating', 'favorite_count', 'reaction_count', 'color_label_count', 'approved_count', 'rejected_count')
         .orderBy('average_rating', 'desc')
@@ -925,12 +927,11 @@ class FeedbackService {
         // already apply — without this the two halves of THIS response
         // disagreed, and a hidden row preserved beside its replacement (#1150)
         // is counted twice.
-        .where('photo_feedback.is_hidden', false);
+        .where('photo_feedback.is_hidden', false)
+        // Feedback on photos in the trash does not count, as above.
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id');
       if (viewerAccessLevel !== undefined) {
-        statsQuery = applyPhotoVisibilityFilter(
-          statsQuery.join('photos', 'photo_feedback.photo_id', 'photos.id'),
-          viewerAccessLevel
-        );
+        statsQuery = applyPhotoVisibilityFilter(statsQuery, viewerAccessLevel);
       }
       const totalStats = await statsQuery
         .select(
@@ -1040,6 +1041,7 @@ class FeedbackService {
       const mode = identityMode ?? (await this.getEventFeedbackSettings(eventId)).identity_mode;
       const query = scopeColorLabelsToMode(
         db('photo_feedback')
+          .modify(wherePhotoLive, 'photo_feedback.photo_id')
           .where({ event_id: eventId, feedback_type: 'color_label' })
           .where('is_hidden', false),
         mode,
@@ -1268,7 +1270,7 @@ class FeedbackService {
   async getPendingModeration(eventId = null, ownedEventIds = null) {
     try {
       let query = db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         .join('events', 'photo_feedback.event_id', 'events.id')
         .where('photo_feedback.is_approved', false)
         .where('photo_feedback.is_hidden', false)
@@ -1305,7 +1307,7 @@ class FeedbackService {
   async exportEventFeedback(eventId) {
     try {
       const feedback = await db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         .where('photo_feedback.event_id', eventId)
         .select(
           'photos.filename',
@@ -1349,7 +1351,7 @@ class FeedbackService {
   async exportEventFeedbackPivoted(eventId) {
     try {
       const rows = await db('photo_feedback')
-        .join('photos', 'photo_feedback.photo_id', 'photos.id')
+        .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
         .where('photo_feedback.event_id', eventId)
         .where('photo_feedback.is_hidden', false)
         .select(
@@ -1464,7 +1466,7 @@ class FeedbackService {
       
       // If no filters specified, return all photos
       if (!liked && !favorited) {
-        const allPhotos = await db('photos')
+        const allPhotos = await livePhotos(db)
           .where('event_id', eventId)
           .select('id');
         return allPhotos.map(p => p.id);

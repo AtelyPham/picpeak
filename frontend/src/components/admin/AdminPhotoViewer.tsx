@@ -20,6 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { defaultCategoryLabel } from '../../utils/mediaCounts';
 import { exifLine } from '../../utils/photoExif';
 import { useMutationWithToast, useModal } from '../../hooks';
+import { deleteOneConfirm, deletedMessage } from './photoDeleteCopy';
 
 type AdminFeedbackResponse = {
   feedback: PhotoFeedback[];
@@ -33,6 +34,8 @@ interface AdminPhotoViewerProps {
   onClose: () => void;
   onPhotoDeleted: () => void;
   categories: Array<{ id: number; name: string; slug: string }>;
+  /** Days a deleted photo stays in the trash (issue 1733); 0 or unknown: deleting is final. */
+  trashRetentionDays?: number;
 }
 
 export const AdminPhotoViewer: React.FC<AdminPhotoViewerProps> = (props) => {
@@ -48,7 +51,7 @@ type ViewerContentProps = AdminPhotoViewerProps & {
 };
 
 const AdminPhotoViewerContent: React.FC<ViewerContentProps> = ({
-  photos, eventId, onClose, onPhotoDeleted, categories, currentPhoto, currentIndex, setCurrentIndex
+  photos, eventId, onClose, onPhotoDeleted, categories, trashRetentionDays, currentPhoto, currentIndex, setCurrentIndex
 }) => {
   const [isDeleting, setIsDeleting] = useState(false);
   const { t } = useTranslation();
@@ -100,7 +103,7 @@ const AdminPhotoViewerContent: React.FC<ViewerContentProps> = ({
 
   const handleDelete = async () => {
     if (!(await confirm({
-      message: t('admin.photos.deleteOneConfirm', 'Delete "{{name}}"? The photo is removed from the gallery for good. This cannot be undone.', { name: currentPhoto.filename }),
+      message: deleteOneConfirm(t, currentPhoto.filename, trashRetentionDays),
       variant: 'danger',
       confirmLabel: t('admin.photos.deleteOneAction', 'Delete photo'),
     }))) {
@@ -109,8 +112,8 @@ const AdminPhotoViewerContent: React.FC<ViewerContentProps> = ({
 
     setIsDeleting(true);
     try {
-      await photosService.deletePhoto(eventId, currentPhoto.id);
-      toast.success('Photo deleted successfully');
+      const result = await photosService.deletePhoto(eventId, currentPhoto.id);
+      toast.success(deletedMessage(t, 1, result));
       
       // Close viewer if this was the last photo
       if (photos.length === 1) {
