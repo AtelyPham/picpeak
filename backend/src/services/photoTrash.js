@@ -182,7 +182,14 @@ async function deletePhotoForGood(event, photo, { strict = false } = {}) {
   // removed after the row, so a transcode still running cannot publish one
   // behind this.
   const ladder = await db('photos').where({ id: photo.id, event_id: photo.event_id }).first('id', 'hls_status', 'hls_path');
-  await db('photos').where({ id: photo.id, event_id: photo.event_id }).delete();
+  // Scene tags (issue 1733) go with the row in one transaction: the cascade
+  // is inert on SQLite, and a tagging result in flight then lands either
+  // before this (and is deleted here) or after it (and finds no row). The
+  // row first, the order tagProcessor locks in.
+  await db.transaction(async (trx) => {
+    await trx('photos').where({ id: photo.id, event_id: photo.event_id }).delete();
+    await trx('photo_tags').where({ photo_id: photo.id }).del();
+  });
   await require('./videoHlsService').deleteLadder(ladder);
 }
 

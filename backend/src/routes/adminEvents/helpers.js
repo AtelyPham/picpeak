@@ -212,6 +212,10 @@ async function deleteEventCascade(eventId, adminContext) {
     }
 
     await trx('photos').where('event_id', eventId).del();
+    // Scene tags (issue 1733): the same inert-cascade reason. After the
+    // photos, not with the face data above: a tagging worker locks the photo
+    // row before its tags, and the reverse order can deadlock on PostgreSQL.
+    await trx('photo_tags').where('event_id', eventId).del();
     // 5. Finally delete the event row
     await deleteWithAccountingHistory(trx, 'events', { id: eventId },
       { actor: adminContext?.id ?? null, source: 'event.delete' });

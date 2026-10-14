@@ -949,6 +949,10 @@ router.delete('/:id', adminAuth, requirePermission('archives.delete'), requireEv
         await trx('selection_submissions').where('event_id', req.params.id).del();
       }
       await trx('photos').where('event_id', req.params.id).del();
+      // Scene tags (issue 1733) stay with an archived gallery's photo rows.
+      // After the photos: a tagging worker locks the photo row first, and
+      // taking the two in the other order can deadlock on PostgreSQL.
+      await trx('photo_tags').where('event_id', req.params.id).del();
       await deleteWithAccountingHistory(trx, 'events', { id: req.params.id },
         { actor: req.admin.id, source: 'archive.delete' });
     });

@@ -258,6 +258,11 @@ async function deleteDuplicatePhotos(knex, doomedToSurvivor) {
   }
 
   for (const ids of chunked(doomed)) await knex('photos').whereIn('id', ids).del();
+  // Scene tags (issue 1733): the survivor was tagged from the same picture.
+  // After the rows, the order a tagging worker locks in.
+  if (await knex.schema.hasTable('photo_tags')) {
+    for (const ids of chunked(doomed)) await knex('photo_tags').whereIn('photo_id', ids).del();
+  }
 
   if (laddered.length) {
     const { deleteLadder } = require('./videoHlsService');

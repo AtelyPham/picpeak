@@ -339,6 +339,23 @@ async function replacePhoto(existingPhoto, newFileTempPath, { originalFilename, 
     // publish behind the sweep, and whatever another replica writes for the
     // new file in between is not on the list.
     const sweepOldLadder = await require('./videoHlsService').captureLadder(existingPhoto);
+
+    // Scene tags (issue 1733) describe the old picture too: drop them and
+    // re-queue when the gallery has tagging on.
+    try {
+      const { purgePhotoTags } = require('./tagProcessor');
+      await purgePhotoTags(existingPhoto.id);
+      const event = await db('events').where({ id: existingPhoto.event_id }).first();
+      updates.tag_status = (await require('./tagSettings').isEnabledForEvent(event)) ? 'pending' : null;
+      updates.tag_started_at = null;
+      updates.tag_attempt_id = null;
+      updates.tag_error = null;
+    } catch (err) {
+      logger.warn(`replacePhoto: tag reset failed for photo ${existingPhoto.id}`, {
+        error: err.message,
+      });
+    }
+
     if (object) {
       await uploadQuota.commitObject(object, 'photo', async conn => {
         if (await conn('photos').where({ id: existingPhoto.id, event_id: event.id }).update(updates) !== 1) {

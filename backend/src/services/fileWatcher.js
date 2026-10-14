@@ -283,6 +283,16 @@ async function processNewPhoto(filePath) {
   logger.info(`Added new photo: ${relativePath}`);
   downloadZipService.invalidate(event.id);
 
+  // Scene tagging (issue 1733): this path writes a finished row itself and
+  // never reaches photoProcessor's enqueue.
+  if (!isVideo) {
+    try {
+      await require('./tagSettings').enqueueFinishedPhotos(event.id, [photoId]);
+    } catch (err) {
+      logger.warn(`Could not queue ${relativePath} for tagging: ${err.message}`);
+    }
+  }
+
   // Webhook (#327) — auto-import path. Only fires in local mode since
   // the watcher is disabled in S3 mode.
   try {
@@ -304,10 +314,20 @@ async function removePhoto(filePath) {
   // the row to finish its cleanup, or to be found again after a crash.
   if (photo && photo.deleted_at && photo.purge_after == null) return;
 
-  // Remove from database
-  await db('photos').where({ path: relativePath })
-    .whereNot(function () { this.whereNotNull('deleted_at').whereNull('purge_after'); })
-    .delete();
+  // Remove from database. Scene tags (issue 1733) go in the same
+  // transaction: the FK cascade is inert on SQLite, and a tagging result in
+  // flight then lands either before this (and is deleted here) or after it
+  // (and finds no row to settle). The row first, the order tagProcessor
+  // locks in.
+  if (photo) {
+    await db.transaction(async (trx) => {
+      const ids = await trx('photos').where({ path: relativePath })
+        .whereNot(function () { this.whereNotNull('deleted_at').whereNull('purge_after'); })
+        .pluck('id');
+      await trx('photos').whereIn('id', ids).delete();
+      await trx('photo_tags').whereIn('photo_id', ids).del();
+    });
+  }
 
   if (photo) {
     await require('./videoHlsService').deleteLadder(photo);

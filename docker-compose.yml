@@ -175,6 +175,8 @@ services:
       - FACE_ML_URL=${FACE_ML_URL:-http://picpeak-ml:8000}
       - FACE_ML_TOKEN=${FACE_ML_TOKEN:-}
       - FACE_PROCESSOR_CONCURRENCY=${FACE_PROCESSOR_CONCURRENCY:-}
+      # Scene tagging workers (issue 1733); empty keeps the default of 1.
+      - TAG_PROCESSOR_CONCURRENCY=${TAG_PROCESSOR_CONCURRENCY:-}
       # Malware scanner for customer documents (#1444). Empty = no scanner;
       # uploads then wait for an admin's review. With the opt-in `clamav`
       # profile below, set CLAMAV_HOST=clamav. See docs/ENVIRONMENT_VARIABLES.md.
@@ -304,6 +306,10 @@ services:
         # so the fallbacks repeat it deliberately.
         - FACENET_ONNX_URL=${FACENET_ONNX_URL:-https://github.com/PicPeak/picpeak/releases/download/ml-models-v1/facenet512.onnx}
         - FACENET_ONNX_SHA256=${FACENET_ONNX_SHA256:-a1c06dcb79dc17a42af01d5bcbce4822caa148b9c24bf7eb8b8e556b4fd0d5db}
+        # Scene-tagging encoder (issue 1733). Empty by default: the image is
+        # then built without it and automatic tagging stays unavailable.
+        - TAG_ENCODER_ONNX_URL=${TAG_ENCODER_ONNX_URL:-}
+        - TAG_ENCODER_ONNX_SHA256=${TAG_ENCODER_ONNX_SHA256:-}
     container_name: picpeak-ml
     restart: unless-stopped
     profiles:
@@ -313,6 +319,9 @@ services:
       # without it rather than serving anonymously.
       - FACE_ML_TOKEN=${FACE_ML_TOKEN:-}
       - FACE_ORT_THREADS=${FACE_ORT_THREADS:-1}
+      # Scene tagging (issue 1733); only read once /tags is used.
+      - TAG_SCORE_THRESHOLD=${TAG_SCORE_THRESHOLD:-0.01}
+      - TAG_TOP_K=${TAG_TOP_K:-5}
       - TZ=${TZ:-UTC}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]

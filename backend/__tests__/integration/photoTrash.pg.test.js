@@ -40,6 +40,7 @@ pg('PostgreSQL photo trash', () => {
       table.string('external_relpath'); table.string('moderation_status');
       table.string('hls_status'); table.string('hls_path');
     });
+    await db.schema.createTable('photo_tags', (table) => { table.increments('id'); table.integer('photo_id'); table.string('tag'); });
     await db('events').insert({ id: event.id, slug: event.slug });
 
     const migration = require('../../migrations/core/294_photo_trash');
