@@ -503,6 +503,8 @@ async function handlePublicSiteRequest(req, res, next) {
     const payload = await getPublicSitePayload();
 
     if (!payload.enabled) {
+      // The root is crawlable (robotsTxtService), so say it here too.
+      res.setHeader('X-Robots-Tag', 'noindex');
       res.redirect(302, '/admin/login');
       return;
     }
@@ -511,7 +513,7 @@ async function handlePublicSiteRequest(req, res, next) {
     try {
       const seoRows = await db('app_settings')
         .where('setting_type', 'seo')
-        .whereIn('setting_key', ['seo_meta_noindex', 'seo_meta_nofollow', 'seo_meta_noai'])
+        .whereIn('setting_key', ['seo_allow_indexing', 'seo_meta_noindex', 'seo_meta_nofollow', 'seo_meta_noai'])
         .select('setting_key', 'setting_value');
       const seoSettings = {};
       for (const row of seoRows) {
@@ -529,7 +531,15 @@ async function handlePublicSiteRequest(req, res, next) {
     // link for self-hosted faces) or a SEO toggle must stop answering 304 to
     // clients that cached the previous HTML, or they keep it until a
     // settings change happens to move the payload hash.
-    const etag = `W/"${require('crypto').createHash('sha1').update(document).digest('hex')}"`;
+    //
+    // robots.txt lets crawlers fetch the root either way, so with indexing
+    // off the landing page has to refuse indexing itself. That is a header,
+    // not part of the document, so it goes into the validator as well and is
+    // sent on a 304 too: otherwise a crawler that cached the page while
+    // indexing was on keeps revalidating its indexable copy.
+    const noindex = payload.seoSettings?.seo_allow_indexing !== true;
+    if (noindex) res.setHeader('X-Robots-Tag', 'noindex');
+    const etag = `W/"${require('crypto').createHash('sha1').update(document).update(noindex ? 'noindex' : 'index').digest('hex')}"`;
     if (req.headers['if-none-match'] === etag) {
       res.status(304).end();
       return;
@@ -795,6 +805,7 @@ app.get('/s/:shortSlug', async (req, res) => {
         meta.url = `${base}/s/${row.short_slug}`;
         res.set('Cache-Control', 'public, max-age=300');
         res.set('Content-Type', 'text/html; charset=utf-8');
+        res.set('X-Robots-Tag', 'noindex');
         res.send(renderOgHtml(meta));
         // Hit accounting is fire-and-forget — don't block the bot.
         galleryShortUrlService.recordHit(row.id).catch(() => {});
@@ -1069,6 +1080,9 @@ try {
     // revalidate so a redeploy is picked up, while the hashed assets below
     // cache immutably.
     const sendSpa = (res) => {
+      // Only the landing page is ever indexable; the app shell never is
+      // (nginx parity: `location = /index.html`).
+      res.setHeader('X-Robots-Tag', 'noindex');
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.type('html').send(spaHtml);
     };
@@ -1296,6 +1310,9 @@ async function startServerInternal() {
     // Customer documents retention (#1444): delete long-rejected files and
     // remove the bytes of deleted ones once the retention window elapses.
     require('./src/services/customerDocumentRetentionService').startCustomerDocumentRetention();
+    // Photo trash (issue 1733): hourly, deletes for good what is past its
+    // retention.
+    require('./src/services/photoTrash').startPhotoTrashPurge();
     // Malware scanner for customer documents (#1444): clamd over TCP, only
     // when CLAMAV_HOST is set. Without it uploads stay pending until an admin
     // reviews them. The hourly re-scan picks up rows left pending while the
@@ -1519,10 +1536,18 @@ async function startServerInternal() {
     // lazy means they don't pay for a module graph they never use.
     require('./src/services/faceQueue').start();
 
+    // Scene tagging (issue 1733). Same shape: idle until the `autoTagging`
+    // feature flag is on, and it never contacts the sidecar before that.
+    require('./src/services/tagQueue').start();
+
     // Browser-playable video copies (issue 1430). Same shape as the face
     // queue: starts idle and re-reads the general_video_web_rendition
     // setting every tick, so nothing runs until an admin switches it on.
     require('./src/services/videoRenditionQueue').start();
+
+    // Adaptive streaming ladders (issue 1733). Idle in the same way until
+    // general_video_adaptive_streaming is switched on.
+    require('./src/services/videoHlsQueue').start();
 
     // Coordinated portable restore is optional. Where this host cannot run it
     // one startup line says why, the import answers 503 and nothing else

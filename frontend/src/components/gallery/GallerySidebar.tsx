@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { X, Download, Filter, FolderTree, SortAsc, SortDesc, Search, Calendar, Type, HardDrive, Check, Star, Upload, Camera, ClipboardList } from 'lucide-react';
 import { Button } from '../common';
 import { useEscapeClose } from '../common/useEscapeClose';
@@ -8,12 +8,15 @@ import { GalleryFilter, type FilterType, type FeedbackFilterType } from './Galle
 import { ColorLabelFilterChips } from './ColorLabelFilterChips';
 import { MinRatingFilterChips } from './MinRatingFilterChips';
 import { CreditFilterChips } from './CreditFilterChips';
+import { TagFilterChips, type TagChip } from './TagFilterChips';
 import type { ColorLabel } from '../../services/feedback.service';
 import { useDownloadQuota } from '../../contexts/DownloadQuotaContext';
 import type { QuotaPhoto } from '../../utils/downloadLimit';
 import { selectLabel } from '../../utils/mediaCounts';
 import { DownloadQuotaNotice } from './DownloadQuotaNotice';
+import { BulkRating } from './BulkRating';
 import { GallerySidebarFolderTree, type SidebarFolderTreeProps } from './GallerySidebarFolderTree';
+import { GallerySidebarSelectionTray } from './GallerySidebarSelectionTray';
 import { lockBodyScroll } from '../../utils/scrollLock';
 
 interface GallerySidebarProps {
@@ -78,6 +81,8 @@ interface GallerySidebarProps {
   minRating?: number | null;
   onMinRatingChange?: (minRating: number | null) => void;
   minRatingCounts?: Partial<Record<number, number>>;
+  // "Rate selected" (issue 1733): set when ratings are on for the gallery.
+  bulkRating?: { slug: string; photoIds: number[]; requireNameEmail?: boolean };
   mediaFilter?: 'all' | 'photo' | 'video';
   onMediaFilterChange?: (filter: 'all' | 'photo' | 'video') => void;
   showMediaFilter?: boolean;
@@ -86,11 +91,20 @@ interface GallerySidebarProps {
   creditPhotos?: Photo[];
   selectedCreditKey?: string | null;
   onCreditChange?: (key: string | null) => void;
+  // Scene-tag filter (issue 1733). Empty while the gallery has no tags.
+  tagChips?: TagChip[];
+  selectedTagKeys?: string[];
+  onTagToggle?: (key: string) => void;
   // Copyable filename list (issue 1733, A3d). `copyFilenamesCount` is how many
   // photos the dialog would list — the selection, or the viewer's favourites
   // when nothing is selected; the control is hidden at zero.
   onCopyFilenames?: () => void;
   copyFilenamesCount?: number;
+  // Selection tray (issue 1733, A3e): the selected photos themselves, and the
+  // way to take one out. Rendered only when both are passed.
+  selectedPhotoList?: Photo[];
+  onDeselectPhoto?: (photoId: number) => void;
+  slug?: string;
   /**
    * Folder navigation (issue 1786) as a collapsible tree. Absent for a gallery
    * without folders, which keeps its sidebar exactly as before.
@@ -144,14 +158,21 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
   minRating = null,
   onMinRatingChange,
   minRatingCounts = {},
+  bulkRating,
   mediaFilter = 'all',
   onMediaFilterChange,
   showMediaFilter = false,
   creditPhotos,
   selectedCreditKey = null,
   onCreditChange,
+  tagChips = [],
+  selectedTagKeys = [],
+  onTagToggle,
   onCopyFilenames,
   copyFilenamesCount = 0,
+  selectedPhotoList,
+  onDeselectPhoto,
+  slug,
   folderTree,
 }) => {
   const { t } = useTranslation();
@@ -160,12 +181,25 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
   const downloadQuota = useDownloadQuota();
   const downloadAllOverQuota = !!downloadAllPhotos && !downloadQuota.allows(downloadAllPhotos);
   const sidebarRef = useRef<HTMLDivElement>(null);
+  // Where focus goes when the last photo is removed from the selection tray
+  // by keyboard: the selection toggle, or the close button in a gallery
+  // without the download section.
+  const selectionToggleRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const focusAfterTrayEmptied = useCallback(() => {
+    (selectionToggleRef.current ?? closeButtonRef.current)?.focus();
+  }, []);
 
   // Close sidebar when clicking outside on mobile
   useEffect(() => {
     if (isMobile && isOpen) {
       const handleClickOutside = (event: MouseEvent) => {
-        if (sidebarRef.current && !sidebarRef.current.contains(event.target as Node)) {
+        const target = event.target as Element;
+        // A dialog opened from the drawer is portalled to the body (the
+        // drawer's transform would confine it); a press in it is not a press
+        // on the page behind the drawer.
+        if (target.closest?.('[role="dialog"]')) return;
+        if (sidebarRef.current && !sidebarRef.current.contains(target)) {
           onClose();
         }
       };
@@ -213,6 +247,7 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
         <div className="gallery-sidebar-header flex items-center justify-between p-4 border-b border-border-token">
           <h2 className="gallery-sidebar-title text-lg font-semibold text-theme">{t('gallery.filters')}</h2>
           <button
+            ref={closeButtonRef}
             onClick={onClose}
             className="gallery-sidebar-close p-2 hover-surface rounded-lg transition-colors"
             aria-label={t('common.close')}
@@ -282,6 +317,7 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
                 </Button>
 
                 <Button
+                  ref={selectionToggleRef}
                   variant={isSelectionMode ? 'secondary' : 'outline'}
                   size="sm"
                   onClick={onToggleSelectionMode}
@@ -333,6 +369,20 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
                 )}
               </div>
             </div>
+          )}
+
+          {/* Rate the selection (issue 1733). Its own section, like the
+              filename list below: with downloads off the tile checkboxes
+              still select, and rating is what a proofing gallery is for. */}
+          {isSelectionMode && bulkRating && bulkRating.photoIds.length > 0 && (
+            <div className="gallery-sidebar-section gallery-sidebar-bulk-rating p-4 border-b border-border-token">
+              <BulkRating {...bulkRating} />
+            </div>
+          )}
+
+          {/* Selection tray (issue 1733, A3e) */}
+          {isSelectionMode && selectedPhotoList && onDeselectPhoto && (
+            <GallerySidebarSelectionTray photos={selectedPhotoList} onRemove={onDeselectPhoto} onEmptied={focusAfterTrayEmptied} slug={slug} />
           )}
 
           {/* Filename list (issue 1733, A3d). Its own section rather than part
@@ -403,6 +453,18 @@ export const GallerySidebar: React.FC<GallerySidebarProps> = ({
                 onCreditChange(key);
                 if (isMobile) onClose();
               }}
+            />
+          )}
+
+          {/* Tags section (issue 1733). Stays open on a phone: the filter is
+              multi-select, so one tap is rarely the whole choice. */}
+          {onTagToggle && (
+            <TagFilterChips
+              variant="list"
+              className="gallery-sidebar-section p-4 border-b border-border-token"
+              tags={tagChips}
+              selectedKeys={selectedTagKeys}
+              onToggle={onTagToggle}
             />
           )}
 

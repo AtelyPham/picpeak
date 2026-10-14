@@ -1,4 +1,5 @@
 const { db } = require('../database/db');
+const { livePhotos } = require('../utils/photoVisibility');
 const logger = require('../utils/logger');
 const { ensureThumbnail } = require('./imageProcessor');
 const { isPresentationRenditionKey } = require('./galleryAssetPolicy');
@@ -225,7 +226,7 @@ async function buildOgMetadata(slug, requestPath) {
   // crawlers must not get the hero photo either — fall back to the brand
   // logo like the opt-out case.
   if (event.og_image_share_enabled && event.hero_photo_id && !isGalleryHidden(event)) {
-    const heroPhoto = await db('photos')
+    const heroPhoto = await livePhotos(db)
       .where({ id: event.hero_photo_id, event_id: event.id })
       // Never a team upload still under review (issue 743).
       .whereNull('moderation_status')
@@ -247,6 +248,10 @@ async function buildOgMetadata(slug, requestPath) {
   };
 }
 
+// The preview page is for link unfurlers, never for a search index: robots.txt
+// leaves gallery and short links crawlable (the app shell answers noindex),
+// and some crawlers that index, Applebot for one, are served this page
+// instead of the shell. Hence the robots meta here, for every caller.
 function renderOgHtml(meta) {
   const t = escapeHtml(meta.title);
   const d = escapeHtml(meta.description);
@@ -259,6 +264,7 @@ function renderOgHtml(meta) {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="robots" content="noindex" />
   <title>${t}</title>
   <meta name="description" content="${d}" />
   <meta property="og:type" content="website" />
@@ -291,6 +297,7 @@ async function handleGalleryOgRequest(req, res) {
     const meta = await buildOgMetadata(slug, req.originalUrl);
     res.set('Cache-Control', 'public, max-age=300');
     res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('X-Robots-Tag', 'noindex');
     res.send(renderOgHtml(meta));
   } catch (error) {
     logger.error('Failed to render gallery OG page', { error: error.message });
@@ -330,7 +337,7 @@ async function handleGalleryOgCover(req, res) {
       return;
     }
 
-    const photo = await db('photos')
+    const photo = await livePhotos(db)
       .where({ id: event.hero_photo_id, event_id: event.id })
       .whereNull('moderation_status')
       .first();

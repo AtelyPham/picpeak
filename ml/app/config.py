@@ -70,3 +70,36 @@ INPUT_LONG_EDGE = int(os.environ.get("FACE_INPUT_LONG_EDGE", "1920"))
 # backgroundProcessor.js), so letting ORT fan out across every core buys
 # nothing and costs RSS.
 ORT_THREADS = int(os.environ.get("FACE_ORT_THREADS", "1"))
+
+# ---------------------------------------------------------------------------
+# Scene tagging (issue 1733) — optional, loaded on the first /tags request
+# ---------------------------------------------------------------------------
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# The image encoder is NOT part of the default image build: see the Dockerfile
+# and README. Without it /tags answers 503 and nothing is loaded.
+TAG_ENCODER_PATH = os.path.join(
+    os.environ.get("TAG_MODEL_DIR", MODEL_DIR),
+    os.environ.get("TAG_ENCODER_FILENAME", "tag_image_encoder.onnx"),
+)
+# The fixed vocabulary (keys, English prompts, optional per-tag thresholds)
+# and its text embeddings, precomputed by tools/export_tagger.py with the
+# same model the encoder was exported from.
+TAG_VOCABULARY_PATH = os.path.join(_APP_DIR, "tag_vocabulary.json")
+TAG_EMBEDDINGS_PATH = os.environ.get(
+    "TAG_EMBEDDINGS_PATH", os.path.join(_APP_DIR, "tag_text_embeddings.npz")
+)
+
+# A tag is reported when its score reaches the threshold (the vocabulary may
+# override it per tag), and at most TAG_TOP_K tags are reported per image.
+#
+# The scores are SigLIP's pairwise sigmoid and are SMALL: a generic scene
+# prompt ("a photo taken outdoors") that clearly applies scores around 0.01
+# to 0.1, one that does not scores below 0.001. On ten real sample photos,
+# sent as the backend sends them, 0.01 produced five tags, all correct;
+# 0.005 produced ten, two of them wrong (see ml/README.md). Ten
+# landscape-like samples say little about event photography, so both values
+# are provisional.
+TAG_SCORE_THRESHOLD = float(os.environ.get("TAG_SCORE_THRESHOLD", "0.01"))
+TAG_TOP_K = int(os.environ.get("TAG_TOP_K", "5"))

@@ -5,6 +5,91 @@ All notable changes to PicPeak will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.172.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.171.0-beta.0...v3.172.0-beta.0) (2026-10-14)
+
+
+### Features
+
+* **gallery:** automatic scene tags with a guest tag filter ([#1961](https://github.com/PicPeak/picpeak/issues/1961)) ([b838ba9](https://github.com/PicPeak/picpeak/commit/b838ba9d32c4e529f257e483d6fcefea75604090))
+* **gallery:** photo trash with restore, as a flag on the photo row ([#1986](https://github.com/PicPeak/picpeak/issues/1986)) ([6b529eb](https://github.com/PicPeak/picpeak/commit/6b529eb00702ae628ecd942beb7d27207ef2b569))
+
+## [3.171.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.170.0-beta.0...v3.171.0-beta.0) (2026-10-13)
+
+
+### Features
+
+* **admin:** ask before any navigation drops unsaved changes ([#1965](https://github.com/PicPeak/picpeak/issues/1965)) ([1ed7b5c](https://github.com/PicPeak/picpeak/commit/1ed7b5c9d3b2da15e4303671b90a6e3490d96e04))
+* **admin:** expiry quick picks on the create form and in gallery settings ([#1952](https://github.com/PicPeak/picpeak/issues/1952)) ([5c3da66](https://github.com/PicPeak/picpeak/commit/5c3da66fba51f6742dfbbe7ac64abcd4e2dd033c))
+* **admin:** next-steps card on a draft gallery's overview ([#1953](https://github.com/PicPeak/picpeak/issues/1953)) ([9f74e61](https://github.com/PicPeak/picpeak/commit/9f74e610ddb4bc24a9aa84076b0d45b8b8eabc8f))
+* **auth:** passkeys for admin login ([#1954](https://github.com/PicPeak/picpeak/issues/1954)) ([385c774](https://github.com/PicPeak/picpeak/commit/385c774848bb1223d9ff839612cb9c71e92b5ec5))
+* **gallery:** adaptive video streaming behind a global setting ([#1959](https://github.com/PicPeak/picpeak/issues/1959)) ([877dcd5](https://github.com/PicPeak/picpeak/commit/877dcd5e43e867dfc9ae2be80660a138ba5eae13))
+* **gallery:** blurred placeholders behind loading tiles ([#1957](https://github.com/PicPeak/picpeak/issues/1957)) ([f173972](https://github.com/PicPeak/picpeak/commit/f173972e24a0140dd824556943d1cdd02cbae407))
+* **gallery:** film strip and hold-to-scrub in the lightbox ([#1956](https://github.com/PicPeak/picpeak/issues/1956)) ([c2cd8ec](https://github.com/PicPeak/picpeak/commit/c2cd8ec17e136da65a289192d5ee043dbba98eb6))
+* **gallery:** hold guest uploads until they are approved ([#1949](https://github.com/PicPeak/picpeak/issues/1949)) ([e8088a2](https://github.com/PicPeak/picpeak/commit/e8088a26786ff75b7a4b447826ca0d2421bd4d81))
+* **gallery:** keep prepared downloads longer and mail when one is ready ([#1951](https://github.com/PicPeak/picpeak/issues/1951)) ([7b21e2f](https://github.com/PicPeak/picpeak/commit/7b21e2f5231f2f48b4bc2cda4e82a1bb5bca3f6c))
+* **gallery:** let guests draw on a photo with their comment ([#1963](https://github.com/PicPeak/picpeak/issues/1963)) ([024e16a](https://github.com/PicPeak/picpeak/commit/024e16a8da645989c61400ea3151cbbdee6df1ba))
+* **gallery:** list the selected photos in the sidebar with a remove button each ([#1943](https://github.com/PicPeak/picpeak/issues/1943)) ([2b3728d](https://github.com/PicPeak/picpeak/commit/2b3728d4696bc4240293dbbd35116720bcb7b841))
+* **gallery:** optional downscale of guest uploads in the browser ([#1947](https://github.com/PicPeak/picpeak/issues/1947)) ([a1291c9](https://github.com/PicPeak/picpeak/commit/a1291c9adebe0e3aca66d25502a2a80433a038d6))
+* **gallery:** rate the selected photos in one request ([#1944](https://github.com/PicPeak/picpeak/issues/1944)) ([03a4f0b](https://github.com/PicPeak/picpeak/commit/03a4f0b1225ff31e919857bb150b470f477a806a))
+* **gallery:** selection counter, Finish selection and Approve edited photos ([#1960](https://github.com/PicPeak/picpeak/issues/1960)) ([c505334](https://github.com/PicPeak/picpeak/commit/c5053343ee528a1a81fe98ffe17cf18f024e8b25))
+* **gallery:** show camera, lens and exposure from EXIF ([#1948](https://github.com/PicPeak/picpeak/issues/1948)) ([4d2c331](https://github.com/PicPeak/picpeak/commit/4d2c3312717073cdc38c52fdb9bb175a8f0f4263))
+* **gallery:** tell an open gallery that new photos arrived ([#1946](https://github.com/PicPeak/picpeak/issues/1946)) ([b75f7cd](https://github.com/PicPeak/picpeak/commit/b75f7cd5968584a63f699dc0cabaf97fa4f2fe52))
+* **gallery:** tile feedback actions in the rows, flickr and quilted masonry modes ([#1942](https://github.com/PicPeak/picpeak/issues/1942)) ([362224e](https://github.com/PicPeak/picpeak/commit/362224e6d3491fddda4ed03cb08fd6dabfbec1db))
+* **gallery:** zoom to original pixels where the viewer may download the original ([#1958](https://github.com/PicPeak/picpeak/issues/1958)) ([d5473ce](https://github.com/PicPeak/picpeak/commit/d5473ce03685b7b52a6bf8ea7f66453c41826fa7))
+* **upload:** recognise a file the gallery already holds by its content hash ([#1950](https://github.com/PicPeak/picpeak/issues/1950)) ([9993a48](https://github.com/PicPeak/picpeak/commit/9993a48b0d016585b18a2c7d256deb2a024977a1))
+
+
+### Bug Fixes
+
+* **dates:** read SQLite's zone-less default timestamps as UTC in the date hook ([#1940](https://github.com/PicPeak/picpeak/issues/1940)) ([2a8ccd3](https://github.com/PicPeak/picpeak/commit/2a8ccd3de57adca28a9304ccefcfdf0f23ae02b1))
+* **gallery:** ask for a preview again after a 503 instead of keeping the thumbnail ([#1938](https://github.com/PicPeak/picpeak/issues/1938)) ([6bcd6e0](https://github.com/PicPeak/picpeak/commit/6bcd6e08781c1d71e8efb882b6436d7c08d82c53))
+* **gallery:** render the justified layout mode as rows and remove the unreachable Justified layout ([#1967](https://github.com/PicPeak/picpeak/issues/1967)) ([d94cd58](https://github.com/PicPeak/picpeak/commit/d94cd589d2a72e06249e7c7233f852c36ecfd521))
+* **security:** expenses and incoming invoices follow the per-admin owner rule ([#1934](https://github.com/PicPeak/picpeak/issues/1934)) ([f7bed81](https://github.com/PicPeak/picpeak/commit/f7bed81d2b4806308f992870cda349e663790d7c))
+* **upload:** say how many files a folder held when it exceeds the per-upload cap ([#1945](https://github.com/PicPeak/picpeak/issues/1945)) ([e25edd7](https://github.com/PicPeak/picpeak/commit/e25edd789856bace718b7ab99d4726c89f8cf395))
+
+
+### Performance Improvements
+
+* **gallery:** window the Masonry rows layout in large galleries ([#1955](https://github.com/PicPeak/picpeak/issues/1955)) ([381952d](https://github.com/PicPeak/picpeak/commit/381952d25662dca8c0e5bb9b0be0cdd8a74d6e93))
+
+## [3.170.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.169.1-beta.0...v3.170.0-beta.0) (2026-10-13)
+
+
+### Features
+
+* **watcher:** import camera RAW dropped into the watch folder ([#1968](https://github.com/PicPeak/picpeak/issues/1968)) ([ca9c4f5](https://github.com/PicPeak/picpeak/commit/ca9c4f5a96a29d039a069933e50bb48facd6919c))
+
+
+### Bug Fixes
+
+* date fields (own calendar, in-place edit, local today), gallery polish and the folder follow-ups from 1826 ([#1931](https://github.com/PicPeak/picpeak/issues/1931)) ([5ed73f4](https://github.com/PicPeak/picpeak/commit/5ed73f434ac694c51c7bf24de83d999b8371c661))
+* **workflows:** send an invoice once, close a booking gate the admin handled by hand ([#1982](https://github.com/PicPeak/picpeak/issues/1982)) ([b150b49](https://github.com/PicPeak/picpeak/commit/b150b4920cc4fa92b5aa94da061662a7aa5f9b45))
+
+## [3.169.1-beta.0](https://github.com/PicPeak/picpeak/compare/v3.169.0-beta.0...v3.169.1-beta.0) (2026-10-13)
+
+
+### Bug Fixes
+
+* **ui:** admin tabs leave Alt / Cmd / Ctrl + arrow keys to the browser ([b8899aa](https://github.com/PicPeak/picpeak/commit/b8899aaabd376936a3b0f8261814993a1bdd195c))
+* **ui:** admin tabs leave Alt / Cmd / Ctrl + arrow keys to the browser ([a6c5867](https://github.com/PicPeak/picpeak/commit/a6c5867da5508ab66f52ddceb9a45484618cd3a3))
+
+## [3.169.0-beta.0](https://github.com/PicPeak/picpeak/compare/v3.168.3-beta.0...v3.169.0-beta.0) (2026-10-12)
+
+
+### Features
+
+* **analytics:** let the operator decide whether Do Not Track visitors are counted ([#1927](https://github.com/PicPeak/picpeak/issues/1927)) ([355ae7e](https://github.com/PicPeak/picpeak/commit/355ae7ea8c305388938813fe5069bbcb109dd794))
+* **transfers:** configurable files-per-upload limit, global default and per-request override ([#1929](https://github.com/PicPeak/picpeak/issues/1929)) ([e2e1383](https://github.com/PicPeak/picpeak/commit/e2e1383b07fb65308ec39ea8ce6610a1566385d6))
+* **transfers:** download everything a client sent through a file request as one ZIP ([#1928](https://github.com/PicPeak/picpeak/issues/1928)) ([a1d5596](https://github.com/PicPeak/picpeak/commit/a1d55966f3626f4158a443c83678982a89c08750))
+
+
+### Bug Fixes
+
+* **analytics:** say in the settings that opted-out browsers are not counted ([#1919](https://github.com/PicPeak/picpeak/issues/1919)) ([90d5c05](https://github.com/PicPeak/picpeak/commit/90d5c056841e514cb26656dbee1d1360503f9d1e))
+* **gallery:** give a verified viewer a request budget of their own, and say when a like is refused ([#1925](https://github.com/PicPeak/picpeak/issues/1925)) ([d9f49d4](https://github.com/PicPeak/picpeak/commit/d9f49d46e1356428df5d4b90242c970c2fe75892))
+* **gallery:** refresh only the liked photo instead of refetching the whole gallery ([#1917](https://github.com/PicPeak/picpeak/issues/1917)) ([477f1d3](https://github.com/PicPeak/picpeak/commit/477f1d35066f513108b879c9be506e9c7e12bcbe))
+* **seo:** app pages answer noindex so only the landing page can be indexed ([#1922](https://github.com/PicPeak/picpeak/issues/1922)) ([676aa3c](https://github.com/PicPeak/picpeak/commit/676aa3c030ef806f0bc7601f402922dca4e0fc97))
+
 ## [3.168.3-beta.0](https://github.com/PicPeak/picpeak/compare/v3.168.2-beta.0...v3.168.3-beta.0) (2026-10-11)
 
 

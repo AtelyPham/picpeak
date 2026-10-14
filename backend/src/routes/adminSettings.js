@@ -153,6 +153,9 @@ const TRACKER_CODE_KEYS = new Set([
   'analytics_umami_url',
   'analytics_rybbit_url',
   'analytics_custom_head_html',
+  // Decides whether visitors who sent Do Not Track are counted (issue 1921):
+  // the same kind of decision as where the events go.
+  'analytics_honor_do_not_track',
 ]);
 const parseStoredSetting = (row) => {
   if (!row) return undefined;
@@ -167,6 +170,7 @@ const effectiveMissingSetting = async (key) => {
     return umami === true || umami === 'true' ? 'umami' : 'none';
   }
   if (key === 'analytics_umami_enabled') return false;
+  if (key === 'analytics_honor_do_not_track') return true;
   return null;
 };
 // A rule names either the owning `perm`, or `superAdmin: true` when the key is
@@ -231,6 +235,15 @@ const rejectUnauthorizedProtectedKeys = async (settings, req, res) => {
       error: 'Custom analytics scripts are no longer supported; choose Umami, Rybbit or none',
       code: 'CUSTOM_ANALYTICS_DISABLED',
     });
+    return true;
+  }
+  // Also shared by every generic writer, so the stored value has one shape
+  // whichever endpoint wrote it: a strict boolean (issue 1921). The client
+  // reads it through the public settings and the relay reads it directly;
+  // a string would let the two disagree about who is counted.
+  if (Object.hasOwn(settings, 'analytics_honor_do_not_track')
+    && typeof settings.analytics_honor_do_not_track !== 'boolean') {
+    res.status(400).json({ error: 'analytics_honor_do_not_track must be true or false', code: 'BAD_BOOLEAN' });
     return true;
   }
   return false;
@@ -684,6 +697,7 @@ router.get('/transfers',
         accept_all: policy.acceptAll,
         allowed_types: policy.allowedTypes,
         max_size_mb: policy.maxSizeMb,
+        max_files: policy.maxFiles,
       });
     } catch (error) {
       errorResponse(res, error, 500, 'Failed to load transfer settings');
@@ -696,7 +710,7 @@ router.put('/transfers',
   requireFlag('transfers'),
   async (req, res) => {
     try {
-      const { normalizeAllowedTypes } = require('../services/transferUploadPolicy');
+      const { normalizeAllowedTypes, normalizeMaxFiles, MAX_FILES_CEILING } = require('../services/transferUploadPolicy');
       const has = (k) => Object.prototype.hasOwnProperty.call(req.body, k);
 
       // Validate EVERY field before writing any of them. Interleaving the two
@@ -732,6 +746,19 @@ router.put('/transfers',
           return res.status(400).json({ error: 'Maximum file size must be between 1 and 100000 MB', code: 'BAD_SIZE' });
         }
         writes.push(['transfer_max_upload_size_mb', JSON.stringify(mb), 'number']);
+      }
+
+      // The default number of files per upload round (issue 1914); a file
+      // request can carry its own value.
+      if (has('max_files')) {
+        const files = normalizeMaxFiles(req.body.max_files);
+        if (!files) {
+          return res.status(400).json({
+            error: `Maximum files per upload must be a whole number between 1 and ${MAX_FILES_CEILING}`,
+            code: 'BAD_FILE_COUNT',
+          });
+        }
+        writes.push(['transfer_upload_max_files', JSON.stringify(files), 'number']);
       }
 
       const updated = [];
@@ -772,7 +799,7 @@ router.get('/downloads', adminAuth, requirePermission('settings.view'), async (r
 router.put('/downloads', adminAuth, requirePermission('settings.edit'), async (req, res) => {
   try {
     const {
-      invalidateDownloadGlobals, getDownloadGlobals, ORIGINAL,
+      invalidateDownloadGlobals, getDownloadGlobals, ORIGINAL, JOB_RETENTION_HOURS, parseJobRetentionHours,
     } = require('../utils/downloadResolutions');
     const has = (k) => Object.prototype.hasOwnProperty.call(req.body, k);
     const updates = [];
@@ -828,6 +855,17 @@ router.put('/downloads', adminAuth, requirePermission('settings.edit'), async (r
     }
     if (has('download_allow_original')) {
       push('download_allow_original', !!req.body.download_allow_original);
+    }
+    // How long a prepared archive is kept (issue 1733). Refused rather than
+    // clamped: a typo must not quietly become a week of archives on disk.
+    if (has('download_job_retention_hours')) {
+      const hours = parseJobRetentionHours(req.body.download_job_retention_hours);
+      if (hours === null) {
+        return res.status(400).json({
+          error: `download_job_retention_hours must be a whole number between ${JOB_RETENTION_HOURS.min} and ${JOB_RETENTION_HOURS.max}`,
+        });
+      }
+      push('download_job_retention_hours', hours);
     }
 
     for (const u of updates) {
@@ -1808,10 +1846,27 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
       settings.general_max_video_size_mb = normalizedValue;
     }
 
+    // Photo trash retention in days (issue 1733); 0 deletes photos at once.
+    if (Object.prototype.hasOwnProperty.call(settings, 'general_photo_trash_retention_days')) {
+      const { MAX_RETENTION_DAYS } = require('../services/photoTrash');
+      const days = Number(settings.general_photo_trash_retention_days);
+      if (!Number.isInteger(days) || days < 0 || days > MAX_RETENTION_DAYS) {
+        return res.status(400).json({
+          error: `general_photo_trash_retention_days must be an integer between 0 and ${MAX_RETENTION_DAYS}`
+        });
+      }
+      settings.general_photo_trash_retention_days = days;
+    }
+
     // Browser-playable video copies (issue 1430, item 8): a plain boolean.
     if (Object.prototype.hasOwnProperty.call(settings, 'general_video_web_rendition')) {
       const raw = settings.general_video_web_rendition;
       settings.general_video_web_rendition = raw === true || raw === 'true' || raw === 1 || raw === '1';
+    }
+    // Adaptive video streaming (issue 1733): a plain boolean too.
+    if (Object.prototype.hasOwnProperty.call(settings, 'general_video_adaptive_streaming')) {
+      const raw = settings.general_video_adaptive_streaming;
+      settings.general_video_adaptive_streaming = raw === true || raw === 'true' || raw === 1 || raw === '1';
     }
 
     // Default download limit for new events (issue 1560). Empty, 0 or null
@@ -1957,6 +2012,16 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
         } catch (e) {
           logger.warn('videoRendition: failed to queue existing videos:', e.message);
         }
+      }
+    }
+    // Adaptive streaming: the queue marks the videos nobody has looked at by
+    // itself; switching it on also gives the failed ones another try.
+    if (Object.prototype.hasOwnProperty.call(settings, 'general_video_adaptive_streaming')) {
+      const videoHls = require('../services/videoHlsService');
+      videoHls.clearCache();
+      if (settings.general_video_adaptive_streaming) {
+        await videoHls.queuePending({ retryFailed: true })
+          .catch(e => logger.warn('videoHls: failed to queue existing videos:', e.message));
       }
     }
     // The public origin is cached (it now sits in per-request CORS paths and

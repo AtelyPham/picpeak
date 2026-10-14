@@ -149,8 +149,10 @@ async function isAuthenticated(req) {
 
 // The routes a gallery viewer fetches once per tile: thumbnail, preview,
 // hero, photo. Downloads, the photo list, feedback and everything else stay
-// on the budget.
-const GALLERY_IMAGE_RE = /^\/api\/gallery\/([^/]+)\/(thumbnail|preview|hero|photo)\/[^/]+$/i;
+// on the budget. An adaptive stream (issue 1733) is one video fetched as a
+// playlist and a segment every six seconds: the same playback the photo
+// route serves in one request, so it is exempt the same way.
+const GALLERY_IMAGE_RE = /^\/api\/gallery\/([^/]+)\/(?:(?:thumbnail|preview|hero|photo)\/[^/]+|hls\/\d+\/(?:master\.m3u8|[^/]+\/[^/]+))$/i;
 
 /**
  * A verified gallery viewer fetching that gallery's own images (#1287).
@@ -174,8 +176,11 @@ const GALLERY_IMAGE_RE = /^\/api\/gallery\/([^/]+)\/(thumbnail|preview|hero|phot
 function isOwnGalleryImageRequest(req) {
   if (req.method && req.method !== 'GET') return false;
   const match = (req.path || '').match(GALLERY_IMAGE_RE);
-  if (!match) return false;
-  const slug = match[1];
+  return Boolean(match) && hasOwnGalleryToken(req, match[1]);
+}
+
+/** A gallery token that verifies and names `slug`. */
+function hasOwnGalleryToken(req, slug) {
   try {
     const token = getGalleryTokenFromRequest(req, slug);
     if (!token) return false;
@@ -185,6 +190,52 @@ function isOwnGalleryImageRequest(req) {
   } catch (error) {
     return false;
   }
+}
+
+// What a viewer's browser asks for while they look through a gallery and pick
+// photos: the photo list, per-photo feedback (reads and writes), the bulk
+// rating of a selection, their own picks, the gallery's info, and the view
+// beacon the lightbox posts for every slide. Downloads, uploads and the
+// password check are not in the list and stay on the ordinary budget.
+const GALLERY_VIEWER_RE = /^\/api\/gallery\/([^/]+)\/(?:(?:photos|my-feedback|feedback-summary|feedback-settings|info|stats|people)(?:\/|$)|photo\/[^/]+\/view\/?$|feedback\/bulk\/?$)/i;
+const GALLERY_VIEWER_BUDGET_FACTOR = 10;
+// The live-refresh poll (issue 1733, C5) counts in a bucket of its own, the
+// same size: every open tab behind one address polls every 20 seconds, and in
+// the viewer bucket a full venue on one WiFi address spent the budget that
+// likes and reloads need. Here an exhausted budget only slows the polling.
+const GALLERY_POLL_RE = /^\/api\/gallery\/[^/]+\/photos\/state\/?$/i;
+
+/**
+ * A verified gallery viewer working in that gallery (issue 1891).
+ *
+ * The lightbox reads one photo's feedback per slide and a like is a write
+ * plus a read, so one guest choosing from a 1,500-photo gallery spends the
+ * default 300 requests per 15 minutes on their own. After that every request
+ * answers 429 until the window ends, the next like and the next sign-in
+ * included, and the guest sees a heart that does nothing.
+ *
+ * Unlike the image routes these include writes, so they are not exempt: they
+ * count against a budget of their own, GALLERY_VIEWER_BUDGET_FACTOR times
+ * rate_limit_max_requests, in a bucket of their own (the limiter's keyGenerator). The
+ * per-action limits in feedbackRateLimit.js stay the real guard on writes.
+ * Same token and slug rule as isOwnGalleryImageRequest. Memoized: the limiter
+ * asks twice per request.
+ */
+function isOwnGalleryViewerRequest(req) {
+  if (req.ownGalleryViewerRequest === undefined) {
+    const match = (req.path || '').match(GALLERY_VIEWER_RE);
+    req.ownGalleryViewerRequest = Boolean(match) && hasOwnGalleryToken(req, match[1]);
+  }
+  return req.ownGalleryViewerRequest;
+}
+
+/**
+ * Whether this request counts against the viewer budget. Rides on the same
+ * switch as the image exemption: with skip_authenticated off, a guest's
+ * requests are ordinary requests again.
+ */
+function usesGalleryViewerBudget(req, config) {
+  return Boolean(config.skipAuthenticated) && isOwnGalleryViewerRequest(req);
 }
 
 /**
@@ -238,9 +289,21 @@ async function createRateLimiter(store = new MemoryStore()) {
       
       // Different limits for auth endpoints
       const isAuthEndpoint = req.path.match(/\/(auth|login|gallery\/[^/]+\/verify)$/);
-      return isAuthEndpoint ? currentConfig.authMaxRequests : currentConfig.maxRequests;
+      if (isAuthEndpoint) return currentConfig.authMaxRequests;
+      return usesGalleryViewerBudget(req, currentConfig)
+        ? currentConfig.maxRequests * GALLERY_VIEWER_BUDGET_FACTOR
+        : currentConfig.maxRequests;
     },
-    keyGenerator: rateLimitKey,
+    // A bucket of its own, or the viewer budget would be spent by the
+    // anonymous requests of everyone else behind the same address.
+    keyGenerator: async (req) => {
+      const key = usesGalleryViewerBudget(req, await getRateLimitSettings())
+        ? `${GALLERY_POLL_RE.test(req.path || '') ? 'gallery-poll' : 'gallery-viewer'}:${rateLimitKey(req)}` : rateLimitKey(req);
+      // Only a counted request gets here, and this is what it was counted
+      // under: refundRateLimit gives exactly that back.
+      req.rateLimitRefund = () => store.decrement(key);
+      return key;
+    },
     skip: async (req) => {
       const currentConfig = await getRateLimitSettings();
       return await shouldSkipRateLimit(req, currentConfig);
@@ -374,6 +437,23 @@ async function initializeRateLimiters() {
   return current;
 }
 
+/**
+ * Give a counted request its slot back. For a route whose one user action is
+ * many requests and that has just authorised this one itself: a segment of
+ * an adaptive video stream (issue 1733) is fetched every six seconds, by
+ * viewers of a public gallery too, who carry no token the limiter could have
+ * skipped on. The limiter still counts first, so a request the route refuses
+ * (wrong gallery, hidden photo, bad name) is never refunded, and an address
+ * already over its budget is stopped before it gets here. Once per request;
+ * a no-op for a request the limiter skipped or never saw.
+ */
+function refundRateLimit(req) {
+  const refund = req.rateLimitRefund;
+  if (!refund) return;
+  req.rateLimitRefund = null;
+  Promise.resolve().then(refund).catch((error) => logger.warn('Rate limit refund failed', { error: error.message }));
+}
+
 const getGeneralLimiter = () => current.general;
 const getAuthLimiter = () => current.auth;
 
@@ -388,5 +468,8 @@ module.exports = {
   createAuthRateLimiter,
   isAuthenticated,
   isOwnGalleryImageRequest,
-  shouldSkipRateLimit
+  isOwnGalleryViewerRequest,
+  GALLERY_VIEWER_BUDGET_FACTOR,
+  shouldSkipRateLimit,
+  refundRateLimit
 };

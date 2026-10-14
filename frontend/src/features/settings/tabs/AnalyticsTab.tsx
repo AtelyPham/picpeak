@@ -32,7 +32,48 @@ const ProxiedNotice: React.FC = () => {
         'settings.analytics.proxiedNoticeText',
         'PicPeak forwards sanitized page views and gallery events without loading third-party code. The collector receives visitor IP and user agent, but no query strings, page titles, referrers, tokens or account identifiers. Production collectors must use HTTPS.',
       )}
+      {/* Easy to mistake for broken analytics after an upgrade (issue 1910). */}
+      <p className="mt-2">
+        {t(
+          'settings.analytics.privacySignalsText',
+          'Visitors whose browser sends Global Privacy Control (Brave and Firefox can) are never counted: no event leaves their browser. Do Not Track is treated the same way unless you switch that off above.',
+        )}
+      </p>
     </Notice>
+  );
+};
+
+type AnalyticsSettingsSetter = React.Dispatch<React.SetStateAction<AnalyticsSettings>>;
+
+/** Whether a visitor who sent Do Not Track is counted (issue 1921). */
+const DoNotTrackSetting: React.FC<{ value: boolean; onChange: AnalyticsSettingsSetter }> = ({ value, onChange }) => {
+  const { t } = useTranslation();
+
+  return (
+    <label className="flex items-start gap-3 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={value}
+        onChange={(e) => {
+          // Read now: the updater runs later, after React has put the
+          // controlled box back to its old state.
+          const checked = e.target.checked;
+          onChange((prev) => ({ ...prev, honor_do_not_track: checked }));
+        }}
+        className="w-4 h-4 mt-0.5 text-accent rounded focus:ring-accent"
+      />
+      <div>
+        <span className="text-sm font-medium text-body">
+          {t('settings.analytics.honorDoNotTrack', 'Honour Do Not Track')}
+        </span>
+        <p className="text-sm text-muted mt-0.5">
+          {t(
+            'settings.analytics.honorDoNotTrackHelp',
+            'On by default: a visitor whose browser sends Do Not Track is not counted. Switch it off to count them, for example for invite-only galleries; you are then responsible for the legal basis. Global Privacy Control is always honoured.',
+          )}
+        </p>
+      </div>
+    </label>
   );
 };
 
@@ -153,6 +194,8 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
               </p>
             </div>
 
+            <DoNotTrackSetting value={analyticsSettings.honor_do_not_track} onChange={setAnalyticsSettings} />
+
             <ProxiedNotice />
           </div>
         )}
@@ -217,6 +260,8 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({
                 )}
               </p>
             </div>
+
+            <DoNotTrackSetting value={analyticsSettings.honor_do_not_track} onChange={setAnalyticsSettings} />
 
             <ProxiedNotice />
           </div>

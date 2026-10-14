@@ -48,11 +48,16 @@ export interface Event {
   // see the names. SQLite hands the flag back as 0/1.
   guest_name_mode?: GuestNameMode;
   show_credits_to_guests?: boolean | number;
+  // Live refresh of an open gallery (issue 1733, C5)
+  live_refresh?: boolean | number;
+  // Camera details in the guest lightbox (issue 1733, D1).
+  show_exif_to_guests?: boolean | number;
   // Reveal mode (#838)
   reveal_mode?: boolean;
   reveal_at?: string | null;
   revealed_at?: string | null;
   upload_category_id?: number | null;
+  guest_upload_max_edge?: number | null;
   hero_photo_id?: number | null;
   total_views?: number;
   total_downloads?: number;
@@ -127,6 +132,8 @@ export interface Event {
   can_link_crm?: boolean;
   can_review_uploads?: boolean;
   review_contributor_uploads?: boolean | number;
+  // Guest uploads wait for approval the same way (issue 1733).
+  moderate_guest_uploads?: boolean | number;
   // Live Slideshow / "Diashow" (migration 138). Token-only fullscreen kiosk
   // link minted on demand; null token = disabled. Settings drive the running
   // projector and can be changed live.
@@ -198,6 +205,20 @@ export interface GalleryPeopleResponse {
   };
 }
 
+/** Camera details read from EXIF (issue 1733, D1). Every field is optional. */
+export interface PhotoExif {
+  make?: string;
+  model?: string;
+  lens?: string;
+  /** Millimetres. */
+  focal_length?: number;
+  /** The f-number. */
+  aperture?: number;
+  /** Seconds. */
+  exposure_time?: number;
+  iso?: number;
+}
+
 export interface Photo {
   id: number;
   filename: string;
@@ -210,6 +231,10 @@ export interface Photo {
   source_filename?: string | null;
   url: string;
   thumbnail_url?: string;
+  // Blurred tile placeholder (issue 1733): a base64 ThumbHash of the
+  // thumbnail, painted behind the tile while it loads. Null for photos
+  // processed before the column existed and not backfilled.
+  thumb_hash?: string | null;
   hero_url?: string; // Hero-optimized image URL (1920x1080) for full-width hero sections
   // Lightbox preview URL (#492). Set only when the admin has flipped
   // lightbox_preview_enabled in Settings → Thumbnails. Aspect-preserved
@@ -224,6 +249,10 @@ export interface Photo {
   // the same /preview/:id URL, so an install that never flipped the toggle
   // stops serving multi-megabyte originals to display a photo on screen.
   slideshow_url?: string | null;
+  // Where the lightbox may load the untouched original once the viewer zooms
+  // past fit (issue 1733). Null unless this viewer could download exactly
+  // that file anyway; the route decides again on every request.
+  full_resolution_url?: string | null;
   type: 'collage' | 'individual' | 'video';
   // Filter category (Portraits, Ceremony …). Since migration 265 never a
   // folder: folders live in folder_id.
@@ -250,11 +279,17 @@ export interface Photo {
   // filtered out server-side, so this never reveals a person the
   // photographer suppressed.
   person_ids?: number[];
+  // Scene tags of this photo (issue 1733), best first. Present only while
+  // tagging is on for the gallery (GalleryData.event.tags_enabled).
+  tag_keys?: string[];
   // Photo credit (#1561). Present only when the viewer may see names
   // (GalleryData.event.credits_visible). `uploaded_by_guest` tells a nameless
   // guest upload apart from the photographer's own photos.
   credit_name?: string | null;
   uploaded_by_guest?: boolean;
+  // Camera details (issue 1733, D1). The key is present only when the
+  // gallery shows them to guests; null when the photo carries none.
+  exif?: PhotoExif | null;
   size: number;
   uploaded_at: string;
   captured_at?: string; // EXIF capture date (if available)
@@ -262,6 +297,8 @@ export interface Photo {
   media_type?: 'photo' | 'video' | 'image';
   mime_type?: string;
   duration?: number; // Duration in seconds for videos
+  /** Adaptive stream (HLS master playlist) when one exists and playing it is free for this viewer. */
+  hls_url?: string | null;
   video_codec?: string;
   audio_codec?: string;
   width?: number;
@@ -323,6 +360,16 @@ export interface DownloadJobState {
   error?: string;
   /** Set on a ready job the download limit would now refuse (issue 1560). */
   download_limit_reached?: { limit?: number; used?: number; remaining?: number };
+  /**
+   * "Email me when it is ready" (issue 1733). Present only while the job is
+   * being prepared and the server holds an address for this visitor.
+   */
+  notify?: 'available' | 'requested';
+  /**
+   * A ready job the server would no longer hand over (past its retention, or
+   * the gallery changed since) that the sweep has not removed yet.
+   */
+  unavailable?: boolean;
 }
 
 export interface PhotoCategory {
@@ -413,6 +460,8 @@ export interface GalleryData {
     hero_image_anchor?: string;
     // Default photo sort order
     default_photo_sort?: string;
+    // Live refresh (issue 1733, C5): poll /photos/state for new photos.
+    live_refresh?: boolean;
     // Mirror of admin's `general_use_original_filenames_for_downloads`.
     // When true, the lightbox surfaces each photo's `original_filename`
     // alongside the position counter (#508).
@@ -422,12 +471,20 @@ export interface GalleryData {
     // chose to keep the people strip to themselves. The whole face UI hangs
     // off this one boolean.
     people_enabled?: boolean;
+    // Automatic scene tags (issue 1733): the feature flag and the gallery's
+    // own switch are both on.
+    tags_enabled?: boolean;
     // Uploader names (#1561). guest_name_mode drives the upload dialog's name
     // step; credits_visible says whether photos carry credit_name at all.
     guest_name_mode?: GuestNameMode;
     credits_visible?: boolean;
+    // Longest edge guest photos are scaled to before upload (issue 1733).
+    guest_upload_max_edge?: number | null;
   };
   categories?: PhotoCategory[];
+  // Tags in use among the photos this viewer may see, most used first
+  // (issue 1733). Absent while tagging is off for the gallery.
+  tags?: Array<{ key: string; count: number }>;
   photos: Photo[];
   // Reveal mode (#838): the server returns the event shell with photos: []
   // and this flag while the gallery is hidden from guests.
@@ -491,6 +548,8 @@ export interface LoginResponse {
 export interface MfaChallengeResponse {
   mfaRequired: true;
   mfaToken: string;
+  // The account has a passkey that can stand in for the code (issue 1733).
+  passkeyAvailable?: boolean;
 }
 
 export type AdminLoginResponse = LoginResponse | MfaChallengeResponse;

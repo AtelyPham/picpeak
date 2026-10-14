@@ -72,6 +72,7 @@ export interface PublicSettings {
   // Pluggable trackers (#663 Phase 1). Only the provider is public; a
   // missing value falls back to the legacy umami_enabled flag.
   analytics_tracker_provider?: 'none' | 'umami' | 'rybbit';
+  analytics_honor_do_not_track?: boolean;
   // Deprecated compatibility field: always empty; custom scripts are disabled.
   analytics_custom_head_html?: string;
   // Upload settings
@@ -116,6 +117,11 @@ export interface PublicSettings {
   oidc_button_label?: string;
   /** Effective flag (phase 2): the API refuses password logins right now. */
   oidc_local_login_disabled?: boolean;
+  /**
+   * Passkey login (issue 1733): the origin passkeys are bound to, or null when
+   * the login page should not offer one. Compare with window.location.origin.
+   */
+  passkey_origin?: string | null;
 }
 
 export const publicSettingsService = {

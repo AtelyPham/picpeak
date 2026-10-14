@@ -210,6 +210,37 @@ describe('settings protected-key boundary (/general)', () => {
     expect(await readSetting('analytics_umami_website_id')).toBe('site-2');
   });
 
+  // Whether visitors who sent Do Not Track are counted (issue 1921) is the
+  // same kind of decision as where the events go: super admin only, strictly
+  // boolean, and "on" while nothing is stored, so the tab's unchanged save
+  // passes for everyone.
+  it('only a super admin switches Do Not Track off, and only with a boolean', async () => {
+    const put = (tok, value) => auth(request(app).put('/api/admin/settings/analytics'), tok)
+      .send({ analytics_honor_do_not_track: value });
+    expect((await put(mgrTok, true)).status).toBe(200);
+    const denied = await put(mgrTok, false);
+    expect(denied.status).toBe(403);
+    expect(denied.body.keys.map((k) => k.key)).toEqual(['analytics_honor_do_not_track']);
+    expect(await readSetting('analytics_honor_do_not_track')).toBeUndefined();
+
+    // Every generic writer refuses a non-boolean, so the client (public
+    // settings) and the relay can never read the stored value differently.
+    for (const endpoint of ['analytics', 'general', 'seo', 'security']) {
+      for (const bad of ['false', 'true', 0, null]) {
+        const res = await auth(request(app).put(`/api/admin/settings/${endpoint}`), superTok)
+          .send({ analytics_honor_do_not_track: bad });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('BAD_BOOLEAN');
+      }
+    }
+    expect(await readSetting('analytics_honor_do_not_track')).toBeUndefined();
+    expect((await put(superTok, false)).status).toBe(200);
+    expect(await readSetting('analytics_honor_do_not_track')).toBe(false);
+    // Unchanged for the delegated role again, now against the stored value.
+    expect((await put(mgrTok, false)).status).toBe(200);
+    expect((await put(superTok, true)).status).toBe(200);
+  });
+
   it('super_admin can change the tracker URL', async () => {
     const res = await auth(request(app).put('/api/admin/settings/analytics'), superTok)
       .send({ analytics_tracker_provider: 'umami', analytics_umami_url: 'https://tracker.example' });
