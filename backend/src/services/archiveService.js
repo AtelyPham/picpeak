@@ -303,6 +303,16 @@ async function archiveEvent(event) {
       );
     }
 
+    // The loop above took the download zips under .download-cache/ with it,
+    // so drop the records that still point at them. A ready job left behind
+    // is reused after a restore and answers with a missing file until it
+    // expires. The sweep removes it now: an archived gallery's jobs count as
+    // undeliverable. cleanup() also cancels a "Download all" build in flight.
+    await require('./downloadZipService').cleanup(event.id);
+    await require('./downloadJobService').sweepExpired().catch((err) =>
+      logger.warn(`Failed to sweep download jobs for archived event ${event.slug}: ${err.message}`)
+    );
+
     // Delete derived images (thumbnails / heroes / previews / watermarks)
     // for this event's photos. The originals are inside the zip; the
     // derived tiers are throwaway and will be regenerated lazily on
