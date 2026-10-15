@@ -33,7 +33,9 @@ const {
 // A process that dies stops renewing, and the gallery is free again once the
 // lease goes stale (maintenanceJobState.DEFAULT_STALE_MS); a fixed timeout
 // would have to outlast the slowest archive on the slowest storage instead.
-const archiveJobName = (eventId) => `event_archive:${eventId}`;
+// archiveJobName, isZipKey, isExpiryAttempt and importArchiveRecords live in
+// archiveRecords.js: the restore worker loads that one without this service.
+const { archiveJobName, isZipKey, isExpiryAttempt, importArchiveRecords } = require('./archiveRecords');
 // How often the post-publish cleanup re-checks the claim (see buildArchive).
 const CLEANUP_CLAIM_CHECK_MS = 5000;
 // events.archive_path is 255 characters; `events/archived/<slug>-<12 hex>.zip`
@@ -137,11 +139,78 @@ async function recordSupersededArchive(lease, key, conn = db) {
   }
 }
 
-/** Zips restores brought back for this gallery, not yet removed. */
+
+/**
+ * Zips restores brought back for this gallery, not yet removed. Never one
+ * another gallery's archive_path names: that zip is its archive.
+ */
 async function supersededArchives(eventId) {
   const { superseded } = await readArchiveState(archiveJobName(eventId));
-  return Array.isArray(superseded) ? superseded.filter(isArchiveKey) : [];
+  const keys = Array.isArray(superseded) ? superseded.filter(isZipKey) : [];
+  if (!keys.length) return [];
+  const named = new Set(await db('events').whereIn('archive_path', keys).whereNot('id', eventId).pluck('archive_path'));
+  return keys.filter((key) => !named.has(key));
 }
+
+/**
+ * The zip a restore made before per-run keys left at the shared key
+ * `events/archived/<slug>.zip`. Nothing recorded it: the next archive of the
+ * slug used to overwrite it, and no longer does. Returned while no other
+ * gallery's archive_path names it (an archive made before per-run keys is
+ * still at such a key) and no other gallery's claim row records it; the
+ * gallery's own archive_path is removed with it anyway. A rename records it
+ * before the slug changes.
+ */
+async function legacyArchiveKeys(event) {
+  if (!event || typeof event.slug !== 'string' || !event.slug) return [];
+  const key = `events/archived/${event.slug}.zip`;
+  if (!isZipKey(key)) return [];
+  const named = await db('events').where('archive_path', key).whereNot('id', event.id).first('id');
+  if (named) return [];
+  // A gallery restored from it since per-run keys keeps it as its fallback,
+  // and can have been renamed and its slug reused since. Matched as the
+  // key's JSON text, the way last_result holds it.
+  const recorded = await db('maintenance_jobs')
+    .where('job_name', 'like', `${archiveJobName('')}%`)
+    .whereNot('job_name', archiveJobName(event.id))
+    .whereRaw('last_result LIKE ? ESCAPE \'!\'', [`%${JSON.stringify(key).slice(1, -1).replace(/[!%_]/g, (c) => `!${c}`)}%`])
+    .select('last_result');
+  const claimedElsewhere = recorded.some((row) => {
+    const state = parseArchiveState(row);
+    return state.upload === key || (Array.isArray(state.superseded) && state.superseded.includes(key));
+  });
+  return claimedElsewhere ? [] : [key];
+}
+
+
+/**
+ * The claim rows' records, per gallery, for a portable export:
+ * { "<eventId>": { superseded: [keys], expiry } }. maintenance_jobs is not
+ * exported (live lease state), but its superseded zips are, under
+ * events/archived, and these records are what removes them; an expiry
+ * attempt is what retries a failed expiry archive. An upload a run has not
+ * published (or died before publishing) goes with the superseded zips: on
+ * the target nothing runs it.
+ */
+async function exportArchiveRecords(conn = db) {
+  const rows = await conn('maintenance_jobs')
+    .where('job_name', 'like', `${archiveJobName('')}%`)
+    .whereNotNull('last_result')
+    .select('job_name', 'last_result');
+  const records = {};
+  for (const row of rows) {
+    const eventId = Number(row.job_name.slice(archiveJobName('').length));
+    if (!Number.isInteger(eventId) || eventId <= 0) continue;
+    const state = parseArchiveState(row);
+    const keys = [...(Array.isArray(state.superseded) ? state.superseded : []), state.upload].filter(isZipKey);
+    const record = {};
+    if (keys.length) record.superseded = [...new Set(keys)];
+    if (isExpiryAttempt(state.expiry)) record.expiry = state.expiry;
+    if (Object.keys(record).length) records[eventId] = record;
+  }
+  return records;
+}
+
 
 // The expiry checker's attempt to archive a gallery it deactivated, kept on
 // the same claim row (state key `expiry`: { attempts, at, expiresAt }) so a
@@ -202,12 +271,14 @@ async function removeAbandonedUpload(lease) {
 }
 
 /** After a publish: the gallery has a newer archive, the restored-from zips can go. */
-async function removeSupersededArchives(lease, publishedKey) {
+async function removeSupersededArchives(lease, publishedKey, event) {
   try {
     const state = await readOwnState(lease);
     if (!state) return;
     const kept = [];
-    for (const key of Array.isArray(state.superseded) ? state.superseded : []) {
+    const candidates = [...(Array.isArray(state.superseded) ? state.superseded : [])];
+    for (const key of await legacyArchiveKeys(event)) if (!candidates.includes(key)) candidates.push(key);
+    for (const key of candidates) {
       if (!isArchiveKey(key) || key === publishedKey) continue;
       if (await isReferenced(key)) continue;
       try {
@@ -525,7 +596,7 @@ async function buildArchive(event, lease) {
         .catch((err) => logger.warn(`Failed to remove the unpublished archive ${archiveRelKey}: ${err.message}`));
       throw new AppError('The archive claim was taken over', 409, 'ARCHIVE_IN_PROGRESS');
     }
-    await removeSupersededArchives(lease, archiveRelKey);
+    await removeSupersededArchives(lease, archiveRelKey, event);
 
     // The cleanup below deletes by key. A run that stalls past its lease
     // after publishing (a suspended process) can find the gallery restored
@@ -698,5 +769,6 @@ function convertToCSV(data) {
 
 module.exports = {
   archiveEvent, claimArchive, isArchiveRunning, recordSupersededArchive, supersededArchives,
+  legacyArchiveKeys, exportArchiveRecords, importArchiveRecords,
   expiryAttempts, readExpiryAttempt, writeExpiryAttempt,
 };
