@@ -32,7 +32,8 @@ jest.mock('../../src/database/db', () => {
             state.updates.push({ criteria, values });
             return 1;
           },
-          // withSourceVersion: these rows carry no recorded size.
+          // withSourceVersion: these rows carry no recorded size; and
+          // ownDerivativeName's lookup finds no camera-named photo.
           first: async () => undefined,
         }),
       };

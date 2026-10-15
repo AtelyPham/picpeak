@@ -34,7 +34,9 @@ jest.mock('../../src/database/db', () => {
         where: (criteria) => ({
           update: async (values) => { state.updates.push({ criteria, values }); return 1; },
           // By id, the row the test made (keepTierIfCurrent compares a fresh
-          // tier with it); withSourceVersion's size read finds no recorded size.
+          // tier with it; ownDerivativeName finds no source_filename on it, as
+          // for an uploaded photo); withSourceVersion's size read finds no
+          // recorded size.
           first: async (cols) => {
             if (cols === 'size_bytes') return undefined;
             return (criteria && criteria.id != null && state.photos[criteria.id]) || null;
