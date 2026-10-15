@@ -13,6 +13,7 @@ import 'yet-another-react-lightbox/styles.css';
 import 'yet-another-react-lightbox/plugins/thumbnails.css';
 import { ColorLabelBadge } from '../ColorLabelBadge';
 import { FirstLookBadge } from '../GalleryTileBadges';
+import { ClientVisibilityToggle, isHiddenFromGuests } from '../ClientVisibilityToggle';
 import 'yet-another-react-lightbox/plugins/captions.css';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Download as DownloadIcon, Heart, Check, Star, MessageSquare, Package, LogOut } from 'lucide-react';
@@ -65,6 +66,8 @@ interface PhotoCardProps {
   // an event can have feedback on but likes specifically disabled.
   allowLikes?: boolean;
   index: number;
+  /** The client's hide/show handler (issue 1992); set only for the client. */
+  onToggleVisibility?: (photoId: number, currentVisibility: string) => void;
 }
 
 const PhotoCard: React.FC<PhotoCardProps> = ({
@@ -80,7 +83,8 @@ const PhotoCard: React.FC<PhotoCardProps> = ({
   slug,
   feedbackEnabled = false,
   allowLikes = false,
-  index
+  index,
+  onToggleVisibility,
 }) => {
   // The height MasonryPhotoAlbum computed from photos.width/height is used,
   // not discarded (#1130). Letting the tile size itself from the image meant
@@ -130,17 +134,22 @@ const PhotoCard: React.FC<PhotoCardProps> = ({
         // finally apply and object-fit: cover crops a square rendition INTO
         // the correctly-shaped tile, rather than the rendition dictating the
         // tile's shape.
-        className="w-full h-full object-cover"
+        // Dimmed when the client hid it from guests, as in Grid (issue 1992).
+        // Important: `.gallery-premium-photo-card.selected img` sets its own
+        // opacity and would otherwise undim a hidden photo once selected.
+        className={`w-full h-full object-cover${onToggleVisibility && isHiddenFromGuests(photo) ? ' !opacity-40' : ''}`}
         loading="lazy"
         isGallery={true}
         slug={slug}
       />
 
-      {/* Colour label (#1044) — same badge every layout uses. */}
+      {/* Colour label (#1044) — same badge every layout uses. For the client
+          the dots move into the visibility toggle's row below. */}
       <ColorLabelBadge
         colorLabel={photo.my_color_label}
         otherColorLabels={photo.other_color_labels}
         decision={photo.my_decision}
+        part={onToggleVisibility ? 'ring' : undefined}
       />
 
       {/* Overlay Gradient */}
@@ -165,6 +174,22 @@ const PhotoCard: React.FC<PhotoCardProps> = ({
       >
         {isSelected && <Check className="w-3.5 h-3.5" strokeWidth={3} />}
       </button>
+
+      {/* The client's hide/show button (issue 1992), with the colour-label
+          dots beside it. The checkbox owns this card's top-left corner, so the
+          row sits right of it at the checkbox's height: a short panoramic tile
+          clipped anything placed below the checkbox. */}
+      {onToggleVisibility && (
+        <div className="absolute top-2 left-14 z-10 flex items-center gap-1.5">
+          <ClientVisibilityToggle photo={photo} onToggle={onToggleVisibility} />
+          <ColorLabelBadge
+            colorLabel={photo.my_color_label}
+            otherColorLabels={photo.other_color_labels}
+            decision={photo.my_decision}
+            part="dots"
+          />
+        </div>
+      )}
 
       {/* Like Button — #506: only when feedback master is on AND the
           per-event "allow likes" sub-toggle is on. */}
@@ -244,6 +269,8 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
   showOriginalFilename = false,
   openPhotoId,
   onLightboxPhotoChange,
+  isClient = false,
+  onToggleVisibility,
 }) => {
   // These props are passed by parent but we use our own lightbox, so mark as intentionally unused
   void _onPhotoClick;
@@ -783,6 +810,7 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
                   feedbackEnabled={feedbackEnabled}
                   allowLikes={!!feedbackOptions?.allowLikes}
                   index={photoIndex}
+                  onToggleVisibility={isClient ? onToggleVisibility : undefined}
                 />
               );
             }
