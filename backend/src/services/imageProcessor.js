@@ -430,6 +430,25 @@ async function withProcessableImage(localPath, sourceName) {
   return { path: previewPath, outputBasename: path.basename(sourceName), cleanup };
 }
 
+/**
+ * withProcessableImage for a file read straight off an external mount.
+ *
+ * A RAW whose preview cannot be extracted, gone from the mount included, is
+ * null, as generatePreviewImage and generateHeroImage answer for a JPG they
+ * cannot read. The face queue reads that null to tell a missing file from an
+ * unreachable mount and defers the event instead of failing the photo.
+ * A resource refusal still throws: it says "not now", not "not this file".
+ */
+async function externalProcessableImage(photo, localPath, sourceName, rendition) {
+  try {
+    return await withProcessableImage(localPath, sourceName);
+  } catch (error) {
+    if (isResourceError(error)) throw error;
+    logger.error(`Failed to extract the embedded preview for ${rendition} (photo ${photo.id}): ${error.message}`);
+    return null;
+  }
+}
+
 // Default thumbnail settings
 const DEFAULT_THUMBNAIL_WIDTH = 300;
 const DEFAULT_THUMBNAIL_HEIGHT = 300;
@@ -1465,7 +1484,8 @@ async function regenerateHeroImage(photo, anchor) {
     }
     const sourceBasename = path.basename(photo.external_relpath || photo.filename || `photo-${photo.id}`);
     // A camera RAW is cut from its embedded preview; sharp cannot decode it.
-    const proc = await withProcessableImage(localPath, sourceBasename);
+    const proc = await externalProcessableImage(photo, localPath, sourceBasename, 'hero image');
+    if (!proc) return null;
     try {
       newHeroPath = await generateHeroImage(proc.path, {
         regenerate: true,
@@ -2139,7 +2159,8 @@ async function regeneratePreviewImage(photo) {
     const outputBasename = derivativeBasename(`ext${photo.id}_${versionTag(photo)}${sourceBasename}`);
     logger.info(`Ensuring preview for external photo ${photo.id} from ${localPath}`);
     // A camera RAW is rendered from its embedded preview; sharp cannot decode it.
-    const proc = await withProcessableImage(localPath, sourceBasename);
+    const proc = await externalProcessableImage(photo, localPath, sourceBasename, 'preview');
+    if (!proc) return null;
     try {
       newPreviewPath = await generatePreviewImage(proc.path, { regenerate: true, outputBasename });
     } finally {

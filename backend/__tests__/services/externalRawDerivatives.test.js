@@ -134,6 +134,37 @@ describe('derivatives of an external camera RAW', () => {
     expect(Math.max(preview.width, preview.height)).toBe(1920);
   });
 
+  // A JPG gone from the mount comes back null, which is how the face queue
+  // tells a missing file from an unreachable NAS and defers the event. A RAW
+  // has to come back the same way, not throw.
+  describe('when the RAW is gone from the mount', () => {
+    let extract;
+    beforeEach(() => {
+      extract = execFile.getMockImplementation();
+      execFile.mockImplementation((_cmd, args, _options, callback) => process.nextTick(() => callback(
+        Object.assign(new Error(`Error: File not found - ${args[args.length - 1]}`), { code: 1 }))));
+    });
+    afterEach(() => execFile.mockImplementation(extract));
+
+    const missingRaw = (id) => ({
+      id,
+      event_id: EVENT.id,
+      source_origin: 'external',
+      external_relpath: path.join(EVENT.external_path, `GONE${id}.ARW`),
+      filename: `GONE${id}.ARW`,
+      hero_path: null,
+      preview_path: null,
+    });
+
+    it('has no lightbox preview', async () => {
+      await expect(imageProcessor.ensurePreviewImage(missingRaw(411))).resolves.toBeNull();
+    });
+
+    it('has no cover', async () => {
+      await expect(imageProcessor.ensureHeroImage(missingRaw(412))).resolves.toBeNull();
+    });
+  });
+
   it('renders a narrower preview tier from the embedded preview', async () => {
     const photo = await externalRaw(403);
 
