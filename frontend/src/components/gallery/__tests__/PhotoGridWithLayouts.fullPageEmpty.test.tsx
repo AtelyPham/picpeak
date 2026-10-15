@@ -97,4 +97,24 @@ describe.each(['gallery-premium', 'gallery-story'])('PhotoGridWithLayouts empty 
     rerenderWith({ onUploadClick, photos: [photo] });
     expect(document.activeElement).toBe(document.body);
   });
+
+  it('offers the way back from an empty Liked view', () => {
+    const onToggleLikedOnly = vi.fn();
+    renderGrid({ likedOnly: true, onToggleLikedOnly });
+    fireEvent.click(screen.getByRole('button', { name: 'Show all photos' }));
+    expect(onToggleLikedOnly).toHaveBeenCalledTimes(1);
+  });
+
+  it('moves focus between the nav heart and "Show all photos" across the empty Liked view', () => {
+    const likes = { feedbackEnabled: true, feedbackOptions: { allowLikes: true } as never };
+    const { rerenderWith } = renderGrid({ ...likes, photos: [photo], onToggleLikedOnly: vi.fn() });
+    const heartId = layout === 'gallery-premium' ? 'premium-nav-liked' : 'story-nav-liked';
+    screen.getByTestId(heartId).focus();
+    // Nothing liked: the filter empties the view and the layout remounts.
+    rerenderWith({ ...likes, photos: [], likedOnly: true, onToggleLikedOnly: vi.fn() });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Show all photos' }));
+    // And back.
+    rerenderWith({ ...likes, photos: [photo], likedOnly: false, onToggleLikedOnly: vi.fn() });
+    expect(document.activeElement).toBe(screen.getByTestId(heartId));
+  });
 });

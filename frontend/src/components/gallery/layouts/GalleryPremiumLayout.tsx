@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { GalleryEmptyMessage } from '../GalleryEmptyMessage';
+import { GalleryEmptyMessage, LikedOnlyEmptyMessage } from '../GalleryEmptyMessage';
 import { createPortal } from 'react-dom';
 import { MasonryPhotoAlbum } from 'react-photo-album';
 import 'react-photo-album/masonry.css';
@@ -274,6 +274,8 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
   onLightboxPhotoChange,
   isClient = false,
   onToggleVisibility,
+  likedOnly = false,
+  onToggleLikedOnly,
 }) => {
   // These props are passed by parent but we use our own lightbox, so mark as intentionally unused
   void _onPhotoClick;
@@ -497,9 +499,11 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
         });
         onFeedbackChange?.(photo.id);
       } catch (err) {
-        // Refused by a finished selection (issue 1733): the heart goes back.
-        if (feedbackLockKind(err)) toggleLiked(photo.id);
-        else console.warn('Like submit failed', err);
+        // Refused (a finished selection, issue 1733, or the like limit): the
+        // heart goes back, so the nav count matches what the Liked filter,
+        // which reads the server's is_liked, will show.
+        toggleLiked(photo.id);
+        if (!feedbackLockKind(err)) console.warn('Like submit failed', err);
       }
       return;
     }
@@ -526,8 +530,8 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
       });
       onFeedbackChange?.(photo.id);
     } catch (err) {
-      if (feedbackLockKind(err)) toggleLiked(photo.id);
-      else console.warn('Like submit failed', err);
+      toggleLiked(photo.id);
+      if (!feedbackLockKind(err)) console.warn('Like submit failed', err);
     }
   }, [slug, savedIdentity, feedbackOptions, onFeedbackChange, guestIdentity]);
 
@@ -555,8 +559,8 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
         });
         onFeedbackChange?.(pendingLikePhotoId);
       } catch (err) {
-        if (feedbackLockKind(err)) toggleLiked(pendingLikePhotoId);
-        else console.warn('Like submit failed', err);
+        toggleLiked(pendingLikePhotoId);
+        if (!feedbackLockKind(err)) console.warn('Like submit failed', err);
       }
       setPendingLikePhotoId(null);
     }
@@ -639,7 +643,9 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
   if (photos.length === 0 && !suppressEmptyState) {
     return (
       <div className="text-center py-12">
-        <GalleryEmptyMessage filtered={emptyIsFiltered} />
+        {likedOnly
+          ? <LikedOnlyEmptyMessage onShowAll={onToggleLikedOnly} />
+          : <GalleryEmptyMessage filtered={emptyIsFiltered} />}
         {/* No nav in this branch, and an upload-only gallery starts empty:
             the guest still needs a way to add the first photos. */}
         {onUploadClick && (
@@ -781,8 +787,24 @@ export const GalleryPremiumLayout: React.FC<GalleryPremiumLayoutProps> = ({
               </button>
             )}
             {feedbackEnabled && feedbackOptions?.allowLikes && (
-              <button className="gallery-premium-nav-btn" title={t('gallery.favorites', 'Favorites')}>
-                <Heart className="w-4 h-4" />
+              // The gallery's "Liked" filter, with the count Story shows.
+              <button
+                type="button"
+                className={`gallery-premium-nav-btn${likedOnly ? ' active' : ''}`}
+                onClick={onToggleLikedOnly}
+                aria-pressed={onToggleLikedOnly ? likedOnly : undefined}
+                aria-label={`${t('gallery.showLikedOnly', 'Show only photos I liked')}${likedPhotoIds.size > 0 ? ` (${likedPhotoIds.size})` : ''}`}
+                title={t('gallery.favorites', 'Favorites')}
+                data-testid="premium-nav-liked"
+                // Focus moves to "Show all photos" when the filter empties the view.
+                data-gallery-focus="liked"
+              >
+                <Heart className="w-4 h-4" fill={likedOnly ? 'currentColor' : 'none'} />
+                {likedPhotoIds.size > 0 && (
+                  <span className="gallery-premium-nav-count">
+                    {likedPhotoIds.size > 9 ? '9+' : likedPhotoIds.size}
+                  </span>
+                )}
               </button>
             )}
             {allowDownloads && photos.length > 0 && (
