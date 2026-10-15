@@ -25,6 +25,7 @@ const NOT_DECODABLE_RAW = Buffer.from('II*\0not really a sony raw');
 describe('external import of camera RAW', () => {
   let tmpDir; let db; let app; let mediaRoot;
   let uploadSettings;
+  let imageProcessor;
   let previewCleanup;
 
   const writeRaw = async (rel) => {
@@ -109,6 +110,7 @@ describe('external import of camera RAW', () => {
     ({ db } = await require('./helpers/crmDb').bootCrmDb());
     await require('./helpers/externalMediaFixture').seedExternalAdminFixture(db);
     uploadSettings = require('../../src/services/uploadSettings');
+    imageProcessor = require('../../src/services/imageProcessor');
 
     app = express();
     app.use(express.json());
@@ -209,4 +211,35 @@ describe('external import of camera RAW', () => {
     expect((await runImport(eventId)).status).toBe(200);
     expect((await rows(eventId)).map((p) => p.filename)).toEqual(['DSC03991.ARW', 'DSC03991.JPG']);
   });
+
+  // Inserted without its preview, a RAW row would keep no dimensions for
+  // good: later passes skip a relpath that already has a row.
+  it('leaves a RAW whose preview cannot be extracted for the next pass', async () => {
+    const eventId = await seedEvent();
+    await allowTypes('jpg,jpeg,png,webp,arw');
+    await writeRaw('shoot/DSC03991.ARW');
+
+    imageProcessor.withProcessableImage.mockRejectedValueOnce(new Error('exiftool is not installed on the server'));
+    const res = await runImport(eventId);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ imported: 0, deferred: 1 });
+    expect(await rows(eventId)).toEqual([]);
+
+    expect((await runImport(eventId)).status).toBe(200);
+    expect(await rows(eventId)).toEqual([expect.objectContaining({ filename: 'DSC03991.ARW', width: 400, height: 600 })]);
+  });
+
+  it('asks a busy media queue again before giving up on the preview', async () => {
+    const eventId = await seedEvent();
+    await allowTypes('jpg,jpeg,png,webp,arw');
+    await writeRaw('shoot/DSC03991.ARW');
+
+    imageProcessor.withProcessableImage.mockRejectedValueOnce(
+      Object.assign(new Error('media staging is full'), { code: 'MEDIA_QUEUE_FULL' }));
+    const res = await runImport(eventId);
+
+    expect(res.status).toBe(200);
+    expect(await rows(eventId)).toEqual([expect.objectContaining({ filename: 'DSC03991.ARW', width: 400, height: 600 })]);
+  }, 30000);
 });

@@ -1034,14 +1034,19 @@ async function importExternalFolder({
         const isVideo = isVideoFile(f.name);
         const isRaw = !isVideo && isRawFilename(f.name);
 
-        // sharp cannot decode a RAW. Without its preview the row would have
-        // no dimensions and no thumbnail, and the file still goes in: the
-        // thumbnail is retried on first view.
-        if (!isVideo) {
+        // sharp cannot decode a RAW. Without its preview the row would keep
+        // no dimensions for good, since later passes skip a relpath that
+        // already has a row, so the file is left for the next pass instead.
+        // A busy media queue is asked again first.
+        if (!isVideo && !isRaw) {
+          proc = { path: f.full, cleanup: () => {} };
+        } else if (isRaw) {
           try {
-            proc = await withProcessableImage(f.full, f.name);
+            proc = await retryTransient(() => withProcessableImage(f.full, f.name));
           } catch (previewErr) {
-            logger.warn(`Could not extract the embedded preview of ${f.rel}: ${previewErr.message}`);
+            logger.warn(`Could not extract the embedded preview of ${f.rel}, left for the next pass: ${previewErr.message}`);
+            deferred++;
+            continue;
           }
         }
 
@@ -1179,10 +1184,6 @@ async function importExternalFolder({
         // doing this synchronously is ~100-300ms per image; for the
         // worst-case 1000-photo import that's still under the 5-minute
         // request timeout typical of the import flow.
-        if (photoId != null && !isVideo && !proc) {
-          // No preview to cut it from; the warning is above.
-          thumbnailsFailed++;
-        }
         if (photoId != null && proc) {
           try {
             const outputBasename = `ext${photoId}_${path.basename(f.rel)}`;
