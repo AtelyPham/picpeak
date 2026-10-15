@@ -9,6 +9,7 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { differenceInDays, parseISO } from 'date-fns';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'react-toastify';
 
 import { Button } from '../common';
 import { GallerySkeleton } from './GallerySkeleton';
@@ -77,7 +78,7 @@ import type { FilterType, FeedbackFilterType } from './GalleryFilter';
 import { analyticsService } from '../../services/analytics.service';
 import { useDevToolsProtection } from '../../hooks/useDevToolsProtection';
 import { Upload, Menu, Eye, EyeOff, Shield, X, Download, ClipboardList, AlertCircle } from 'lucide-react';
-import { galleryService } from '../../services/gallery.service';
+import { galleryService, splitIntoArchives } from '../../services/gallery.service';
 import { feedbackService, type ColorLabel } from '../../services/feedback.service';
 import { useWatermarkSettings } from '../../hooks/useWatermarkSettings';
 import { useGalleryCustomCss } from '../../hooks/useGalleryCustomCss';
@@ -167,6 +168,10 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
   // Filename list dialog (issue 1733, A3d).
   const [showCopyFilenames, setShowCopyFilenames] = useState(false);
   const [resolutionPickerIds, setResolutionPickerIds] = useState<number[] | null>(null);
+  // The picker was opened for the guest's selection (not a people filter or
+  // a folder), so a download it hands over ends the selection, as the
+  // sidebar's direct download does.
+  const [pickerForSelection, setPickerForSelection] = useState(false);
   // The job a "your download is ready" mail links to (issue 1733). This view
   // only mounts behind the gallery's own access check. The token leaves the
   // address bar when its dialog is closed.
@@ -1134,6 +1139,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
     // gallery standard.
     if (downloadChoices.length > 1) {
       setResolutionPickerIds(Array.from(selectedPhotos));
+      setPickerForSelection(true);
       return;
     }
 
@@ -1170,6 +1176,12 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
     setIsSelectionMode(false);
   };
 
+  const handlePickerDownloaded = () => {
+    if (!pickerForSelection) return;
+    setSelectedPhotos(new Set());
+    setIsSelectionMode(false);
+  };
+
   // "Download these N" (#1074) — the payoff of the people filter.
   //
   // Deliberately NO new endpoint or person_id selector: the filtered photo
@@ -1191,8 +1203,11 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
     if (!allowDownloads || peopleDownloadableIds.length === 0) return;
     if (refuseOverQuota(photosForIds(peopleDownloadableIds))) return;
 
-    // Same resolution-picker behaviour as every other multi-photo download.
-    if (downloadChoices.length > 1) {
+    // Same resolution-picker behaviour as every other multi-photo download,
+    // up to what one archive holds: the picker builds one archive, so a
+    // larger set comes as several at the standard size instead of cut short.
+    const inParts = peopleDownloadableIds.length > SELECTED_DOWNLOAD_LIMIT;
+    if (downloadChoices.length > 1 && !inParts) {
       setResolutionPickerIds(peopleDownloadableIds);
       return;
     }
@@ -1201,8 +1216,14 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
       gallery: slug,
       photo_count: peopleDownloadableIds.length,
     });
+    if (inParts) {
+      toast.info(t('gallery.downloadingInParts', {
+        count: peopleDownloadableIds.length,
+        parts: splitIntoArchives(peopleDownloadableIds).length,
+      }));
+    }
 
-    await galleryService.downloadSelectedPhotos(slug, peopleDownloadableIds).catch((error) => {
+    await galleryService.downloadPhotosInParts(slug, peopleDownloadableIds).catch((error) => {
       // The limit refusal already told the guest why (issue 1560).
       if (!isDownloadLimitError(error)) throw error;
     });
@@ -1434,9 +1455,11 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
             photoIds={resolutionPickerIds || undefined}
             quotaPhotos={resolutionPickerIds ? photosForIds(resolutionPickerIds) : allDownloadablePhotos}
             resumeToken={resumeJobToken || undefined}
+            onDownloaded={handlePickerDownloaded}
             onClose={() => {
               setShowResolutionPicker(false);
               setResolutionPickerIds(null);
+              setPickerForSelection(false);
               setResumeJobToken(null);
               clearDownloadJobParam();
             }}
@@ -1751,9 +1774,11 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
             photoIds={resolutionPickerIds || undefined}
             quotaPhotos={resolutionPickerIds ? photosForIds(resolutionPickerIds) : allDownloadablePhotos}
             resumeToken={resumeJobToken || undefined}
+            onDownloaded={handlePickerDownloaded}
             onClose={() => {
               setShowResolutionPicker(false);
               setResolutionPickerIds(null);
+              setPickerForSelection(false);
               setResumeJobToken(null);
               clearDownloadJobParam();
             }}
@@ -2257,9 +2282,11 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
             photoIds={resolutionPickerIds || undefined}
             quotaPhotos={resolutionPickerIds ? photosForIds(resolutionPickerIds) : allDownloadablePhotos}
             resumeToken={resumeJobToken || undefined}
+            onDownloaded={handlePickerDownloaded}
             onClose={() => {
               setShowResolutionPicker(false);
               setResolutionPickerIds(null);
+              setPickerForSelection(false);
               setResumeJobToken(null);
               clearDownloadJobParam();
             }}
