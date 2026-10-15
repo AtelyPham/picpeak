@@ -119,9 +119,9 @@ describe('renditions of an external file rewritten in place', () => {
 
   test('a thumbnail tier of the old bytes is not served for the new ones', async () => {
     const row = await externalPhoto('edited-thumb-tier.jpg');
-    const stale = await imageProcessor.ensureThumbnailAtWidth(row, 150);
+    const stale = await imageProcessor.ensureThumbnailAtWidth(row, 600);
     const edited = await editInPlace(row, 260, 200);
-    const fresh = await imageProcessor.ensureThumbnailAtWidth(edited, 150);
+    const fresh = await imageProcessor.ensureThumbnailAtWidth(edited, 600);
     expect(fresh).toBeTruthy();
     expect(fresh).not.toBe(stale);
   });
