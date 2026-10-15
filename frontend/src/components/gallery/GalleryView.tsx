@@ -1688,6 +1688,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
           isSelectionMode={isSelectionMode}
           selectedPhotos={selectedPhotos}
           onSelectionChange={setSelectedPhotos}
+          photosForIds={photosForIds}
           onToggleSelectionMode={() => setIsSelectionMode(!isSelectionMode)}
           showSelectionControls={false}
           eventName={event.event_name}
@@ -2195,6 +2196,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
             isSelectionMode={isSelectionMode}
             selectedPhotos={selectedPhotos}
             onSelectionChange={setSelectedPhotos}
+            photosForIds={photosForIds}
             onToggleSelectionMode={() => setIsSelectionMode(!isSelectionMode)}
             showSelectionControls={!showSidebar}
             eventName={event.event_name}

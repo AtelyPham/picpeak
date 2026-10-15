@@ -8,7 +8,7 @@ import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import type { Photo } from '../../../types';
 import { STORY_FOOTER_TEXT_MAX, STORY_FOOTER_TITLE_MAX } from '../../../types/theme.types';
 import { feedbackService } from '../../../services/feedback.service';
-import { galleryService } from '../../../services/gallery.service';
+import { galleryService, splitIntoArchives } from '../../../services/gallery.service';
 import { analyticsService } from '../../../services/analytics.service';
 import { isVideoItem, mediaSplitLabel, selectLabel, splitMediaCount } from '../../../utils/mediaCounts';
 import { toast } from 'react-toastify';
@@ -81,6 +81,7 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
   onDeselectAll,
   onToggleSelectionMode,
   onDownloadSelected,
+  selectionQuotaPhotos,
   eventName,
   eventDate,
   allowDownloads = true,
@@ -419,6 +420,13 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
     }
   }, [selectionUnlikes, selectedPhotoList, selectionToLike, favoritingSelection, likeWithIdentity]);
 
+  // The id fallback only runs when a category opts out of downloads (#640),
+  // so it leaves those photos out, as the server would: a part made only of
+  // them would come back empty and stop the parts after it.
+  const downloadablePhotos = useMemo(
+    () => photos.filter((photo) => photo.category_allow_downloads !== false),
+    [photos]
+  );
   const handleDownloadAll = useCallback(async () => {
     // Whole-gallery path when available: posting ids would hit the server's
     // 500-id cap and silently truncate a large gallery (#1160).
@@ -426,32 +434,40 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
       onDownloadEverything();
       return;
     }
-    const ids = photos.map(p => p.id);
+    const ids = downloadablePhotos.map(p => p.id);
+    if (ids.length === 0) return;
     // Download limit (issue 1560): all or nothing, so refuse before asking.
-    if (!downloadQuota.allows(photos)) {
+    if (!downloadQuota.allows(downloadablePhotos)) {
       showDownloadLimitReached({ remaining: downloadQuota.remaining ?? 0 });
       return;
     }
+    // One archive takes at most SELECTED_DOWNLOAD_LIMIT ids, so a larger set
+    // goes as several zips rather than being cut short.
+    const parts = splitIntoArchives(ids).length;
     // #858: hand off to the resolution picker when the gallery offers a choice.
-    if (downloadChoices && downloadChoices.length > 1 && onPickResolution) {
+    // The picker builds one archive, so past the cap it is skipped and the
+    // parts come at the gallery's standard size.
+    if (parts === 1 && downloadChoices && downloadChoices.length > 1 && onPickResolution) {
       onPickResolution(ids);
       return;
     }
-    toast.info(t('gallery.downloading', { count: ids.length }));
+    toast.info(parts > 1
+      ? t('gallery.downloadingInParts', { count: ids.length, parts })
+      : t('gallery.downloading', { count: ids.length }));
     try {
-      await galleryService.downloadSelectedPhotos(slug, ids);
+      await galleryService.downloadPhotosInParts(slug, ids);
       analyticsService.trackGalleryEvent('bulk_download', { gallery: slug, photo_count: ids.length });
     } catch (error) {
       if (!isDownloadLimitError(error)) toast.error(t('gallery.downloadError'));
     }
-  }, [photos, onDownloadEverything, slug, t, downloadChoices, onPickResolution, downloadQuota]);
+  }, [downloadablePhotos, onDownloadEverything, slug, t, downloadChoices, onPickResolution, downloadQuota]);
 
   // Needs something to download: either the whole-gallery callback, or
-  // photos in the current scope. On a folder-only root of a gallery with
+  // downloadable photos in the current scope. On a folder-only root of a gallery with
   // a category download opt-out it has neither, and posting an empty id
   // list is a 400 (#1160). Shared by the nav button (issue 1710) and the
   // footer button so both appear and disappear together.
-  const canDownloadAll = allowDownloads && Boolean(onDownloadEverything || photos.length > 0);
+  const canDownloadAll = allowDownloads && Boolean(onDownloadEverything || downloadablePhotos.length > 0);
   const downloadAllLabel = t('common.downloadAll', 'Download All');
   const naturalGrid = storyGridMode === 'natural';
   const uploadLabel = t('upload.uploadPhotos', 'Upload Photos');
@@ -648,7 +664,7 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
                   type="button"
                   className="story-selection-btn story-selection-btn--primary"
                   onClick={() => { void onDownloadSelected(); }}
-                  disabled={!downloadQuota.allows(selectedPhotoList)}
+                  disabled={!downloadQuota.allows(selectionQuotaPhotos ?? selectedPhotoList)}
                   data-testid="story-download-selected"
                 >
                   <Package size={14} />
