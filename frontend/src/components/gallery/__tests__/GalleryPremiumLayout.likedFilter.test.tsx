@@ -127,4 +127,64 @@ describe('Gallery Premium — nav heart filters to the viewer\'s likes', () => {
     expect(likeButton.className).not.toContain('liked');
     warn.mockRestore();
   });
+
+  const navCount = () => screen.getByTestId('premium-nav-liked').querySelector('.gallery-premium-nav-count')?.textContent;
+
+  it('follows a refetched payload, not only the first one', () => {
+    // A like made in another tab, or the lightbox, reaches the layout only
+    // through the parent's refetch; the count used to stay at the mount value.
+    const { rerender } = render(<Harness source={makePhotos([1, 3])} />);
+    expect(navCount()).toBe('2');
+    rerender(<Harness source={makePhotos([1, 2, 3])} />);
+    expect(navCount()).toBe('3');
+    rerender(<Harness source={makePhotos([3])} />);
+    expect(navCount()).toBe('1');
+  });
+
+  it('keeps a toggled like until a payload confirms it', async () => {
+    submitFeedback.mockClear();
+    let resolve: () => void = () => {};
+    submitFeedback.mockImplementationOnce(() => new Promise<void>((r) => { resolve = r; }));
+    const { rerender } = render(<Harness source={makePhotos([1, 3])} />);
+    fireEvent.click(screen.getByTestId('photo-card-4').querySelector('.gallery-premium-like-btn') as HTMLElement);
+    await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1));
+    expect(navCount()).toBe('3');
+    // An unrelated refetch lands before the like is saved.
+    rerender(<Harness source={makePhotos([1, 3]).map((p) => ({ ...p }))} />);
+    expect(navCount()).toBe('3');
+    resolve();
+    await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1));
+    // Saved, but the photo's own row refresh has not landed yet: another
+    // payload still carrying the old value must not undo the heart.
+    await new Promise((r) => setTimeout(r, 0));
+    rerender(<Harness source={makePhotos([1, 3]).map((p) => ({ ...p }))} />);
+    expect(navCount()).toBe('3');
+    rerender(<Harness source={makePhotos([1, 3, 4])} />);
+    expect(navCount()).toBe('3');
+    // Confirmed; from here the payload alone decides again.
+    rerender(<Harness source={makePhotos([1, 3])} />);
+    expect(navCount()).toBe('2');
+  });
+
+  it('lets a saved like that no payload confirms lapse, so a change made elsewhere shows', async () => {
+    submitFeedback.mockClear();
+    submitFeedback.mockResolvedValueOnce({});
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      const { rerender } = render(<Harness source={makePhotos([1, 3])} />);
+      fireEvent.click(screen.getByTestId('photo-card-4').querySelector('.gallery-premium-like-btn') as HTMLElement);
+      await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(navCount()).toBe('3');
+      // Unliked again in another tab: every later payload says not liked.
+      rerender(<Harness source={makePhotos([1, 3]).map((p) => ({ ...p }))} />);
+      expect(navCount()).toBe('3');
+      now.mockReturnValue(1_000_000 + 6000);
+      rerender(<Harness source={makePhotos([1, 3]).map((p) => ({ ...p }))} />);
+      expect(navCount()).toBe('2');
+    } finally {
+      now.mockRestore();
+    }
+  });
 });
