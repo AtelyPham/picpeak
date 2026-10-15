@@ -6,6 +6,7 @@ import { Button } from '../../common';
 
 import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import type { Photo } from '../../../types';
+import { STORY_FOOTER_TEXT_MAX, STORY_FOOTER_TITLE_MAX } from '../../../types/theme.types';
 import { feedbackService } from '../../../services/feedback.service';
 import { galleryService } from '../../../services/gallery.service';
 import { analyticsService } from '../../../services/analytics.service';
@@ -53,7 +54,16 @@ interface GalleryStoryLayoutProps extends BaseGalleryLayoutProps {
   welcomeMessage?: string;
   /** Issue 1709: 'natural' keeps every photo's aspect ratio; 'fixed' (default) is the original tile grid. */
   storyGridMode?: 'fixed' | 'natural';
+  /** Filename caption on a card's hover; off unless the theme turns it on. */
+  storyShowFilenames?: boolean;
+  /** Footer title and text from the theme; empty keeps the defaults. */
+  storyFooterTitle?: string;
+  storyFooterText?: string;
 }
+
+/** A theme string as plain text: trimmed and clamped, '' when unusable. */
+const footerString = (value: unknown, max: number): string =>
+  typeof value === 'string' ? value.trim().slice(0, max) : '';
 
 export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
   photos,
@@ -91,6 +101,9 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
   heroPhotoOverride,
   welcomeMessage,
   storyGridMode = 'fixed',
+  storyShowFilenames = false,
+  storyFooterTitle,
+  storyFooterText,
   onLogout,
   onUploadClick,
   showOriginalFilename = false,
@@ -433,6 +446,9 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
   const downloadAllLabel = t('common.downloadAll', 'Download All');
   const naturalGrid = storyGridMode === 'natural';
   const uploadLabel = t('upload.uploadPhotos', 'Upload Photos');
+  // The caption names the photo the way the lightbox does: the uploaded
+  // filename when the gallery shows original filenames (#508).
+  const caption = !storyShowFilenames ? 'none' : showOriginalFilename ? 'original' : 'filename';
 
   // #1160: a folder-only root has no photos to show here, but the folder tiles
   // above prove the gallery isn't empty — render the shell (hero, logout,
@@ -684,6 +700,7 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
                   onPhotoSelect={cardSelect}
                   likesAllowed={likesAllowed}
                   onToggleVisibility={clientToggleVisibility}
+                  caption={caption}
                 />
               ) : naturalGrid ? (
                 <StoryJustifiedGrid
@@ -700,6 +717,7 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
                   onPhotoSelect={cardSelect}
                   likesAllowed={likesAllowed}
                   onToggleVisibility={clientToggleVisibility}
+                  caption={caption}
                 />
               ) : (
                 <div id={`gallery-${scene.id}`} className="story-gallery-grid">
@@ -722,6 +740,7 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
                       onSelect={cardSelect}
                       likesAllowed={likesAllowed}
                       onToggleVisibility={clientToggleVisibility}
+                      caption={caption}
                     />
                   ))}
                 </div>
@@ -735,9 +754,15 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
 
       {/* Footer */}
       <footer className="story-footer">
-        <h2 className="story-footer-title">{t('gallery.thankYou', 'Thank You')}</h2>
+        {/* Rendered as text, never HTML. The footer's own text wins; without
+            it the welcome message closes the story, as it always has. */}
+        <h2 className="story-footer-title">
+          {footerString(storyFooterTitle, STORY_FOOTER_TITLE_MAX) || t('gallery.thankYou', 'Thank You')}
+        </h2>
         <p className="story-footer-text">
-          {welcomeMessage || t('gallery.thankYouMessage', 'For being part of our story and making our special day unforgettable.')}
+          {footerString(storyFooterText, STORY_FOOTER_TEXT_MAX)
+            || welcomeMessage
+            || t('gallery.thankYouMessage', 'For being part of our story and making our special day unforgettable.')}
         </p>
         {canDownloadAll && (
           <button type="button" className="story-footer-btn" onClick={handleDownloadAll}>
