@@ -2571,7 +2571,8 @@
       "nextBackup": "Siguiente copia",
       "notScheduled": "No programada",
       "enabled": "Habilitado",
-      "disabled": "Deshabilitado"
+      "disabled": "Deshabilitado",
+      "signingKeyInvalid": "La clave de firma de las copias de seguridad no se puede usar. Las copias fallarán hasta que se corrija."
     },
     "actions": {
       "runBackupNow": "Ejecutar copia ahora",
