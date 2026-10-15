@@ -280,6 +280,59 @@ describe('one archive job per gallery', () => {
     expect(result.error).toMatch(/being archived/);
   });
 
+  it('refuses to extend a gallery while it is being archived', async () => {
+    const event = await makeEvent('extend-held', { expired: true });
+    let open;
+    gate = new Promise((resolve) => { open = resolve; });
+    const job = archiveEvent(event);
+    await waitForRead();
+
+    const res = await request(app).post(`/admin/events/${event.id}/extend`).send({ days: 30 });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ARCHIVE_IN_PROGRESS');
+    expect((await db('events').where({ id: event.id }).first()).expires_at).toBe(event.expires_at);
+    open();
+    await job;
+
+    // Free again once the archive is done.
+    const later = await makeEvent('extend-free', { expired: true });
+    await request(app).post(`/admin/events/${later.id}/extend`).send({ days: 30 }).expect(200);
+    expect((await jobState.read(jobName(later.id))).isRunning).toBe(false);
+  });
+
+  it('refuses a new expiry from the settings while the gallery is being archived', async () => {
+    const event = await makeEvent('edit-expiry-held');
+    const token = await holdClaim(event.id);
+    const future = new Date(Date.now() + 90 * 864e5).toISOString();
+
+    const res = await request(app).put(`/admin/events/${event.id}`).send({ expires_at: future });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ARCHIVE_IN_PROGRESS');
+    expect((await db('events').where({ id: event.id }).first()).expires_at).toBe(event.expires_at);
+
+    // Other edits, and an unchanged expiry, still save.
+    await request(app).put(`/admin/events/${event.id}`)
+      .send({ event_name: 'Renamed while archiving', expires_at: event.expires_at }).expect(200);
+    expect((await db('events').where({ id: event.id }).first()).event_name).toBe('Renamed while archiving');
+    await jobState.release(jobName(event.id), token);
+  });
+
+  it('refuses to reactivate a gallery while it is being archived', async () => {
+    const event = await makeEvent('toggle-held');
+    await db('events').where({ id: event.id }).update({ is_active: 0 });
+    const token = await holdClaim(event.id);
+
+    const res = await request(app).post(`/admin/events/${event.id}/toggle-status`);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ARCHIVE_IN_PROGRESS');
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_active)).toBe(false);
+
+    await jobState.release(jobName(event.id), token);
+    await request(app).post(`/admin/events/${event.id}/toggle-status`).expect(200);
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_active)).toBe(true);
+  });
+
   it('does not publish over the winner once its lease was taken over', async () => {
     const event = await makeEvent('lost-lease');
     let open;
@@ -356,6 +409,155 @@ describe('one archive job per gallery', () => {
     expect(Boolean(row.is_archived)).toBe(true);
     expect(Boolean(row.is_active)).toBe(false);
     expect((await jobState.read(jobName(event.id))).isRunning).toBe(false);
+  });
+
+  it('leaves a gallery restored between the expiry query and the claim alone', async () => {
+    const event = await makeEvent('expired-restored', { expired: true });
+    const realClaim = jobState.claim;
+    const claimSpy = jest.spyOn(jobState, 'claim').mockImplementation(async (name) => {
+      // A manual archive and a restore both finished after this pass's query:
+      // the restore made the gallery active again with a fresh expiry.
+      if (name === jobName(event.id)) {
+        await db('events').where({ id: event.id }).update({
+          is_active: 1,
+          expires_at: new Date(Date.now() + 30 * 864e5).toISOString(),
+        });
+      }
+      return realClaim(name);
+    });
+    try {
+      await require('../../src/services/expirationChecker').checkExpirations();
+    } finally {
+      claimSpy.mockRestore();
+    }
+
+    const row = await db('events').where({ id: event.id }).first();
+    expect(Boolean(row.is_active)).toBe(true);
+    expect(Boolean(row.is_archived)).toBe(false);
+    expect(putCalls('expired-restored')).toBe(0);
+  });
+
+  // Moves the recorded expiry attempt back in time, as passes going by would.
+  async function ageExpiryAttempt(eventId, hours) {
+    const row = await db('maintenance_jobs').where({ job_name: jobName(eventId) }).first();
+    const state = JSON.parse(row.last_result);
+    state.expiry.at = new Date(Date.parse(state.expiry.at) - hours * 3600000).toISOString();
+    await db('maintenance_jobs').where({ job_name: jobName(eventId) })
+      .update({ last_result: JSON.stringify(state) });
+  }
+  const expiryAttempt = async (eventId) => {
+    const row = await db('maintenance_jobs').where({ job_name: jobName(eventId) }).first();
+    return JSON.parse(row?.last_result || '{}').expiry;
+  };
+
+  it('retries the archive of a gallery the expiry pass deactivated, with a backoff', async () => {
+    const { checkExpirations } = require('../../src/services/expirationChecker');
+    const { queueEmail } = require('../../src/services/emailProcessor');
+    const event = await makeEvent('expired-retry', { expired: true });
+
+    failList = true;
+    await checkExpirations();
+    let row = await db('events').where({ id: event.id }).first();
+    expect(Boolean(row.is_active)).toBe(false);
+    expect(Boolean(row.is_archived)).toBe(false);
+    expect(await expiryAttempt(event.id)).toMatchObject({ attempts: 1 });
+    const expiredMails = () => queueEmail.mock.calls.filter(([id, , type]) => id === event.id && type === 'gallery_expired');
+    const announced = expiredMails().length;
+    expect(announced).toBeGreaterThan(0);
+
+    // Inside the backoff: left alone.
+    failList = false;
+    await checkExpirations();
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_archived)).toBe(false);
+
+    // Failing again doubles the wait.
+    await ageExpiryAttempt(event.id, 1);
+    failList = true;
+    await checkExpirations();
+    expect(await expiryAttempt(event.id)).toMatchObject({ attempts: 2 });
+    await ageExpiryAttempt(event.id, 1);
+    failList = false;
+    await checkExpirations();
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_archived)).toBe(false);
+
+    await ageExpiryAttempt(event.id, 1);
+    await checkExpirations();
+    row = await db('events').where({ id: event.id }).first();
+    expect(Boolean(row.is_archived)).toBe(true);
+    expect(Boolean(row.is_active)).toBe(false);
+    expect(await expiryAttempt(event.id)).toBeUndefined();
+    // Announced once, on the first attempt.
+    expect(expiredMails()).toHaveLength(announced);
+  });
+
+  it('does not retry when another pass made an attempt after this one selected the gallery', async () => {
+    const { checkExpirations } = require('../../src/services/expirationChecker');
+    const event = await makeEvent('expired-overlap', { expired: true });
+    failList = true;
+    await checkExpirations();
+    failList = false;
+    await ageExpiryAttempt(event.id, 2);
+
+    const realClaim = jobState.claim;
+    const claimSpy = jest.spyOn(jobState, 'claim').mockImplementation(async (name) => {
+      // Another replica's pass retried (and failed) between this pass's query and its claim.
+      if (name === jobName(event.id)) await ageExpiryAttempt(event.id, -2);
+      return realClaim(name);
+    });
+    try {
+      await checkExpirations();
+    } finally {
+      claimSpy.mockRestore();
+    }
+
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_archived)).toBe(false);
+    expect(await expiryAttempt(event.id)).toMatchObject({ attempts: 1 });
+  });
+
+  it('does not retry once an admin toggled the gallery after the failed attempt', async () => {
+    const { checkExpirations } = require('../../src/services/expirationChecker');
+    const event = await makeEvent('expired-toggled', { expired: true });
+    failList = true;
+    await checkExpirations();
+    failList = false;
+    // Toggled on and off again through POST /:id/toggle-status, meant to stay off.
+    await request(app).post(`/admin/events/${event.id}/toggle-status`).expect(200);
+    await request(app).post(`/admin/events/${event.id}/toggle-status`).expect(200);
+    // Reactivating cleared the retry record under the claim.
+    expect(await expiryAttempt(event.id)).toBeUndefined();
+
+    await checkExpirations();
+
+    const row = await db('events').where({ id: event.id }).first();
+    expect(Boolean(row.is_active)).toBe(false);
+    expect(Boolean(row.is_archived)).toBe(false);
+  });
+
+  it('does not archive an expired gallery an admin deactivated', async () => {
+    const event = await makeEvent('expired-admin-off', { expired: true });
+    await db('events').where({ id: event.id }).update({ is_active: 0 });
+
+    await require('../../src/services/expirationChecker').checkExpirations();
+
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_archived)).toBe(false);
+    expect(putCalls('expired-admin-off')).toBe(0);
+  });
+
+  it('does not retry a failed expiry archive once the gallery has a new expiry', async () => {
+    const { checkExpirations } = require('../../src/services/expirationChecker');
+    const event = await makeEvent('expired-reexpired', { expired: true });
+    failList = true;
+    await checkExpirations();
+    failList = false;
+    // Extended, deactivated by the admin, and expired again since: the
+    // recorded attempt was for the old expiry.
+    await db('events').where({ id: event.id })
+      .update({ expires_at: new Date(Date.now() - 3600000).toISOString() });
+    await ageExpiryAttempt(event.id, 2);
+
+    await checkExpirations();
+
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_archived)).toBe(false);
   });
 
   it('stops deleting once a job that stalled after publishing has lost its claim', async () => {
@@ -571,6 +773,16 @@ describe('one archive job per gallery', () => {
     const row = await db('events').where({ id: event.id }).first();
     expect(row.archive_path.length).toBeLessThanOrEqual(255);
     expect(row.archive_path).toMatch(/^events\/archived\/long-x+-[0-9a-f]{12}\.zip$/);
+  });
+
+  it('builds the archive of a slug too long to name a temp file after', async () => {
+    // 250 characters: `<8 hex>-<slug>.zip` passed the 255-byte file name limit.
+    const slug = `long-${'y'.repeat(245)}`;
+    const event = await makeEvent(slug, { photoCount: 1 });
+
+    await archiveEvent(event);
+
+    expect(Boolean((await db('events').where({ id: event.id }).first()).is_archived)).toBe(true);
   });
 
   it('keeps a removed abandoned upload on record, as a stalled run can still land it', async () => {

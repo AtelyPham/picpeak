@@ -143,6 +143,39 @@ async function supersededArchives(eventId) {
   return Array.isArray(superseded) ? superseded.filter(isArchiveKey) : [];
 }
 
+// The expiry checker's attempt to archive a gallery it deactivated, kept on
+// the same claim row (state key `expiry`: { attempts, at, expiresAt }) so a
+// failed attempt is retried in a later pass. The checker only selects active
+// galleries otherwise, and this is what tells its own deactivation apart from
+// an admin's.
+async function expiryAttempts() {
+  const rows = await db('maintenance_jobs')
+    .where('job_name', 'like', `${archiveJobName('')}%`)
+    .whereNotNull('last_result')
+    .select('job_name', 'last_result');
+  return rows
+    .map((row) => ({
+      eventId: Number(row.job_name.slice(archiveJobName('').length)),
+      attempt: parseArchiveState(row).expiry,
+    }))
+    .filter(({ eventId, attempt }) => Number.isInteger(eventId)
+      && attempt && typeof attempt === 'object' && Number.isInteger(attempt.attempts));
+}
+
+/** The recorded expiry attempt as this lease sees it, or null. */
+async function readExpiryAttempt(lease) {
+  const state = await readOwnState(lease);
+  return state?.expiry || null;
+}
+
+/** Record an expiry attempt under the lease, or clear it with null. False once the claim moved on. */
+async function writeExpiryAttempt(lease, attempt) {
+  const own = await readOwnState(lease);
+  if (!own) return false;
+  const { expiry: _previous, ...state } = own;
+  return Boolean(await writeArchiveState(lease, attempt ? { ...state, expiry: attempt } : state));
+}
+
 // Never a key an event row names: that zip is somebody's archive.
 const isReferenced = async (key) => Boolean(await db('events').where('archive_path', key).first('id'));
 
@@ -225,7 +258,9 @@ async function buildArchive(event, lease) {
   const eventPrefix = path.posix.join('events/active', event.slug);
 
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'picpeak-archive-'));
-  const tmpArchive = path.join(tmpDir, `${crypto.randomBytes(4).toString('hex')}-${archiveName}`);
+  // Not named after the slug: the temp directory is this run's own already,
+  // and a slug past 242 characters made the name too long for the file system.
+  const tmpArchive = path.join(tmpDir, 'archive.zip');
 
   try {
     // The gallery's trash (issue 1733) is deleted for good first: the zip
@@ -663,4 +698,5 @@ function convertToCSV(data) {
 
 module.exports = {
   archiveEvent, claimArchive, isArchiveRunning, recordSupersededArchive, supersededArchives,
+  expiryAttempts, readExpiryAttempt, writeExpiryAttempt,
 };
