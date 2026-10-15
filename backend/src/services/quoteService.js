@@ -2248,6 +2248,20 @@ async function convertToInvoiceOnly(quoteId, adminId, options = {}) {
   const invoiceService = require('./invoiceService');
 
   const result = await db.transaction(async (trx) => {
+    // The same claim as convertToEvent, so this conversion and an event
+    // conversion (or a second one of these) racing on one quote cannot
+    // both schedule its invoices.
+    const claimed = await auditedUpdate(trx, 'quotes',
+      (q) => q.where({ id: quote.id, status: 'accepted' }).whereNull('converted_event_id'),
+      { updated_at: new Date() }, { actor: adminId, source: 'quote.convert.invoices' });
+    if (claimed !== 1) {
+      const current = await trx('quotes').where({ id: quote.id }).first();
+      if (current?.converted_event_id) {
+        throw new AppError('This quote was already converted to an event; create the invoice from the event instead.', 409, 'ALREADY_CONVERTED_TO_EVENT');
+      }
+      throw new AppError(`Cannot convert a quote with status '${current?.status}'`, 409);
+    }
+
     const installments = Array.isArray(paymentTermSnapshot?.installments)
       ? paymentTermSnapshot.installments
       : [{ percent: 100, trigger: 'after_delivery', offset_days: 0, label: 'Total' }];
@@ -2334,25 +2348,26 @@ async function convertToInvoiceOnly(quoteId, adminId, options = {}) {
   return result;
 }
 
+async function existingConversion(eventId) {
+  const existingInvoices = await db('invoices').where({ event_id: eventId }).select('id');
+  return { eventId, alreadyConverted: true, invoiceIds: existingInvoices.map((r) => r.id) };
+}
+
 async function convertToEvent(quoteId, adminId, options = {}) {
   const { quote, lineItems } = (await getQuoteById(quoteId)) || {};
   if (!quote) throw new AppError('Quote not found', 404);
+  // Idempotent re-entry (e.g. workflow crash-recovery, a retried request, or
+  // the loser of two concurrent conversions): hand back the already-created
+  // event and its scheduled invoices so the caller can adopt them instead of
+  // double-creating. Before the status check: a committed conversion has
+  // already moved the quote to 'converted'.
+  if (quote.status === 'converted' && quote.converted_event_id) {
+    return existingConversion(quote.converted_event_id);
+  }
   if (quote.status !== 'accepted') {
     throw new AppError(`Cannot convert a quote with status '${quote.status}'`, 409);
   }
   assertQuoteTransition(quote.status, 'converted');
-  if (quote.converted_event_id) {
-    // Idempotent re-entry (e.g. workflow crash-recovery): hand back the
-    // already-created event and its scheduled invoices so the caller can
-    // adopt them instead of double-creating.
-    const existingInvoices = await db('invoices')
-      .where({ event_id: quote.converted_event_id }).select('id');
-    return {
-      eventId: quote.converted_event_id,
-      alreadyConverted: true,
-      invoiceIds: existingInvoices.map((r) => r.id),
-    };
-  }
   // Same guard as convertToInvoiceOnly — refuse if a contract is in
   // flight unless the contract→event button re-entered this path.
   if (quote.converted_contract_id && !options.fromContract) {
@@ -2388,6 +2403,16 @@ async function convertToEvent(quoteId, adminId, options = {}) {
   const { shareLinkToStore } = await buildShareLinkVariants({ slug, shareToken });
 
   const result = await db.transaction(async (trx) => {
+    // Claim the quote before creating anything. Two concurrent conversions
+    // both pass the reads above; on PostgreSQL the second waits here on the
+    // row lock until the first commits, then matches nothing, and SQLite
+    // serialises the transactions on its one connection. Only the winner
+    // creates a gallery; the loser hands back the winner's.
+    const claimed = await auditedUpdate(trx, 'quotes',
+      (q) => q.where({ id: quote.id, status: 'accepted' }).whereNull('converted_event_id'),
+      { updated_at: new Date() }, { actor: adminId, source: 'quote.convert.event' });
+    if (claimed !== 1) return null;
+
     // The events table schema has drifted across migrations:
     // installs that ran the original 060 series have
     // host_name/host_email; later ones renamed to customer_*; some
@@ -2534,6 +2559,14 @@ async function convertToEvent(quoteId, adminId, options = {}) {
 
     return { eventId, alreadyConverted: false, invoiceIds: spawnResult?.invoiceIds || [] };
   });
+
+  if (!result) {
+    const current = await db('quotes').where({ id: quote.id }).first();
+    if (current?.status === 'converted' && current.converted_event_id) {
+      return existingConversion(current.converted_event_id);
+    }
+    throw new AppError(`Cannot convert a quote with status '${current?.status}'`, 409);
+  }
 
   // Audit log AFTER commit — logActivity writes via the global `db`, which
   // deadlocks the single-connection SQLite pool if issued inside the trx
