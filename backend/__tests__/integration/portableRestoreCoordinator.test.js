@@ -101,8 +101,13 @@ describe.each(engines)('portable restore coordinator (%s)', client => {
       if (own.error) throw own.error;
       const result = { attemptId: args.attemptId, proof: 'kernel_lease_released',
         ...(own.result || { outcome: 'committed', summary: { tables: 3, filesRestored: 2, sessionInvalidated: true } }) };
-      if (result.outcome === 'committed' && !own.noMarker) await db('portable_restore_commits').insert({ attempt_id: args.attemptId,
-        local_plan_checksum: hash('local plan'), options_digest: hash(JSON.stringify(args.options || {})) });
+      if (result.outcome === 'committed' && !own.noMarker) {
+        const insert = db('portable_restore_commits').insert({ attempt_id: args.attemptId,
+          local_plan_checksum: hash('local plan'), options_digest: own.optionsDigest || hash(JSON.stringify(args.options || {})) });
+        // A recovery run keeps a marker the import already wrote; an import
+        // run writes it exactly once.
+        await (args.recovery ? insert.onConflict('attempt_id').ignore() : insert);
+      }
       return result;
     };
     worker = {
@@ -113,7 +118,7 @@ describe.each(engines)('portable restore coordinator (%s)', client => {
       },
       probeWorkerLease: jest.fn(async () => 'free'),
       startWorker: jest.fn(args => { starts.push(args); return run(args); }),
-      recoverWorker: jest.fn(args => { recoveries.push(args); return run({ ...args, options: {} }); }),
+      recoverWorker: jest.fn(args => { recoveries.push(args); return run({ ...args, options: {}, recovery: true }); }),
     };
   });
   afterEach(async () => {
@@ -219,7 +224,25 @@ describe.each(engines)('portable restore coordinator (%s)', client => {
       const current = await drive('recovery_required', a);
       expect(await db('portable_restore_commits')).toHaveLength(0);
       expect(current.generation).toBe(0);
-      expect(JSON.parse(current.result_json)).toMatchObject({ outcome: 'recovery_required' });
+      expect(JSON.parse(current.result_json)).toMatchObject({ outcome: 'recovery_required',
+        error: { message: 'Matching restore commit marker is unavailable' } });
+      expect(a.coordinator.isFenced()).toBe(true);
+    });
+
+    it('refuses a commit whose marker was written for different restore options', async () => {
+      const a = create();
+      await a.coordinator.activate();
+      await a.coordinator.start({ archivePath: await upload(), operatorId: 10 });
+      await drive('restoring', a);
+      // A well-formed marker for this attempt, but its digest is not the one
+      // of the options this control row fenced.
+      terminal.optionsDigest = hash(JSON.stringify({ migrationStorageIndexPath: '/elsewhere' }));
+      terminal.resolve();
+      const current = await drive('recovery_required', a);
+      expect(await db('portable_restore_commits')).toHaveLength(1);
+      expect(current.generation).toBe(0);
+      expect(JSON.parse(current.result_json)).toMatchObject({ outcome: 'recovery_required',
+        error: { message: 'Matching restore commit marker is unavailable' } });
       expect(a.coordinator.isFenced()).toBe(true);
     });
   });
