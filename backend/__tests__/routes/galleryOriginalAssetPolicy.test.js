@@ -30,6 +30,18 @@ describe('gallery original-asset authority', () => {
     { issuer: 'picpeak-auth', expiresIn: '1h' });
   const get = (route, id = imageId, headers = {}) => request(app).get(`/api/gallery/${SLUG}/${route}/${id}`)
     .set({ Authorization: `Bearer ${token()}`, ...headers }).buffer().parse(binary);
+  // A reserved download grant settles on the response's 'close', which can
+  // come after the client already has the body. Until then the row is
+  // pending; a settlement that lands after a test deleted its grants
+  // re-inserts the delivered one and uses up a later test's download limit.
+  const grantsSettled = async () => {
+    for (let i = 0; i < 500; i++) {
+      const pending = await db('event_download_grants').where({ event_id: eventId }).where('pending_holders', '>', 0).first();
+      if (!pending) return;
+      await new Promise((resolve) => { setTimeout(resolve, 10); });
+    }
+    throw new Error('Download grants did not settle');
+  };
 
   beforeAll(async () => {
     ({ db, cleanup } = await bootCrmDb());
@@ -303,6 +315,7 @@ describe('gallery original-asset authority', () => {
       expect(counted.body).toEqual(VIDEO);
       expect(await grants()).toHaveLength(1);
     } finally {
+      await grantsSettled();
       await grants().del();
       await storage.delete(copyKey).catch(() => {});
       await db('photos').where({ id: videoId }).update({ web_path: null, web_status: null });
@@ -314,29 +327,37 @@ describe('gallery original-asset authority', () => {
     const client = { Authorization: `Bearer ${token({ accessLevel: 'client' })}` };
     const grants = () => db('event_download_grants').where({ event_id: eventId, photo_id: videoId });
     const videoKey = `events/active/${SLUG}/individual/source.mp4`;
+    // The slot is reserved before storage is read: record it there, so the
+    // wait below is for a release that has something to release.
+    let heldAtFailure;
     const fail = (method) => {
       const real = storage[method].bind(storage);
-      return jest.spyOn(storage, method).mockImplementation((key, ...rest) => (key === videoKey
-        ? Promise.reject(new Error('storage unreachable'))
-        : real(key, ...rest)));
+      return jest.spyOn(storage, method).mockImplementation(async (key, ...rest) => {
+        if (key !== videoKey) return real(key, ...rest);
+        heldAtFailure = Array.from(await grants(), (row) => Number(row.pending_holders));
+        throw new Error('storage unreachable');
+      });
     };
     try {
       for (const [method, headers] of [['get', client], ['getRange', { ...client, Range: 'bytes=0-5' }]]) {
         const spy = fail(method);
+        heldAtFailure = null;
         try {
           const res = await get('photo', videoId, headers);
           expect(res.status).toBeGreaterThanOrEqual(500);
         } finally {
           spy.mockRestore();
         }
-        // The reservation settles on close: give it a moment, then nothing may remain.
-        await new Promise((resolve) => { setTimeout(resolve, 50); });
-        expect(await grants().where('pending_holders', 0)).toHaveLength(0);
+        expect(heldAtFailure).toEqual([1]);
+        // The reservation settles on close: once it has, nothing may remain.
+        await grantsSettled();
+        expect(await grants()).toHaveLength(0);
       }
       const counted = await get('photo', videoId, client);
       expect(counted.status).toBe(200);
       expect(counted.body).toEqual(VIDEO);
     } finally {
+      await grantsSettled();
       await grants().del();
       await db('events').where({ id: eventId }).update({ download_limit: null });
     }
@@ -424,7 +445,12 @@ describe('gallery original-asset authority', () => {
     await db('events').where({ id: eventId }).update({ download_limit: 1 });
     expect((await get('photo')).status).toBe(302);
     const client = { Authorization: `Bearer ${token({ accessLevel: 'client' })}` };
-    expect((await get('download', imageId, client)).status).toBe(200);
+    const download = await get('download', imageId, client);
+    // The refusal body names which check refused (limit, category, hidden).
+    expect({ status: download.status, body: download.status === 200 ? null : download.body.toString() })
+      .toEqual({ status: 200, body: null });
+    // The original is only released once the grant is delivered, not pending.
+    await grantsSettled();
     expect((await get('photo')).body).toEqual(source);
     await db('photo_categories').where({ id: categoryId }).update({ allow_downloads: 0 });
     expect((await get('photo')).status).toBe(302);
