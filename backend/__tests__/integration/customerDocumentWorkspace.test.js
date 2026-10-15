@@ -661,6 +661,17 @@ describe('customer activity (admin)', () => {
     }
   });
 
+  it('names the admin who edited the customer, not "system"', async () => {
+    const edited = await asAdmin(request(adminApp).put(`/api/admin/customers/${me}`).send({ display_name: 'Renamed' }));
+    expect(edited.status).toBe(200);
+    const { username } = await db('admin_users').where({ id: adminId }).first('username');
+
+    const res = await activity(me);
+    const entry = res.body.entries.find((e) => e.type === 'customer_updated');
+    expect(entry.actorType).toBe('admin');
+    expect(entry.actorName).toBe(username);
+  });
+
   it('pages by id', async () => {
     const first = await activity(me, '?limit=1');
     expect(first.body.entries).toHaveLength(1);
@@ -963,6 +974,18 @@ describe('malware scanner (fake clamd)', () => {
     expect(logged).toHaveLength(1);
     expect(await db('customer_documents').where({ customer_account_id: me, original_name: 'invoice.pdf' }).first())
       .toBeUndefined();
+  });
+
+  it('logs a rejected upload against the gallery it named', async () => {
+    useClamd();
+    const infected = await asAdmin(request(adminApp).post(`/api/admin/customers/${customerA}/documents`))
+      .field('eventId', String(eventA))
+      .attach('file', INFECTED, { filename: 'gallery-scan.pdf', contentType: 'application/pdf' });
+    expect(infected.status).toBe(422);
+    const rows = (await db('activity_logs').where({ activity_type: 'customer_document_scan_rejected' }))
+      .filter((r) => meta(r.metadata).customerId === customerA);
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].event_id)).toBe(eventA);
   });
 
   it('re-scans rows left pending and promotes each exactly once under two concurrent runs', async () => {

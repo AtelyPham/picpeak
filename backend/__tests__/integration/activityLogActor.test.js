@@ -8,6 +8,9 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'crm-route-test-secret';
 
 const { bootCrmDb, seedMinimal } = require('./helpers/crmDb');
+// The admin's username, stored with the entry when it is written, so the
+// log still names them after the account is gone (seedMinimal's admin).
+const ADMIN_NAME = 'tester';
 
 jest.setTimeout(120000);
 
@@ -65,9 +68,9 @@ const createQuote = () => quoteService.createQuote({
 
 it('quote actions inside and after a transaction record the admin', async () => {
   const id = await createQuote();
-  expect(await actorOf('quote_created')).toEqual({ type: 'admin', id: adminId, name: null });
+  expect(await actorOf('quote_created')).toEqual({ type: 'admin', id: adminId, name: ADMIN_NAME });
   await quoteService.sendQuote(id, adminId);
-  expect(await actorOf('quote_sent')).toEqual({ type: 'admin', id: adminId, name: null });
+  expect(await actorOf('quote_sent')).toEqual({ type: 'admin', id: adminId, name: ADMIN_NAME });
 });
 
 it('a response through the public quote link records the public link, not an admin', async () => {
@@ -84,15 +87,15 @@ it('a payment records the admin who booked it', async () => {
     vatRate: 0,
     lineItems: [{ position: 1, quantity: 1, description: 'Coverage', unit_price_minor: 5000, discount_percent: 0 }],
   }, adminId);
-  expect(await actorOf('invoice_created')).toEqual({ type: 'admin', id: adminId, name: null });
+  expect(await actorOf('invoice_created')).toEqual({ type: 'admin', id: adminId, name: ADMIN_NAME });
   await db('invoices').where({ id }).update({ status: 'sent', updated_at: new Date().toISOString() });
   await invoiceService.markPaid(id, { amountMinor: 5000 }, adminId);
-  expect(await actorOf('invoice_paid')).toEqual({ type: 'admin', id: adminId, name: null });
+  expect(await actorOf('invoice_paid')).toEqual({ type: 'admin', id: adminId, name: ADMIN_NAME });
 });
 
 it('a theme save records the admin, and one without an admin the system', async () => {
   await pdfThemeService.saveTheme('quote', {}, adminId);
-  expect(await actorOf('pdf_theme_updated')).toEqual({ type: 'admin', id: adminId, name: null });
+  expect(await actorOf('pdf_theme_updated')).toEqual({ type: 'admin', id: adminId, name: ADMIN_NAME });
   await pdfThemeService.saveTheme('quote', {}, null);
   expect(await actorOf('pdf_theme_updated')).toEqual({ type: 'system', id: null, name: null });
 });
