@@ -169,6 +169,180 @@ async function walkDir(dir, baseDir, extensions, budget = { entries: MAX_WALK_EN
   return results;
 }
 
+// The derivative columns of a photo row. Each one renders the file's bytes,
+// so a file edited in place makes every one of them stale.
+const DERIVATIVE_COLUMNS = ['thumbnail_path', 'preview_path', 'hero_path', 'watermark_path'];
+
+/**
+ * A file already imported at this path, seen again on a re-scan.
+ *
+ * Unchanged (same size as recorded): nothing to do. Changed: the row takes the
+ * new dimensions, capture date, camera details and size, its derivatives are
+ * dropped (the lazy paths build them again from the new bytes on first view)
+ * and the thumbnail is made at once, as on import. Faces and scene tags
+ * describe the old picture, so they are purged and queued again where the
+ * gallery has them on.
+ *
+ * Only rows still served from the share: a photo replaced by an upload keeps
+ * its external_relpath (the dedupe key) but no longer reads this file. Videos
+ * are left alone, see the Limits of the change that added this.
+ *
+ * Returns 'refreshed', 'deferred' (automatic pass, file still being written)
+ * or 'skipped'.
+ */
+async function refreshChangedFile(row, f, { automatic, settleMs }) {
+  const served = row.source_origin === 'external' || row.source_origin === 'reference';
+  if (!served || row.media_type === 'video' || isVideoFile(f.name)) return 'skipped';
+  if (row.size_bytes == null) {
+    // Imported before the size was recorded: nothing to compare against, so
+    // record it and treat the file as the one the derivatives were made from.
+    await db('photos').where({ id: row.id }).whereNull('size_bytes').update({ size_bytes: f.size });
+    return 'skipped';
+  }
+  if (Number(row.size_bytes) === f.size) return 'skipped';
+  // Stat again: the walk that produced `f` can be minutes old. A copy still
+  // landing on the mount is left for the next pass, the same settle rule new
+  // files get.
+  const before = await fs.stat(f.full);
+  if (Number(row.size_bytes) === before.size) return 'skipped';
+  if (automatic && settleMs > 0 && Date.now() - before.mtimeMs < settleMs) return 'deferred';
+
+  let width = null;
+  let height = null;
+  try {
+    ({ width, height } = orientedDimensions(await retryTransient(() => sharp(f.full).metadata())));
+  } catch (dimErr) {
+    // Unreadable now (a half-written file the settle rule missed, or a
+    // format Sharp refuses): keep the row as it is and try on the next pass.
+    logger.warn(`Could not read changed external file ${f.rel}: ${dimErr.message}`);
+    return 'skipped';
+  }
+  let capturedAt = null;
+  try {
+    capturedAt = await extractCaptureDate(f.full);
+  } catch (dateErr) {
+    logger.warn(`Could not extract capture date for ${f.rel}: ${dateErr.message}`);
+  }
+  const exif = await exifColumn(f.full);
+  // The credit read from the file follows the file; a manual one stays.
+  const creditFromFile = !row.credit_source || row.credit_source === 'exif';
+  const credit = creditFromFile ? await resolveCredit({ localPath: f.full, isVideo: false }) : null;
+  // Everything above must describe one version of the file: if it moved
+  // while being read, try again on the next pass.
+  const stats = await fs.stat(f.full);
+  if (stats.size !== before.size || stats.mtimeMs !== before.mtimeMs) return 'deferred';
+
+  const { getStorage } = require('./storage');
+  const {
+    deletePreviewTiers, deleteThumbnailTiers, previewTierKeys, thumbnailTierKeys,
+  } = require('./imageProcessor');
+  const storage = getStorage();
+
+  // The caches go first, while the row still records the old size, so a
+  // pass that cannot clear them leaves the row eligible and tries again.
+  // Responsive tiers are served from a cache hit without looking at the
+  // source, so one that survives would show the old picture for good; they
+  // are checked, as the orientation repair does. A tier rebuilt meanwhile
+  // by a viewer came from the new bytes and only costs a later retry.
+  for (const column of DERIVATIVE_COLUMNS) {
+    const key = row[column];
+    if (!key) continue;
+    // Another row pointing at this photo's file would show the edited
+    // picture once it is rebuilt (the keys are named after this photo), so
+    // that row lets go of it too and builds its own from its own source.
+    const others = { [column]: null, ...(column === 'thumbnail_path' ? { thumb_hash: null } : {}) };
+    await db('photos').whereNot('id', row.id).where(column, key).update(others);
+    await storage.delete(key).catch(() => {});
+  }
+  await deletePreviewTiers(row).catch(() => {});
+  await deleteThumbnailTiers(row).catch(() => {});
+  const survivors = await Promise.all(
+    [...previewTierKeys(row), ...thumbnailTierKeys(row)]
+      .map((k) => storage.stat(k).then((st) => (st ? k : null)).catch(() => k))
+  );
+  if (survivors.some(Boolean)) {
+    logger.warn(`Changed external photo ${row.id} (${f.rel}): cached renditions could not be removed, retrying on the next pass`);
+    return 'skipped';
+  }
+
+  // Faces and scene tags describe the old picture: purged in the same
+  // transaction as the new metadata, so neither lands without the other.
+  const event = await db('events').where({ id: row.event_id }).first();
+  const faceOn = await require('./faceSettings').isEnabledForEvent(event);
+  const tagOn = await require('./tagSettings').isEnabledForEvent(event);
+  const { purgePhotoFaces } = require('./faceProcessor');
+  const { purgePhotoTags } = require('./tagProcessor');
+
+  // Fenced on what was read: a concurrent pass that already refreshed the
+  // row, or a replacement that repointed it, wins and this one does nothing.
+  const fence = {
+    id: row.id, size_bytes: row.size_bytes, source_origin: row.source_origin,
+    external_relpath: row.external_relpath,
+  };
+  const updates = {
+    size_bytes: stats.size,
+    width,
+    height,
+    captured_at: capturedAt ? capturedAt.toISOString() : null,
+    // Camera details describe the file: the new one's, or none.
+    exif_json: null,
+    ...exif,
+    thumb_hash: null,
+  };
+  for (const column of DERIVATIVE_COLUMNS) updates[column] = null;
+  const committed = await db.transaction(async (trx) => {
+    if (await trx('photos').where(fence).update(updates) !== 1) return false;
+    if (credit) {
+      await trx('photos').where({ id: row.id })
+        .where((q) => q.whereNull('credit_source').orWhere('credit_source', 'exif'))
+        .update({ credit_name: credit.credit_name || null, credit_source: credit.credit_source || null });
+    }
+    // A category the face scan chose for the old picture: the next scan
+    // only categorises photos without one, so it has to go with the faces.
+    // A category an admin chose stays.
+    await trx('photos').where({ id: row.id, auto_categorized: formatBoolean(true) })
+      .update({ category_id: null, auto_categorized: formatBoolean(false) });
+    await purgePhotoFaces(row.id, trx);
+    await purgePhotoTags(row.id, trx);
+    await trx('photos').where({ id: row.id }).update({
+      face_status: faceOn ? 'pending' : null,
+      tag_status: tagOn ? 'pending' : null,
+    });
+    return true;
+  });
+  if (!committed) return 'skipped';
+
+  try {
+    const meta = {};
+    const outputBasename = `ext${row.id}_${path.basename(f.rel)}`;
+    const thumbnailPath = await generateThumbnail(f.full, { outputBasename, meta });
+    if (thumbnailPath) {
+      await db('photos').where({ id: row.id, size_bytes: stats.size }).whereNull('thumbnail_path')
+        .update({ thumbnail_path: thumbnailPath, thumb_hash: meta.thumbHash || null });
+    }
+  } catch (thumbErr) {
+    // ensureThumbnail makes it on first view instead.
+    logger.warn(`Thumbnail regeneration failed for changed external photo ${row.id} (${f.rel}): ${thumbErr.message}`);
+  }
+
+  // The watermark service keeps results in memory by the path it read: the
+  // source for the full image, the local derivative file for thumbnails,
+  // previews and heroes. None of those paths changed. Last, so nothing read
+  // before the swap is left in it. (This process only; see the Limits.)
+  const watermarkService = require('./watermarkService');
+  watermarkService.forgetSource(f.full);
+  if (typeof storage.resolveLocalPath === 'function') {
+    const derivativeKeys = [
+      ...DERIVATIVE_COLUMNS.map((column) => row[column]).filter(Boolean),
+      ...previewTierKeys(row), ...thumbnailTierKeys(row),
+    ];
+    for (const key of derivativeKeys) {
+      try { watermarkService.forgetSource(storage.resolveLocalPath(key)); } catch (_) { /* not a local key */ }
+    }
+  }
+  return 'refreshed';
+}
+
 /**
  * Run one import pass.
  *
@@ -294,7 +468,7 @@ async function importExternalFolder({
         if (segs[0] === map.individual) type = 'individual';
         const where = externalPlacement(f.rel, { map, keywords: firstLookKeywords, mirror: mirrorFolders });
         if (where.segments === null) { skipped++; continue; }
-        preparedFiles.push({ ...f, type, size: stats.size, where });
+        preparedFiles.push({ ...f, type, size: stats.size, mtimeMs: stats.mtimeMs, where });
       } catch (err) {
         skipped++;
       }
@@ -387,7 +561,7 @@ async function importExternalFolder({
       // The heartbeat tick keeps re-checking during the loop.
       if (!(await stillEligible())) {
         logger.info(`External import for event ${eventId}: event no longer eligible, nothing imported`);
-        const empty = { imported: 0, skipped, deferred, excluded, thumbnailsGenerated: 0, thumbnailsFailed: 0, truncated: walkBudget.truncated, capReached: false };
+        const empty = { imported: 0, refreshed: 0, skipped, deferred, excluded, thumbnailsGenerated: 0, thumbnailsFailed: 0, truncated: walkBudget.truncated, capReached: false };
         await jobState.release(jobName, token, null);
         return empty;
       }
@@ -418,6 +592,7 @@ async function importExternalFolder({
     }
 
     let imported = 0;
+    let refreshed = 0;
     let thumbnailsGenerated = 0;
     let thumbnailsFailed = 0;
 
@@ -450,7 +625,6 @@ async function importExternalFolder({
     // as every other ingest, so a concurrent upload cannot overshoot with it.
     const photoCap = photoCapOf(event);
     let capReached = false;
-    let considered = 0;
 
     // Insert photos
     for (const f of dedupeMap.values()) {
@@ -460,7 +634,6 @@ async function importExternalFolder({
         authorizedAt = Date.now();
         filesSinceAuthorized = 0;
       }
-      considered += 1;
       if (lost) {
         // Either another process took the claim over — it is walking this
         // same folder now, and the unique index makes anything we insert from
@@ -490,7 +663,18 @@ async function importExternalFolder({
         const exists = await db('photos')
           .where({ event_id: eventId, external_relpath: relFromRoot })
           .first();
-        if (exists) { skipped++; continue; }
+        if (!exists && capReached) { skipped++; continue; }
+        if (exists) {
+          // The same path with other bytes: the file was edited on the share
+          // (a re-export from Lightroom over the proof). Without this the row
+          // kept the old dimensions, capture date and every derivative, so
+          // the gallery showed the old picture for as long as they lived.
+          const outcome = await refreshChangedFile(exists, f, { automatic, settleMs });
+          if (outcome === 'refreshed') refreshed++;
+          else if (outcome === 'deferred') deferred++;
+          else skipped++;
+          continue;
+        }
 
         // Automatic passes: checked HERE, per file, not against a snapshot
         // taken before the loop — an admin can delete a photo (which records
@@ -614,12 +798,14 @@ async function importExternalFolder({
 
         if (inserted === null) {
           // The cap is reached. Nothing after this file can be inserted
-          // either, so stop here rather than stat and decode the rest; the
-          // files left over are reported as skipped.
+          // either, so the new files left are skipped without a stat or a
+          // decode. The loop goes on for the files already in the gallery:
+          // an edited one further down must still be refreshed, or a gallery
+          // at its cap would never pick up an edit behind a new file.
           capReached = true;
-          skipped += dedupeMap.size - considered + 1;
+          skipped++;
           logger.info(`External import for event ${eventId}: photo cap of ${photoCap} reached after ${imported} imported`);
-          break;
+          continue;
         }
 
         const photoId = Array.isArray(inserted) && inserted.length
@@ -759,9 +945,21 @@ async function importExternalFolder({
     }
 
     const result = {
-      imported, skipped, deferred, excluded, thumbnailsGenerated, thumbnailsFailed,
+      imported, refreshed, skipped, deferred, excluded, thumbnailsGenerated, thumbnailsFailed,
       truncated: walkBudget.truncated, capReached,
     };
+
+    // A prebuilt "Download All" zip is only checked for existence, so it
+    // kept serving the gallery as it was before this pass: without the new
+    // photos, and with the old picture of an edited one. Once per pass, as
+    // the upload and replacement routes do.
+    if (imported > 0 || refreshed > 0) {
+      try {
+        require('./downloadZipService').invalidate(eventId);
+      } catch (err) {
+        logger.warn(`Download zip invalidation failed for event ${eventId}: ${err.message}`);
+      }
+    }
 
     if (firstLookImported > 0) {
       await require('./deliveryService').markFirstLookArrived(eventId, { actor, source: 'import' })
@@ -772,7 +970,7 @@ async function importExternalFolder({
     // watcher re-runs this pass on a timer for every watched event, and a
     // "0 imported, 6012 skipped" row every fifteen minutes per event would
     // bury the entries an admin is actually looking for.
-    if (imported > 0 || actor?.type !== 'system') {
+    if (imported > 0 || refreshed > 0 || actor?.type !== 'system') {
       await logActivity(
         'external_import_completed',
         { event_id: eventId, ...result, external_path },
