@@ -5,13 +5,38 @@ const logger = require('../../utils/logger');
 const settings = require('../../services/eventSettings');
 const { deleteWithAccountingHistory } = require('../../services/accountingHistory');
 
+function eventNotFound() {
+  const err = new Error('Event not found');
+  err.code = 'EVENT_NOT_FOUND';
+  return err;
+}
+
 async function deleteEventCascade(eventId, adminContext) {
-  const event = await db('events').where('id', eventId).first();
-  if (!event) {
-    const err = new Error('Event not found');
-    err.code = 'EVENT_NOT_FOUND';
+  const found = await db('events').where('id', eventId).first();
+  if (!found) throw eventNotFound();
+  // An archive job still reading the photos would upload a zip for a gallery
+  // that no longer exists (issue 2012). The delete holds the gallery's
+  // archive claim, so none starts under it either, and the row is read again
+  // under the claim: a job that finished in between has set archive_path.
+  const archiveService = require('../../services/archiveService');
+  const lease = await archiveService.claimArchive(found.id);
+  if (!lease) {
+    const err = new Error('This gallery is being archived right now');
+    err.code = 'ARCHIVE_IN_PROGRESS';
     throw err;
   }
+  try {
+    const event = await db('events').where('id', found.id).first();
+    if (!event) throw eventNotFound();
+    // Zips earlier restores brought back go with the gallery.
+    const superseded = await archiveService.supersededArchives(event.id);
+    return await deleteClaimedEvent(eventId, event, adminContext, superseded);
+  } finally {
+    await lease.release();
+  }
+}
+
+async function deleteClaimedEvent(eventId, event, adminContext, supersededArchives = []) {
 
   // Responsive tiers (#1095 / #492) live in the top-level thumbnails/ and
   // previews/ directories, not under the event folder the filesystem sweep
@@ -114,6 +139,7 @@ async function deleteEventCascade(eventId, adminContext) {
   // no-op on S3 and, for a row carrying `../`, an unlink outside storage. The
   // backend refuses such a key.
   if (event.archive_path) storageKeys.add(event.archive_path);
+  for (const key of supersededArchives) storageKeys.add(key);
 
   // The download caches are the subtle ones: they live UNDER
   // events/active/{slug}/.download-cache/, so the recursive fs.rm below covers
