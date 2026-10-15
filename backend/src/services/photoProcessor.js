@@ -875,6 +875,14 @@ async function processPhoto(photoId) {
     logger.warn(`processPhoto: zip invalidate failed for ${photoId}`, { error: err.message });
   }
 
+  // A transfer created while all its photos were processing held its "ready"
+  // mail back (issue 2061); this photo may be the first it can hand out. Not
+  // awaited: a slow SMTP server must not hold this worker or its attempt, and
+  // a send that never claimed its recipient leaves it held for the next one.
+  require('./transferService').sendHeldReadyEmailsForPhotos([photoId]).catch((err) => {
+    logger.warn(`processPhoto: held transfer email failed for ${photoId}`, { error: err.message });
+  });
+
   // Scene tagging (issue 1733): `event` was read before the processing
   // above, so a gallery switched on meanwhile was not queued in the UPDATE,
   // and its backfill skipped this row for not being complete yet. Now that

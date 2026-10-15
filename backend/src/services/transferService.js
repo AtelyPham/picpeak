@@ -438,7 +438,10 @@ async function getTransfer(id) {
       size_bytes: f.size_bytes,
       mime_type: f.mime_type,
     })),
-    recipients: recipients.map((r) => ({ id: r.id, email: r.email, last_sent_at: r.last_sent_at || null })),
+    // held: the ready mail waits for a downloadable file (issue 2061).
+    recipients: recipients.map((r) => ({
+      id: r.id, email: r.email, last_sent_at: r.last_sent_at || null, held: r.last_sent_at == null,
+    })),
     files: files.map((f) => ({
       file_id: f.file_id,
       photo_id: f.photo_id,
@@ -1230,6 +1233,10 @@ async function removeExtraFiles(transferId) {
  * Email the download link to one or more recipients and record them. Sending is
  * best-effort per address (a bad SMTP config must not fail the whole create);
  * `sendTemplateEmail` is required lazily to avoid a service-load cycle.
+ *
+ * While nothing is downloadable yet (every photo still processing, issue 2061)
+ * no "ready" mail goes out: the recipients are recorded with no last_sent_at,
+ * and sendHeldReadyEmails sends to them once the transfer has a file.
  */
 async function sendTransferEmails(transferId, emails) {
   const clean = [...new Set((emails || [])
@@ -1240,40 +1247,135 @@ async function sendTransferEmails(transferId, emails) {
   const transfer = await db('transfers').where({ id: transferId }).first();
   if (!transfer) return { sent: 0, recipients: [] };
 
+  // Read before the count: a held row that a finishing photo claims (and
+  // mails) after the count must not be put back on hold below, or it is
+  // claimed and mailed a second time.
+  const before = await db('transfer_recipients')
+    .where({ transfer_id: transferId }).whereIn('email', clean)
+    .select('id', 'email', 'last_sent_at');
   const fileCount = await countRecipientFiles(transferId);
 
-  const { sendTemplateEmail } = require('./emailProcessor');
-  const downloadUrl = `${await getFrontendUrl()}/transfer/${transfer.token}`;
-  const vars = {
-    transfer_title: transfer.title || `Transfer #${transferId}`,
-    message: transfer.message || '',
-    download_url: downloadUrl,
-    file_count: String(fileCount),
-    expiry_date: isoDateOrEmpty(transfer.expires_at),
-  };
+  if (fileCount === 0) {
+    for (const email of clean) {
+      const existing = before.find((r) => r.email === email);
+      if (existing) {
+        if (existing.last_sent_at != null) {
+          await db('transfer_recipients').where({ id: existing.id }).whereNotNull('last_sent_at')
+            .update({ last_sent_at: null });
+        }
+      } else {
+        await db('transfer_recipients').insert({
+          transfer_id: transferId, email, created_at: new Date(), last_sent_at: null,
+        });
+      }
+    }
+    // A photo that finished between the count above and these rows found
+    // nothing held, so ask once more.
+    const late = await sendHeldReadyEmails(transferId);
+    return { sent: late.sent, recipients: clean, held: late.sent === 0 };
+  }
 
+  const vars = await readyEmailVars(transfer, fileCount);
   let sent = 0;
   for (const email of clean) {
-    try {
-      await sendTemplateEmail(email, 'transfer_ready', vars);
-      sent += 1;
-    } catch (err) {
-      logger.warn('transferService: failed to send transfer_ready email', {
-        transferId, email, error: err.message,
-      });
-    }
     // Record the recipient regardless of delivery so the detail panel shows who
     // it was addressed to (and a future resend has the list).
-    const existing = await db('transfer_recipients').where({ transfer_id: transferId, email }).first();
-    if (existing) {
+    // Decided from the snapshot read before the count, not a fresh read: a
+    // held row a finishing photo claims meanwhile would otherwise look sent
+    // and be mailed again here.
+    const existing = before.find((r) => r.email === email);
+    if (existing && existing.last_sent_at == null) {
+      // Held: claimed like sendHeldReadyEmails does, so a photo finishing
+      // meanwhile does not mail it too. Lost means it is being sent already.
+      const claimed = await db('transfer_recipients').where({ id: existing.id }).whereNull('last_sent_at')
+        .update({ last_sent_at: new Date() });
+      if (claimed !== 1) continue;
+    } else if (existing) {
       await db('transfer_recipients').where({ id: existing.id }).update({ last_sent_at: new Date() });
     } else {
       await db('transfer_recipients').insert({
         transfer_id: transferId, email, created_at: new Date(), last_sent_at: new Date(),
       });
     }
+    if (await sendReadyEmail(transferId, email, vars)) sent += 1;
   }
   return { sent, recipients: clean };
+}
+
+async function readyEmailVars(transfer, fileCount) {
+  return {
+    transfer_title: transfer.title || `Transfer #${transfer.id}`,
+    message: transfer.message || '',
+    download_url: `${await getFrontendUrl()}/transfer/${transfer.token}`,
+    file_count: String(fileCount),
+    expiry_date: isoDateOrEmpty(transfer.expires_at),
+  };
+}
+
+/** One transfer_ready mail; false (logged) when it could not be sent. */
+async function sendReadyEmail(transferId, email, vars) {
+  const { sendTemplateEmail } = require('./emailProcessor');
+  try {
+    await sendTemplateEmail(email, 'transfer_ready', vars);
+    return true;
+  } catch (err) {
+    logger.warn('transferService: failed to send transfer_ready email', {
+      transferId, email, error: err.message,
+    });
+    return false;
+  }
+}
+
+/**
+ * Send the ready mail held back by sendTransferEmails, once the transfer has
+ * something to download. Each held recipient is claimed by turning its NULL
+ * last_sent_at into a time in one guarded UPDATE, so only one caller (worker,
+ * replica, request) sends it, and only once.
+ */
+async function sendHeldReadyEmails(transferId) {
+  const transfer = await db('transfers').where({ id: transferId }).first();
+  // A link that was disabled or ran out meanwhile announces nothing; the admin
+  // can still send again from the detail panel.
+  if (!assertDownloadable(transfer).ok) return { sent: 0 };
+  const fileCount = await countRecipientFiles(transferId);
+  if (fileCount === 0) return { sent: 0 };
+  const held = await db('transfer_recipients')
+    .where({ transfer_id: transferId }).whereNull('last_sent_at')
+    .orderBy('id', 'asc').select('id', 'email');
+  if (!held.length) return { sent: 0 };
+
+  const vars = await readyEmailVars(transfer, fileCount);
+  let sent = 0;
+  for (const recipient of held) {
+    const claimed = await db('transfer_recipients')
+      .where({ id: recipient.id }).whereNull('last_sent_at')
+      .update({ last_sent_at: new Date() });
+    if (claimed !== 1) continue;
+    if (await sendReadyEmail(transferId, recipient.email, vars)) sent += 1;
+  }
+  return { sent };
+}
+
+/**
+ * Photos became downloadable (the background worker finished them, or they
+ * came back from the trash): send any ready mail that was held back for a
+ * transfer holding one. Driven from the held recipients, which are few,
+ * rather than from transfer_files, which has no photo_id index.
+ */
+function sendHeldReadyEmailsForPhotos(photoIds) {
+  // Tracked so shutdown and a coordinated restore wait for a send the photo
+  // worker did not wait for.
+  return applicationWork.track('transfer ready email', () => sendHeldReadyEmailsForPhotosInternal(photoIds));
+}
+
+async function sendHeldReadyEmailsForPhotosInternal(photoIds) {
+  if (!photoIds.length) return;
+  const rows = await db('transfer_recipients')
+    .join('transfer_files', 'transfer_files.transfer_id', 'transfer_recipients.transfer_id')
+    .whereNull('transfer_recipients.last_sent_at')
+    .whereIn('transfer_files.photo_id', photoIds)
+    .distinct('transfer_recipients.transfer_id as transfer_id');
+  for (const row of rows) await sendHeldReadyEmails(row.transfer_id);
 }
 
 /**
@@ -1553,6 +1655,8 @@ module.exports = {
   enableUploadCode,
   disableUploadCode,
   sendTransferEmails,
+  sendHeldReadyEmails,
+  sendHeldReadyEmailsForPhotos,
   sendTransferRequestEmails,
   notifyFilesReceived,
   // public

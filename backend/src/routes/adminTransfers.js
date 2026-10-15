@@ -389,6 +389,8 @@ router.patch('/:id',
       maxFilesPerUpload: req.body.maxFilesPerUpload,
     });
     if (!transfer) return res.status(404).json({ error: 'Transfer not found' });
+    // Re-activated or extended: a ready mail held back meanwhile (issue 2061).
+    await transferService.sendHeldReadyEmails(transfer.id);
     return successResponse(res, { transfer }, 200, 'Transfer updated');
   }),
 );
@@ -422,7 +424,11 @@ router.post('/:id/files',
         error: 'A file request does not send files out', code: 'NOT_A_SEND',
       });
     }
-    const transfer = await transferService.addFiles(parseInt(req.params.id, 10), req.body.photoIds, req.admin);
+    let transfer = await transferService.addFiles(parseInt(req.params.id, 10), req.body.photoIds, req.admin);
+    // A ready mail held back while nothing was downloadable (issue 2061).
+    if ((await transferService.sendHeldReadyEmails(transfer.id)).sent) {
+      transfer = await transferService.getTransfer(transfer.id);
+    }
     return successResponse(res, { transfer }, 200, 'Files added');
   }),
 );
@@ -467,6 +473,8 @@ router.post('/:id/upload-files',
       });
     }
     await storeExtraFiles(id, req.files);
+    // A ready mail held back while nothing was downloadable (issue 2061).
+    await transferService.sendHeldReadyEmails(id);
     const transfer = await transferService.getTransfer(id);
     return successResponse(
       res,
@@ -574,7 +582,8 @@ router.post('/:id/resend',
       ? await transferService.sendTransferRequestEmails(id, emails)
       : await transferService.sendTransferEmails(id, emails);
     return successResponse(
-      res, { transfer: await transferService.getTransfer(id), sent: result.sent }, 200, 'Email sent',
+      res, { transfer: await transferService.getTransfer(id), sent: result.sent, held: !!result.held }, 200,
+      result.held ? 'Nothing is ready to download yet; the email goes out once a photo finishes processing' : 'Email sent',
     );
   }),
 );
