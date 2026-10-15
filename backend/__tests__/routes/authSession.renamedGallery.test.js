@@ -114,3 +114,68 @@ it('leaves a session already on the new slug alone', async () => {
   expect(res.body.token).toBeUndefined();
   expect(setCookies(res)).toEqual([]);
 });
+
+describe('every token already names this slug', () => {
+  const revoked = async () => {
+    const token = gallery({ eventSlug: newSlug });
+    await require('../../src/utils/tokenRevocation').revokeToken(token, 'test');
+    return token;
+  };
+
+  it('uses a live cookie over a revoked Bearer token the page still keeps', async () => {
+    const live = gallery({ eventSlug: newSlug });
+    const res = await session({ [`gallery_token_${newSlug}`]: live })
+      .set('Authorization', `Bearer ${await revoked()}`);
+    expect(res.body).toMatchObject({ valid: true, eventSlug: newSlug });
+    // Handed back so the page replaces the revoked token it sends.
+    expect(res.body.token).toBe(live);
+  });
+
+  it('uses a live generic cookie over a revoked slug cookie, and repairs the slug cookie', async () => {
+    const live = gallery({ eventSlug: newSlug });
+    const res = await session({ [`gallery_token_${newSlug}`]: await revoked(), gallery_token: live });
+    expect(res.body).toMatchObject({ valid: true, eventSlug: newSlug });
+    expect(res.body.token).toBe(live);
+    // Native downloads send only cookies.
+    expect(cookieValue(res, `gallery_token_${newSlug}`)).toBe(live);
+  });
+
+  it('leaves the cookies alone when the slug cookie already holds the live session', async () => {
+    const live = gallery({ eventSlug: newSlug });
+    const res = await session({ [`gallery_token_${newSlug}`]: live })
+      .set('Authorization', `Bearer ${await revoked()}`);
+    expect(res.body.token).toBe(live);
+    expect(setCookies(res)).toEqual([]);
+  });
+
+  it('prefers the gallery\'s own cookie over the generic one after a dead token', async () => {
+    const res = await session({
+      gallery_token: gallery({ eventSlug: newSlug }),
+      [`gallery_token_${newSlug}`]: gallery({ eventSlug: newSlug, accessLevel: 'client' }),
+    }).set('Authorization', `Bearer ${await revoked()}`);
+    expect(res.body).toMatchObject({ valid: true, eventSlug: newSlug, accessLevel: 'client' });
+  });
+
+  it('keeps a live token in use over another live cookie', async () => {
+    const live = gallery({ eventSlug: newSlug, accessLevel: 'client' });
+    const res = await session({ gallery_token: gallery({ eventSlug: newSlug }) })
+      .set('Authorization', `Bearer ${live}`);
+    expect(res.body).toMatchObject({ valid: true, eventSlug: newSlug, accessLevel: 'client' });
+    expect(res.body.token).toBeUndefined();
+  });
+
+  it('keeps an admin token in use rather than switching to a gallery cookie', async () => {
+    const admin = jwt.sign({ type: 'admin', id: adminId, username: 'admin' }, process.env.JWT_SECRET,
+      { issuer: 'picpeak-auth', expiresIn: '1h' });
+    const res = await session({ [`gallery_token_${newSlug}`]: gallery({ eventSlug: newSlug }) })
+      .set('Authorization', `Bearer ${admin}`);
+    expect(res.body.type).not.toBe('gallery');
+    expect(res.body.token).toBeUndefined();
+  });
+
+  it('still refuses when the only token is revoked', async () => {
+    const res = await session({ [`gallery_token_${newSlug}`]: await revoked() });
+    expect(res.body.valid).not.toBe(true);
+    expect(res.body.token).toBeUndefined();
+  });
+});
