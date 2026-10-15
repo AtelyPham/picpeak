@@ -15,11 +15,20 @@ const mediaProcesses = require('./mediaProcessService');
 const rawWork = new AsyncLocalStorage();
 const attemptContext = require('./mediaAttemptContext');
 const derivativeContext = new AsyncLocalStorage();
-async function publishDerivative(callback) {
+async function publishDerivative(callback, key) {
   const attempt = attemptContext.current() || derivativeContext.getStore();
   await attempt?.assertCurrent();
   const result = await callback();
-  await attempt?.assertCurrent();
+  try {
+    await attempt?.assertCurrent();
+  } catch (error) {
+    // A key named after this lazy scope is its alone and nothing records it
+    // yet, so a superseded source must not leave it behind. A tier is named
+    // after the source instead, which another worker may have just served.
+    const scope = attemptContext.current() ? null : derivativeContext.getStore();
+    if (key && scope && error.code === 'MEDIA_SUPERSEDED' && key.includes(scope.id)) await getStorage().delete(key).catch(() => {});
+    throw error;
+  }
   return result;
 }
 
@@ -57,14 +66,32 @@ function derivativeBasename(name, { cache = false } = {}) {
   const scope = derivativeContext.getStore();
   return scope ? require('./mediaAttemptService').outputName(name, { id: cache ? scope.cacheId : scope.id }) : name;
 }
+// True when the row took the derivative. Unscoped (an ordinary image), a
+// source replaced since `photo` was read makes it false: the rendition
+// describes the old file, so the caller treats it as nothing generated.
 async function publishPhotoDerivative(photo, key, values) {
   const scope = derivativeContext.getStore();
-  if (!scope) return db('photos').where({ id: photo.id }).update(values);
-  await scope.assertCurrent();
+  if (!scope) {
+    if (await sourceGuard(photo).update(values) === 1) return true;
+    // Unscoped keys derive from the source name, not from an attempt id, so
+    // the key can still be a row's own: an event rename moves the original
+    // and keeps the rendition. When in doubt, keep the file.
+    try {
+      const inUse = await db('photos').where('thumbnail_path', key)
+        .orWhere('preview_path', key).orWhere('hero_path', key).first();
+      if (!inUse) await getStorage().delete(key).catch(() => {});
+    } catch (e) {
+      logger.warn(`Could not check whether ${key} is in use; keeping it: ${e.message}`);
+    }
+    logger.info(`Source of photo ${photo.id} changed while its rendition was built; not recording ${key}`);
+    return false;
+  }
+  // The guarded update is the source check; its refusal drops the file.
   if (await sourceGuard(photo).update(values) !== 1) {
     await getStorage().delete(key).catch(() => {});
     throw Object.assign(new Error('Media source was superseded'), { code: 'MEDIA_SUPERSEDED', status: 422 });
   }
+  return true;
 }
 
 /**
@@ -589,7 +616,7 @@ async function generateThumbnail(imagePath, options = {}) {
       throw new Error('Generated thumbnail is empty');
     }
 
-    await publishDerivative(() => storage.put(thumbnailRelKey, buffer, { contentType: contentTypeFor(settings.format) }));
+    await publishDerivative(() => storage.put(thumbnailRelKey, buffer, { contentType: contentTypeFor(settings.format) }), thumbnailRelKey);
     // Tile placeholder (issue 1733): for a caller that writes the photo row.
     if (options.meta) options.meta.thumbHash = await require('./thumbHash').computeThumbHash(buffer);
 
@@ -897,11 +924,11 @@ async function regenerateThumbnail(photo, { boundVideoSource = true } = {}) {
   }
 
   if (newThumbnailPath) {
-    await publishPhotoDerivative(photo, newThumbnailPath, {
+    if (!await publishPhotoDerivative(photo, newThumbnailPath, {
       thumbnail_path: newThumbnailPath,
       thumb_hash: meta.thumbHash || null,
       ...(posterNote !== undefined ? { processing_error: posterNote } : {}),
-    });
+    })) return null;
 
     logger.info(`Regenerated thumbnail for photo ${photo.id}`);
     return newThumbnailPath;
@@ -951,7 +978,7 @@ async function regenerateVideoThumbnail(event, photo, isExternal, { boundSource 
   // Resolves to { thumbnailKey, placeholder, thumbnailError } or null, so the
   // caller can write the processing note the way the upload paths do.
   const generate = async (localPath) => {
-    const result = await publishDerivative(() => processUploadedVideo(localPath, thumbnailKey));
+    const result = await publishDerivative(() => processUploadedVideo(localPath, thumbnailKey), thumbnailKey);
     if (!result?.thumbnailKey) return null;
     return { thumbnailKey: result.thumbnailKey, placeholder: Boolean(result.placeholder), thumbnailError: result.thumbnailError || null, thumbHash: result.thumbHash || null };
   };
@@ -1038,7 +1065,7 @@ async function generateVideoPlaceholder(originalFilename, options = {}) {
       .jpeg({ quality: settings.quality || DEFAULT_THUMBNAIL_QUALITY })
       .toBuffer();
 
-    await publishDerivative(() => storage.put(thumbnailRelKey, buffer, { contentType: 'image/jpeg' }));
+    await publishDerivative(() => storage.put(thumbnailRelKey, buffer, { contentType: 'image/jpeg' }), thumbnailRelKey);
 
     return thumbnailRelKey;
   } catch (error) {
@@ -1130,7 +1157,7 @@ async function generateHeroImage(imagePath, options = {}) {
       throw new Error('Generated hero image is empty');
     }
 
-    await publishDerivative(() => storage.put(heroRelKey, buffer, { contentType: 'image/jpeg' }));
+    await publishDerivative(() => storage.put(heroRelKey, buffer, { contentType: 'image/jpeg' }), heroRelKey);
 
     logger.info(`Generated hero image for ${filename} → ${heroRelKey}`);
     return heroRelKey;
@@ -1254,7 +1281,7 @@ async function regenerateHeroImage(photo, anchor) {
       anchor: heroAnchor,
     });
     if (newHeroPath) {
-      await publishPhotoDerivative(photo, newHeroPath, { hero_path: newHeroPath, hero_anchor: heroAnchor });
+      if (!await publishPhotoDerivative(photo, newHeroPath, { hero_path: newHeroPath, hero_anchor: heroAnchor })) return null;
       await dropSupersededHero(photo, newHeroPath);
     }
     return newHeroPath;
@@ -1287,7 +1314,7 @@ async function regenerateHeroImage(photo, anchor) {
   });
 
   if (newHeroPath) {
-    await publishPhotoDerivative(photo, newHeroPath, { hero_path: newHeroPath, hero_anchor: heroAnchor });
+    if (!await publishPhotoDerivative(photo, newHeroPath, { hero_path: newHeroPath, hero_anchor: heroAnchor })) return null;
     await dropSupersededHero(photo, newHeroPath);
 
     logger.info(`Regenerated hero image for photo ${photo.id}`);
@@ -1413,7 +1440,7 @@ async function generatePreviewImage(imagePath, options = {}) {
 
     await publishDerivative(() => storage.put(previewRelKey, buffer, {
       contentType: needsWebp ? 'image/webp' : 'image/jpeg',
-    }));
+    }), previewRelKey);
 
     logger.info(`Generated preview image for ${filename} → ${previewRelKey}`);
     return previewRelKey;
@@ -1845,7 +1872,7 @@ async function regeneratePreviewImage(photo) {
   }
 
   if (newPreviewPath) {
-    await publishPhotoDerivative(photo, newPreviewPath, { preview_path: newPreviewPath });
+    if (!await publishPhotoDerivative(photo, newPreviewPath, { preview_path: newPreviewPath })) return null;
     return newPreviewPath;
   }
 
