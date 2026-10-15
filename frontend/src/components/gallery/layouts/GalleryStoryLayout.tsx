@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { GalleryEmptyMessage } from '../GalleryEmptyMessage';
-import { Search, Heart, LogOut, Download, CheckSquare, X, Package, ClipboardList } from 'lucide-react';
+import { Search, Heart, LogOut, Download, CheckSquare, X, Package, ClipboardList, Upload } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { Button } from '../../common';
 
 import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import type { Photo } from '../../../types';
@@ -89,6 +90,7 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
   welcomeMessage,
   storyGridMode = 'fixed',
   onLogout,
+  onUploadClick,
   showOriginalFilename = false,
 
   people,
@@ -428,6 +430,7 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
   const canDownloadAll = allowDownloads && Boolean(onDownloadEverything || photos.length > 0);
   const downloadAllLabel = t('common.downloadAll', 'Download All');
   const naturalGrid = storyGridMode === 'natural';
+  const uploadLabel = t('upload.uploadPhotos', 'Upload Photos');
 
   // #1160: a folder-only root has no photos to show here, but the folder tiles
   // above prove the gallery isn't empty — render the shell (hero, logout,
@@ -436,6 +439,34 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
     return (
       <div className="text-center py-12">
         <GalleryEmptyMessage filtered={emptyIsFiltered} />
+        {/* No nav in this branch, and an upload-only gallery starts empty:
+            the guest still needs a way to add the first photos. */}
+        {onUploadClick && (
+          <Button
+            variant="primary"
+            className="mt-4"
+            leftIcon={<Upload className="w-4 h-4" />}
+            onClick={onUploadClick}
+            data-gallery-focus="upload"
+          >
+            {uploadLabel}
+          </Button>
+        )}
+        {/* Event-wide like the nav button (issue 1733, A3d): a filter that
+            leaves nothing on screen must not take the favourites' list with it. */}
+        {onCopyFilenames && copyFilenamesCount > 0 && (
+          <div className="mt-4 flex justify-center">
+            <Button
+              variant="outline"
+              size="sm"
+              leftIcon={<ClipboardList className="w-4 h-4" />}
+              onClick={onCopyFilenames}
+              className="text-xs sm:text-sm"
+            >
+              {t('gallery.copyFilenames.button', 'Copy filenames')} ({copyFilenamesCount})
+            </Button>
+          </div>
+        )}
       </div>
     );
   }
@@ -463,6 +494,21 @@ export const GalleryStoryLayout: React.FC<GalleryStoryLayoutProps> = ({
           {/* Issue 1710: the footer button was the only Download All in the
               layout, unreachable without scrolling through every scene. Same
               handler, same resolution / quota / whole-gallery flow. */}
+          {/* Guest upload: this layout has no gallery header, which is where
+              every other layout offers it. */}
+          {onUploadClick && (
+            <button
+              type="button"
+              className="story-nav-btn"
+              onClick={onUploadClick}
+              aria-label={uploadLabel}
+              title={uploadLabel}
+              data-testid="story-nav-upload"
+              data-gallery-focus="upload"
+            >
+              <Upload size={20} />
+            </button>
+          )}
           {canSelect && (
             <button
               type="button"
