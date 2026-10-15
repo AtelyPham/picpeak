@@ -5,7 +5,7 @@ const { REACTION_EMOJIS } = require('../constants/reactions');
 const { isValidColorLabel, SHARED_COLOR_LABEL_IDENTITY } = require('../constants/colorLabels');
 const { isValidDecision } = require('../constants/photoDecisions');
 const { resolveEventFeedbackDefaults, DEFAULT_KEYBIND_MODE, KEYBIND_MODES } = require('./feedbackDefaults');
-const { applyPhotoVisibilityFilter, joinLivePhotos, livePhotos, wherePhotoLive } = require('../utils/photoVisibility');
+const { applyPhotoVisibilityFilter, joinLivePhotos, livePhotos, wherePhotoLive, wherePhotoProcessed, wherePhotoProcessedById } = require('../utils/photoVisibility');
 const selectionSubmissions = require('./selectionSubmissions');
 const { serializeAnnotation, withParsedAnnotation } = require('../utils/photoAnnotation');
 
@@ -242,6 +242,11 @@ class FeedbackService {
     const query = executor('photo_feedback')
       // Nor do likes on photos in the trash: the guest cannot see or undo them.
       .modify(wherePhotoLive, 'photo_feedback.photo_id')
+      // Nor on photos back in processing (an admin retry): the gallery list
+      // leaves them out and the photo's feedback route answers 404, so the
+      // guest could neither see nor undo the pick. Once complete it counts
+      // again, which may put the guest over the cap until they remove one.
+      .modify(wherePhotoProcessedById, 'photo_feedback.photo_id')
       // Hidden rows do not count against the guest's cap (#1150). They are
       // absent everywhere else — the heart is empty, the tallies skip them,
       // and submitFeedback now treats one as room for a fresh row. Counting
@@ -909,14 +914,15 @@ class FeedbackService {
    *
    * `viewerAccessLevel` scopes the totals to the photos that viewer may see
    * (photoVisibility): the guest /feedback-summary passes req.accessLevel so
-   * feedback on client-hidden photos does not show in its counts. Omitted,
+   * feedback on client-hidden photos, or on photos not finished processing,
+   * does not show in its counts. Omitted,
    * the totals cover every photo — the admin analytics and the archive.
    */
   async getEventFeedbackSummary(eventId, { viewerAccessLevel } = {}) {
     try {
       const photos = await livePhotos(db)
         .where('event_id', eventId)
-        .select('id', 'filename', 'visibility', 'moderation_status', 'feedback_count', 'like_count', 'average_rating', 'favorite_count', 'reaction_count', 'color_label_count', 'approved_count', 'rejected_count')
+        .select('id', 'filename', 'visibility', 'moderation_status', 'processing_status', 'feedback_count', 'like_count', 'average_rating', 'favorite_count', 'reaction_count', 'color_label_count', 'approved_count', 'rejected_count')
         .orderBy('average_rating', 'desc')
         .orderBy('like_count', 'desc');
 
@@ -931,7 +937,9 @@ class FeedbackService {
         // Feedback on photos in the trash does not count, as above.
         .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id');
       if (viewerAccessLevel !== undefined) {
-        statsQuery = applyPhotoVisibilityFilter(statsQuery, viewerAccessLevel);
+        // A photo back in processing is not in the viewer's gallery list
+        // either; the admin totals keep its feedback, as they keep a hidden one.
+        statsQuery = wherePhotoProcessed(applyPhotoVisibilityFilter(statsQuery, viewerAccessLevel));
       }
       const totalStats = await statsQuery
         .select(

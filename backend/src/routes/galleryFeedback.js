@@ -10,7 +10,9 @@ const feedbackModeration = require('../services/feedbackModeration');
 const selectionSubmissions = require('../services/selectionSubmissions');
 const { db, logActivity } = require('../database/db');
 const logger = require('../utils/logger');
-const { isPhotoHiddenFromViewer, applyPhotoVisibilityFilter, joinLivePhotos, livePhotos } = require('../utils/photoVisibility');
+const {
+  isPhotoHiddenFromViewer, isPhotoProcessed, applyPhotoVisibilityFilter, joinLivePhotos, livePhotos, wherePhotoProcessed,
+} = require('../utils/photoVisibility');
 const {
   validatePhotoId,
   validateFeedbackSubmission,
@@ -150,8 +152,10 @@ router.get('/:slug/photos/:photoId/feedback',
         .first();
       
       // A client-hidden photo does not exist for a viewer who cannot see it:
-      // no reading its comments and counts, no adding to them.
-      if (!photo || isPhotoHiddenFromViewer(photo, req.accessLevel)) {
+      // no reading its comments and counts, no adding to them. Nor does one
+      // the worker has not finished or failed on: the gallery list leaves it
+      // out (wherePhotoProcessed).
+      if (!photo || isPhotoHiddenFromViewer(photo, req.accessLevel) || !isPhotoProcessed(photo)) {
         return res.status(404).json({ error: 'Photo not found' });
       }
       
@@ -319,8 +323,10 @@ router.post('/:slug/photos/:photoId/feedback',
         .first();
 
       // A client-hidden photo does not exist for a viewer who cannot see it:
-      // no reading its comments and counts, no adding to them.
-      if (!photo || isPhotoHiddenFromViewer(photo, req.accessLevel)) {
+      // no reading its comments and counts, no adding to them. Nor does one
+      // the worker has not finished or failed on: the gallery list leaves it
+      // out (wherePhotoProcessed).
+      if (!photo || isPhotoHiddenFromViewer(photo, req.accessLevel) || !isPhotoProcessed(photo)) {
         return res.status(404).json({ error: 'Photo not found' });
       }
 
@@ -519,11 +525,11 @@ router.post('/:slug/feedback/bulk',
       }
 
       const photoIds = [...new Set(req.body.photo_ids)];
-      // Same two conditions as the single route: the photo is this event's,
-      // and it is not hidden from this viewer.
+      // Same conditions as the single route: the photo is this event's, it is
+      // not hidden from this viewer, and its processing has finished.
       const rows = await livePhotos(db).whereIn('id', photoIds).where({ event_id: event.id });
       const rateable = new Set(rows
-        .filter(photo => !isPhotoHiddenFromViewer(photo, req.accessLevel))
+        .filter(photo => !isPhotoHiddenFromViewer(photo, req.accessLevel) && isPhotoProcessed(photo))
         .map(photo => Number(photo.id)));
 
       // One unit per photo that will be rated, reserved before any write.
@@ -636,8 +642,9 @@ router.get('/:slug/feedback-summary',
       const guestSummary = {
         stats: summary.stats,
         top_rated: summary.photos
-          // No filenames or ratings of photos this viewer cannot see.
-          .filter(p => !isPhotoHiddenFromViewer(p, req.accessLevel))
+          // No filenames or ratings of photos this viewer cannot see, nor of
+          // photos the gallery list leaves out while they are processed.
+          .filter(p => !isPhotoHiddenFromViewer(p, req.accessLevel) && isPhotoProcessed(p))
           .filter(p => p.average_rating > 0)
           .slice(0, 5)
           .map(p => ({
@@ -686,7 +693,9 @@ router.get('/:slug/my-feedback',
       }
 
       const query = applyPhotoVisibilityFilter(
-        db('photo_feedback')
+        // A photo back in processing (an admin retry) is not in the gallery
+        // list; its rows are kept and come back once it is complete again.
+        wherePhotoProcessed(db('photo_feedback'))
           .modify(joinLivePhotos, 'photo_feedback.photo_id', 'photos.id')
           .where('photo_feedback.event_id', event.id)
           // Hidden rows are absent for the guest who left them too (#1150). In
