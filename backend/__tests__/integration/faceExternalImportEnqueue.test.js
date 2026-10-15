@@ -87,6 +87,7 @@ describe('external import queues faces (#1090)', () => {
         return 'thumbnails/mock.jpg';
       }),
       ensureThumbnail: jest.fn(),
+      withProcessableImage: async (localPath) => ({ path: localPath, cleanup: () => {} }),
     }));
 
     jest.doMock('../../src/utils/logger', () => ({

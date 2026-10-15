@@ -1248,11 +1248,17 @@ async function regenerateHeroImage(photo, anchor) {
       return null;
     }
     const sourceBasename = path.basename(photo.external_relpath || photo.filename || `photo-${photo.id}`);
-    newHeroPath = await generateHeroImage(localPath, {
-      regenerate: true,
-      outputBasename: derivativeBasename(`ext${photo.id}_${sourceBasename}`),
-      anchor: heroAnchor,
-    });
+    // A camera RAW is cut from its embedded preview; sharp cannot decode it.
+    const proc = await withProcessableImage(localPath, sourceBasename);
+    try {
+      newHeroPath = await generateHeroImage(proc.path, {
+        regenerate: true,
+        outputBasename: derivativeBasename(`ext${photo.id}_${sourceBasename}`),
+        anchor: heroAnchor,
+      });
+    } finally {
+      await proc.cleanup();
+    }
     if (newHeroPath) {
       await publishPhotoDerivative(photo, newHeroPath, { hero_path: newHeroPath, hero_anchor: heroAnchor });
       await dropSupersededHero(photo, newHeroPath);
@@ -1741,9 +1747,14 @@ async function ensurePreviewImageAtWidthUnguarded(photo, width) {
   try {
     if (isExternal) {
       const localPath = resolvePhotoFilePath(event, photo);
-      return await generatePreviewImage(localPath, {
-        regenerate: true, outputBasename, longEdge: width, interactive: true,
-      });
+      const proc = await withProcessableImage(localPath, photo.external_relpath || photo.filename);
+      try {
+        return await generatePreviewImage(proc.path, {
+          regenerate: true, outputBasename, longEdge: width, interactive: true,
+        });
+      } finally {
+        await proc.cleanup();
+      }
     }
     const sourceKey = resolvePhotoStorageKey(event, photo);
     if (!sourceKey) return null;
@@ -1816,7 +1827,13 @@ async function regeneratePreviewImage(photo) {
     const sourceBasename = path.basename(photo.external_relpath || photo.filename || `photo-${photo.id}`);
     const outputBasename = derivativeBasename(`ext${photo.id}_${sourceBasename}`);
     logger.info(`Ensuring preview for external photo ${photo.id} from ${localPath}`);
-    newPreviewPath = await generatePreviewImage(localPath, { regenerate: true, outputBasename });
+    // A camera RAW is rendered from its embedded preview; sharp cannot decode it.
+    const proc = await withProcessableImage(localPath, sourceBasename);
+    try {
+      newPreviewPath = await generatePreviewImage(proc.path, { regenerate: true, outputBasename });
+    } finally {
+      await proc.cleanup();
+    }
   } else {
     let sourceKey;
     try {
