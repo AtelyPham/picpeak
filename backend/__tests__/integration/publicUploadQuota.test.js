@@ -330,6 +330,79 @@ test('a request from another host whose heartbeat lapsed is reclaimed; its objec
   // The slot it held is free again, including through the upload route.
   expect((await attach(transferRequest(), 'files')).status).toBe(201);
 });
+// An authenticated upload whose process died after its S3 PUT, before its row.
+async function orphanAdminPromotion(key) {
+  const orphan = await orphanRequest({ upload_kind: 'admin', rate_bytes: 0, heartbeat_at: Date.now() - quota.STALE_MS - 1000,
+    created_at: new Date().toISOString() });
+  await db('public_upload_objects').insert({ id: require('crypto').randomUUID(), request_id: orphan.id, object_key: key,
+    bytes: 12, files: 1, transfer_id: transfer, account_id: adminId, upload_kind: 'admin' });
+  mockObjects.set(key, 12);
+  return orphan;
+}
+test('an abandoned authenticated S3 object is deleted by maintenance before its ledger record', async () => {
+  jest.spyOn(mockStorage, 'kind').mockReturnValue('s3');
+  const key = 'events/active/owned-quota-gallery/owned-crashed.jpg';
+  const orphan = await orphanAdminPromotion(key);
+  // The admission-path reaper releases the lease without waiting on storage.
+  await quota.cleanupAbandoned();
+  expect(await db('public_upload_requests').where({ id: orphan.id }).first()).toMatchObject({ active: 0 });
+  expect(mockStorage.delete).not.toHaveBeenCalled();
+  expect(await db('public_upload_objects').first()).toMatchObject({ object_key: key, state: 'uncertain' });
+  await quota.retryRetainedObjects();
+  expect(mockStorage.delete).toHaveBeenCalledWith(key);
+  expect(mockObjects.size).toBe(0); expect(await db('public_upload_objects')).toHaveLength(0);
+});
+test('an authenticated S3 object that cannot be deleted keeps its record, so no importer takes it', async () => {
+  jest.spyOn(mockStorage, 'kind').mockReturnValue('s3');
+  const key = 'events/active/owned-quota-gallery/owned-undeletable.jpg';
+  await orphanAdminPromotion(key);
+  await quota.cleanupAbandoned();
+  mockStorage.delete.mockRejectedValueOnce(new Error('owned S3 outage'));
+  await quota.retryRetainedObjects();
+  expect(mockObjects.has(key)).toBe(true);
+  expect(await db('public_upload_objects').first()).toMatchObject({ object_key: key, state: 'uncertain' });
+  expect(await quota.unfinishedKeys([key])).toEqual(new Set([key]));
+  // The next maintenance pass retries it.
+  await quota.retryRetainedObjects();
+  expect(mockObjects.has(key)).toBe(false); expect(await db('public_upload_objects')).toHaveLength(0);
+});
+test('a full batch of objects that never delete does not keep later ones from their retry', async () => {
+  const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const key = n => `events/active/owned-quota-gallery/owned-retained-${n}.jpg`;
+  const rows = Array.from({ length: 101 }, (_, i) => ({ id: id(i + 1), request_id: id(0), object_key: key(i + 1), bytes: 12, files: 1,
+    transfer_id: transfer, account_id: adminId, upload_kind: 'admin', state: 'uncertain' }));
+  for (let i = 0; i < rows.length; i += 50) await db('public_upload_objects').insert(rows.slice(i, i + 50));
+  rows.forEach(row => mockObjects.set(row.object_key, 12));
+  // The first hundred by id stay undeletable.
+  mockStorage.delete.mockImplementation(async k => {
+    if (k !== key(101)) throw new Error('owned access denied');
+    mockObjects.delete(k);
+  });
+  try {
+    await quota.retryRetainedObjects();
+    expect(mockStorage.delete).toHaveBeenCalledTimes(100); expect(mockObjects.has(key(101))).toBe(true);
+    await quota.retryRetainedObjects();
+    expect(mockObjects.has(key(101))).toBe(false);
+    expect(Number((await db('public_upload_objects').count('id as n').first()).n)).toBe(100);
+    // Past the end it starts over.
+    mockStorage.delete.mockClear(); await quota.retryRetainedObjects();
+    expect(mockStorage.delete).toHaveBeenCalledWith(key(1));
+    await quota.retryRetainedObjects(); // an empty batch resets the cursor for later tests
+  } finally {
+    mockStorage.delete.mockImplementation(async k => { mockObjects.delete(k); });
+  }
+});
+test('a failed authenticated promotion whose S3 delete fails keeps its record until finish() deletes the object', async () => {
+  jest.spyOn(mockStorage, 'kind').mockReturnValue('s3');
+  const session = await quota.begin({ transferId: transfer, maxFiles: 1, mode: 'admin', accountId: adminId, declaredBytes: 12 });
+  const object = await quota.prepareObject(session, 'transfers/owned-admin-failed', 12); mockObjects.set(object.object_key, 12);
+  mockStorage.delete.mockRejectedValueOnce(new Error('owned S3 outage'));
+  await quota.failedObject(object, { storage: mockStorage, settled: true });
+  expect(mockObjects.has(object.object_key)).toBe(true);
+  expect(await db('public_upload_objects').first()).toMatchObject({ id: object.id, state: 'promoting' });
+  await quota.finish(session);
+  expect(mockObjects.size).toBe(0); expect(await db('public_upload_objects')).toHaveLength(0);
+});
 test('a fresh heartbeat from another host is not reclaimed', async () => {
   const orphan = await orphanRequest({ host: 'owned-other-replica', heartbeat_at: Date.now() - 60000 });
   await quota.cleanupAbandoned();
