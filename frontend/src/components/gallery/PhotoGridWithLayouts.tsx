@@ -14,7 +14,7 @@ import { analyticsService } from '../../services/analytics.service';
 import { hasVideoItems, selectLabel } from '../../utils/mediaCounts';
 import { useTheme } from '../../contexts/ThemeContext';
 import { useDownloadQuota } from '../../contexts/DownloadQuotaContext';
-import { isDownloadLimitError, showDownloadLimitReached, type QuotaPhoto } from '../../utils/downloadLimit';
+import { isDownloadLimitError, isSelectionTooLargeError, showDownloadLimitReached, type QuotaPhoto } from '../../utils/downloadLimit';
 import { DownloadQuotaNotice } from './DownloadQuotaNotice';
 import { BulkRating } from './BulkRating';
 import type { LightboxPhotoChangeHandler } from './photoLink';
@@ -381,20 +381,26 @@ export const PhotoGridWithLayouts: React.FC<PhotoGridWithLayoutsProps> = ({
 
     toastify.info(t('gallery.downloading', { count: ids.length }));
 
+    // Over the server's per-download cap the selection stays too, to trim.
+    let keepSelection = false;
     try {
       await galleryService.downloadSelectedPhotos(slug, ids);
       analyticsService.trackGalleryEvent('bulk_download', { gallery: slug, photo_count: ids.length });
     } catch (error) {
       // A download-limit refusal keeps the selection, as the pre-check
-      // above does, so the guest can trim it to what is left.
-      if (isDownloadLimitError(error)) return;
-      toastify.error(t('gallery.downloadError'));
-    }
-    setSelectedPhotos(new Set());
-    if (parentToggleSelectionMode) {
-      parentToggleSelectionMode();
-    } else {
-      setLocalSelectionMode(false);
+      // above does, so the guest can trim it to what is left; so does a
+      // selection over the server's per-download cap.
+      keepSelection = isDownloadLimitError(error) || isSelectionTooLargeError(error);
+      if (!isDownloadLimitError(error)) toastify.error(t('gallery.downloadError'));
+    } finally {
+      if (!keepSelection) {
+        setSelectedPhotos(new Set());
+        if (parentToggleSelectionMode) {
+          parentToggleSelectionMode();
+        } else {
+          setLocalSelectionMode(false);
+        }
+      }
     }
   };
 
