@@ -19,6 +19,7 @@ const { getAppSetting } = require('../utils/appSettings');
 const { parseBooleanInput } = require('../utils/parsers');
 const { whereTimestamp, formatBoolean } = require('../utils/dbCompat');
 const { toTimestamp } = require('../utils/dateNormalize');
+const { toDateOnly } = require('../utils/dateOnly');
 
 const DEFAULT_DELIVERY_DAYS = 7;
 const REMINDER_LEAD_HOURS = 24;
@@ -29,13 +30,36 @@ const isPartial = (event) => event && event.delivery_status === 'partial';
 /** Event date + N days (Settings → Event defaults), at noon UTC so the date never shifts by timezone. */
 async function defaultDueAt(event, conn = db) {
   const days = Number(await getAppSetting('event_default_delivery_days', DEFAULT_DELIVERY_DAYS, conn)) || DEFAULT_DELIVERY_DAYS;
-  // Postgres hands a DATE column back as a Date, SQLite as a string.
-  const raw = event.event_date instanceof Date && !Number.isNaN(event.event_date.getTime())
-    ? event.event_date.toISOString()
-    : String(event.event_date || '');
-  const base = raw.slice(0, 10);
+  // Postgres hands a DATE column back as a Date at the server's local
+  // midnight (the day before in UTC east of Greenwich), SQLite as a string.
+  const base = toDateOnly(event.event_date) || '';
   const start = /^\d{4}-\d{2}-\d{2}$/.test(base) ? new Date(`${base}T12:00:00Z`) : new Date();
   return new Date(start.getTime() + days * 864e5);
+}
+
+/**
+ * The end of the promised day, in epoch ms (NaN when unreadable). The stored
+ * value is a calendar day at noon UTC: "by the 20th" lasts until the 20th is
+ * over in UTC, the rule the admin screens (deliveryStatus.ts) use too.
+ */
+function endOfDueDay(value) {
+  const ms = toTimestamp(value);
+  if (!Number.isFinite(ms)) return NaN;
+  return Date.parse(`${new Date(ms).toISOString().slice(0, 10)}T23:59:59.999Z`);
+}
+
+/**
+ * A `delivery_due_at` from the API as the stored ISO string. A bare date, or a
+ * date-time without a zone, names a calendar day: stored at noon UTC like the
+ * settings form and the default, instead of being read in the server's zone
+ * (the day before in UTC east of Greenwich). A full instant is kept as given.
+ */
+function parseDueAtInput(value) {
+  if (!value) return null;
+  const text = String(value).trim();
+  const zoneless = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/.exec(text);
+  if (zoneless) return new Date(`${zoneless[1]}T12:00:00.000Z`).toISOString();
+  return new Date(text).toISOString();
 }
 
 /**
@@ -61,8 +85,9 @@ async function enterPartialColumns(event, { dueAtGiven = false } = {}) {
     delivery_overdue_notified_at: null,
   };
   if (dueAtGiven) return columns;
-  const stored = event.delivery_due_at ? Date.parse(event.delivery_due_at) : NaN;
-  if (!Number.isFinite(stored) || stored <= Date.now()) {
+  // A promise for today still stands: past only once its day is over.
+  const end = endOfDueDay(event.delivery_due_at);
+  if (!Number.isFinite(end) || end < Date.now()) {
     columns.delivery_due_at = (await defaultDueAt(event)).toISOString();
     columns.delivery_due_source = 'default';
   }
@@ -205,9 +230,8 @@ async function runDeliveryReminderPass({ now = new Date() } = {}) {
   for (const event of events) {
     // Promised "by the 20th" means the whole 20th: overdue only once that
     // calendar day is over, not at the stored noon.
-    const dueDay = String(event.delivery_due_at instanceof Date ? event.delivery_due_at.toISOString() : event.delivery_due_at).slice(0, 10);
-    const endOfDueDay = Date.parse(`${dueDay}T23:59:59.999Z`);
-    const overdue = Number.isFinite(endOfDueDay) ? endOfDueDay < now.getTime() : new Date(event.delivery_due_at) <= now;
+    const end = endOfDueDay(event.delivery_due_at);
+    const overdue = Number.isFinite(end) ? end < now.getTime() : new Date(event.delivery_due_at) <= now;
     const column = overdue ? 'delivery_overdue_notified_at' : 'delivery_reminder_sent_at';
     if (event[column]) continue;
     // Nobody to tell: no mail, no "reminded" log line, and no claim either,
@@ -252,6 +276,7 @@ module.exports = {
   MAX_PLACEHOLDER_TILES,
   isPartial,
   defaultDueAt,
+  parseDueAtInput,
   enterPartialColumns,
   markFirstLookArrived,
   guestDeliveryPayload,

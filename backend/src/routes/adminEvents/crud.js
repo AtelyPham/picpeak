@@ -1175,7 +1175,7 @@ module.exports = (router) => {
     body('folder_structure').optional().isBoolean(),
     body('delivery_status').optional().isIn(['complete', 'partial']),
     body('delivery_expected_count').optional({ nullable: true, checkFalsy: true }).isInt({ min: 1, max: 100000 }),
-    body('delivery_due_at').optional({ nullable: true, checkFalsy: true }).isISO8601(),
+    body('delivery_due_at').optional({ nullable: true, checkFalsy: true }).isISO8601({ strict: true }),
     body('delivery_badge_label').optional({ nullable: true }).isString().isLength({ max: 60 }),
     // Migration 143 — per-event reminder overrides. All three are
     // optional; nullable values are accepted so admins can clear an
@@ -1973,7 +1973,7 @@ module.exports = (router) => {
         }
       }
       if (Object.prototype.hasOwnProperty.call(updates, 'delivery_due_at')) {
-        updates.delivery_due_at = updates.delivery_due_at ? new Date(updates.delivery_due_at).toISOString() : null;
+        updates.delivery_due_at = require('../../services/deliveryService').parseDueAtInput(updates.delivery_due_at);
         if (!Object.prototype.hasOwnProperty.call(updates, 'delivery_due_source')) updates.delivery_due_source = 'manual';
         // A new promise gets its own reminders.
         updates.delivery_reminder_sent_at = null;

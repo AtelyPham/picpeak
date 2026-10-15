@@ -274,9 +274,40 @@ describe('folder ingest and two-stage delivery', () => {
       expect(Date.parse(ev.delivery_due_at)).toBeGreaterThan(Date.parse('2020-01-01T12:00:00.000Z'));
     });
 
+    it('keeps a promise for today when the first look starts after its stored noon', async () => {
+      // Stored at noon UTC today; by now (later today) the noon instant is
+      // past, but "by today" still stands until the UTC day is over.
+      const today = new Date().toISOString().slice(0, 10);
+      const stored = `${today}T12:00:00.000Z`;
+      const realNow = Date.now;
+      Date.now = () => Date.parse(`${today}T13:00:00.000Z`);
+      try {
+        const columns = await delivery().enterPartialColumns({ event_date: '2026-07-03', delivery_due_at: stored });
+        expect(columns.delivery_due_at).toBeUndefined();
+        Date.now = () => Date.parse(`${today}T23:59:59.999Z`) + 1;
+        const next = await delivery().enterPartialColumns({ event_date: '2026-07-03', delivery_due_at: stored });
+        expect(next.delivery_due_source).toBe('default');
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
     it('computes the default due date from a DATE column that arrives as a Date (Postgres)', async () => {
-      const due = await delivery().defaultDueAt({ event_date: new Date('2026-07-03T00:00:00.000Z') });
+      // pg hands a DATE back at the server's local midnight; east of UTC that
+      // instant is still the day before in UTC. The suite runs in the host's
+      // zone (UTC on CI) and TZ does not re-bind in a running process, so the
+      // Berlin case runs in a child process.
+      const due = await delivery().defaultDueAt({ event_date: new Date(2026, 6, 3) });
       expect(due.toISOString().slice(0, 10)).toBe('2026-07-10');
+      const out = require('child_process').execFileSync(process.execPath, ['-e', `
+        const { defaultDueAt } = require(${JSON.stringify(path.resolve(__dirname, '../../src/services/deliveryService'))});
+        const noSettings = () => ({ where: () => ({ first: async () => null }) });
+        defaultDueAt({ event_date: new Date(2026, 6, 3) }, noSettings)
+          .then((d) => { process.stdout.write(JSON.stringify({ offset: new Date(2026, 6, 3).getTimezoneOffset(), due: d.toISOString() })); process.exit(0); });
+      `], { env: { ...process.env, TZ: 'Europe/Berlin' }, encoding: 'utf8' });
+      const seen = JSON.parse(out);
+      expect(seen.offset).toBe(-120); // the zone really applies in the child
+      expect(seen.due).toBe('2026-07-10T12:00:00.000Z');
     });
 
     it('two completions racing each other notify once', async () => {
