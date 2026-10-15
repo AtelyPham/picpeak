@@ -904,7 +904,9 @@ async function reactivateCustomer(id, reactivatedByAdminId) {
  *     and any backup stop carrying their data (#1593). Matched on the
  *     address as stored *before* this function rewrites it to the sentinel
  *     below, case-insensitively (an address stored with different casing
- *     than the account is still the same mailbox). Contract mail queued to
+ *     than the account is still the same mailbox), and on each former
+ *     address for the time the customer held it (formerAddressWindows,
+ *     issue 1971). Contract mail queued to
  *     a signer's own address (not the account email) is covered only for
  *     the unsigned contracts this erasure redacts, and only rows whose
  *     email_data names one of those contracts — see
@@ -953,6 +955,96 @@ async function contractSignerQueueTargets(contractPlan) {
     if (emails.size) byContract.set(Number(contract.id), { contractNumber: String(contract.contract_number), emails });
   }
   return byContract.size ? byContract : null;
+}
+
+/**
+ * The addresses this customer held before their current one, each with the
+ * window they held it in (issue 1971). updateCustomer changes the address
+ * without touching email_queue, so mail queued or sent to a former address
+ * would otherwise survive the erasure. Read from the customer's own change
+ * history (migration 219), which records every email change with its time;
+ * an address changed before that migration is not recorded and not found.
+ *
+ * The window, not the address alone, decides: emails are unique only among
+ * current accounts, so a former address may belong to another customer now
+ * (or did before this one took it), and their mail must not be touched. An
+ * address gets a window only when the history shows when the customer took
+ * it: a recorded change to it, or the account's own `created` entry. Mail
+ * queued before the account existed (the portal invitation) is not matched
+ * on a former address: an invitation does not reserve the address, so a
+ * passive account holding it then may have moved off only before the
+ * acceptance created this one. An account created before migration 219 has
+ * no `created` entry, so its first recorded address (which it may have
+ * taken in an unrecorded change) is not matched either. Nor is mail that
+ * belongs to another account than the address holder's
+ * (NOT_FORMER_ADDRESS_MAIL): an invitation is addressed to whoever accepts
+ * it, which can be a new account once a passive holder has moved off, and
+ * admin mail belongs to the admin account with that address.
+ * Windows are built only from email changes whose times follow the history
+ * order; any such entry out of order or unreadable leaves no former address
+ * matched.
+ */
+const NOT_FORMER_ADDRESS_MAIL = ['customer_invitation', 'admin_invitation', 'admin_password_reset'];
+
+async function formerAddressWindows(trx, customer) {
+  const rows = await trx('accounting_change_history')
+    .where({ document_type: 'customer', entity_type: 'customer', document_id: customer.id })
+    .orderBy('id', 'asc')
+    .select('action', 'changes', 'created_at');
+  const current = String(customer.email || '').toLowerCase();
+  const windows = [];
+  let held = null;
+  let since = null;
+  let previous = null;
+  for (const row of rows) {
+    const changes = typeof row.changes === 'string' ? JSON.parse(row.changes) : row.changes;
+    const from = String(changes?.email?.from || '').toLowerCase();
+    const to = String(changes?.email?.to || '').toLowerCase();
+    if (from === to) continue;
+    const at = storedTimestamp(row.created_at);
+    if (!at || (previous && at < previous)) return [];
+    previous = at;
+    if (row.action === 'created') {
+      held = to || null;
+      since = at;
+      continue;
+    }
+    if (from && held === from && since && from !== current) {
+      // From the first whole second after taking the address up to (not
+      // including) the second it was handed over in. A queued row stamped in
+      // the hand-over instant could be the next owner's, and a restore
+      // stores SQLite queue times (and possibly these history times) floored
+      // to the second (normaliseSqliteEmailQueue), which could otherwise
+      // slide the next owner's mail back inside the window. Both bounds hold
+      // whether a time is stored to the millisecond or floored. The lower
+      // bound is exclusive: SQLite reads a time with more than three
+      // fractional digits rounded to the millisecond (julianday), which can
+      // lift a row from just before the taking onto the whole second.
+      const first = new Date(Math.floor(since.getTime() / 1000) * 1000 + 1000);
+      const before = new Date(Math.floor(at.getTime() / 1000) * 1000);
+      if (first < before) windows.push({ email: from, since: first, before });
+    }
+    held = to || null;
+    since = at;
+  }
+  return windows;
+}
+
+/**
+ * A timestamp column value as a Date, whatever shape it was stored in: a
+ * Date (PostgreSQL), epoch ms as a number or digit string, an ISO string, or
+ * SQLite's CURRENT_TIMESTAMP text ('YYYY-MM-DD HH:MM:SS', UTC). Null when
+ * absent or unreadable.
+ */
+function storedTimestamp(value) {
+  if (value == null || value === '') return null;
+  let date;
+  if (value instanceof Date) date = value;
+  else if (typeof value === 'number' || /^\d+$/.test(String(value))) date = new Date(Number(value));
+  else if (/^\d{4}-\d\d-\d\d[ T]\d\d:\d\d(:\d\d(\.\d+)?)?$/.test(String(value))) {
+    date = new Date(`${String(value).replace(' ', 'T')}Z`);
+  } else date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 async function eraseCustomer(id, erasedByAdminId) {
@@ -1004,8 +1096,20 @@ async function eraseCustomer(id, erasedByAdminId) {
     // variables + recipient on every row for this address that isn't
     // already gone (sent, failed, or the row just cancelled above) — done
     // ahead of the customer_accounts update below so the match is still
-    // against the real address, not the sentinel.
-    const forCustomer = (q) => q.whereRaw('LOWER(recipient_email) = LOWER(?)', [customer.email]);
+    // against the real address, not the sentinel. Former addresses count
+    // only for mail queued while the customer held them (formerAddressWindows).
+    const formerWindows = await formerAddressWindows(trx, customer);
+    const forCustomer = (q) => q.where((w) => {
+      w.whereRaw('LOWER(recipient_email) = LOWER(?)', [customer.email]);
+      for (const win of formerWindows) {
+        w.orWhere((f) => {
+          f.whereRaw('LOWER(recipient_email) = ?', [win.email])
+            .whereNotIn('email_type', NOT_FORMER_ADDRESS_MAIL)
+            .modify(whereTimestamp, 'created_at', '>', win.since)
+            .modify(whereTimestamp, 'created_at', '<', win.before);
+        });
+      }
+    });
 
     // Contract mail queued to a signer's own address, attributed to one of
     // the contracts this erasure just redacted (contractSignerQueueTargets).
