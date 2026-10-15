@@ -24,7 +24,10 @@ const { exifColumn } = require('./photoExif');
 const { db } = require('../database/db');
 const { formatBoolean } = require('../utils/dbCompat');
 const { getStorage } = require('./storage');
-const { withLocalCopy } = require('./imageProcessor');
+const { withLocalCopy, extractCaptureDate, withProcessableImage } = require('./imageProcessor');
+const { isRawFilename } = require('../utils/rawFormats');
+const { normalizeUploadMimeType } = require('../utils/fileSecurityUtils');
+const { getAllowedExtensions } = require('./uploadSettings');
 const logger = require('../utils/logger');
 const { promotionSettled } = require('./watchFolderClaims');
 const { unfinishedKeys } = require('./publicUploadQuota');
@@ -106,9 +109,21 @@ async function processEvent(event, storage) {
       if (filename.startsWith('thumb_') || filename.startsWith('hero_')) continue;
       if (filename.startsWith('.')) continue; // dotfiles like .download-cache
 
-      const mimeType = mime.lookup(filename) || 'application/octet-stream';
-      const isImage = mimeType.startsWith('image/');
-      const isVideo = mimeType.startsWith('video/');
+      // A camera RAW is typed from its extension, as the file watcher does:
+      // mime-db knows few RAW types (only .dng as an image, .dcr as a
+      // Director file), so the lookup alone skipped nearly all of them. RAW
+      // is opt-in, the same switch the upload gate reads; a skip is only
+      // logged at debug level because every poll would repeat it.
+      const isRaw = isRawFilename(filename);
+      if (isRaw && !(await getAllowedExtensions()).has(path.extname(filename).slice(1).toLowerCase())) {
+        logger.debug(`[s3AutoImporter] skipping ${entry.key}: not in general_allowed_file_types`);
+        continue;
+      }
+      const mimeType = isRaw
+        ? (normalizeUploadMimeType(filename, '') || 'application/octet-stream')
+        : (mime.lookup(filename) || 'application/octet-stream');
+      const isImage = isRaw || mimeType.startsWith('image/');
+      const isVideo = !isRaw && mimeType.startsWith('video/');
       if (!isImage && !isVideo) continue;
 
       // Capture image dimensions so aspect-aware layouts (masonry /
@@ -122,18 +137,27 @@ async function processEvent(event, storage) {
       let dimensions = null;
       let credit = {};
       let exif = {};
+      let capturedAt = null;
       if (isImage) {
         try {
           dimensions = await withLocalCopy(entry.key, async (localPath) => {
             credit = await resolveCredit({ localPath });
             exif = await exifColumn(localPath);
-            const metadata = await retryTransient(() => sharp(localPath).metadata());
-            // Oriented, not raw — see imageProcessor.orientedDimensions (#1185).
-            const dims = require('./imageProcessor').orientedDimensions(metadata);
-            if (dims.width && dims.height) {
-              return { width: dims.width, height: dims.height };
+            // The row is inserted complete, so the worker never reads it.
+            capturedAt = await extractCaptureDate(localPath);
+            // sharp cannot decode a RAW, so measure its embedded preview.
+            const proc = await withProcessableImage(localPath, filename);
+            try {
+              const metadata = await retryTransient(() => sharp(proc.path).metadata());
+              // Oriented, not raw — see imageProcessor.orientedDimensions (#1185).
+              const dims = require('./imageProcessor').orientedDimensions(metadata);
+              if (dims.width && dims.height) {
+                return { width: dims.width, height: dims.height };
+              }
+              return null;
+            } finally {
+              await proc.cleanup();
             }
-            return null;
           });
         } catch (err) {
           logger.debug(`[s3AutoImporter] could not read dimensions for ${entry.key}: ${err.message}`);
@@ -152,6 +176,7 @@ async function processEvent(event, storage) {
           mime_type: mimeType,
           source_origin: 'managed',
           uploaded_at: new Date().toISOString(),
+          captured_at: capturedAt ? capturedAt.toISOString() : null,
           ...(dimensions && { width: dimensions.width, height: dimensions.height }),
           ...credit,
           ...exif,

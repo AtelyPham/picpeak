@@ -97,7 +97,12 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
     let promotionSettled = false;
     let rowCommitted = false;
     let releaseClaim = null;
-    
+    // What this attempt has written to storage, for the cleanup below.
+    let relativePath;
+    let finalKey;
+    let thumbnailPath;
+    let putStarted = false;
+
     try {
       // Count existing photos to generate sequence number
       let counter = 1;
@@ -152,8 +157,8 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
       }
 
       // Final storage key under events/active/{slug}/{newFilename}.
-      const relativePath = path.posix.join(event.slug, newFilename);
-      const finalKey = path.posix.join('events/active', relativePath);
+      relativePath = path.posix.join(event.slug, newFilename);
+      finalKey = path.posix.join('events/active', relativePath);
 
       // Determine if this is a video or image
       const isVideo = isVideoMimeType(file.mimetype);
@@ -161,7 +166,6 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
 
       // Generate thumbnail and extract metadata FROM the temp file (still on
       // local disk) before uploading the original.
-      let thumbnailPath;
       // Receives the tile placeholder hash of the thumbnail (issue 1733).
       const thumbMeta = {};
       let videoMetadata = null;
@@ -205,10 +209,14 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
         // embedded JPEG preview first and thumbnail/measure THAT. Pass-through
         // for ordinary images. The stored original stays the RAW (download).
         // Use the unique stored filename (not the client-supplied original) so
-        // the RAW-derived thumbnail's global key can't collide across galleries.
+        // the thumbnail's global key can't collide across galleries. For a
+        // non-RAW image proc.outputBasename is unset, and the key used to come
+        // from the temp file, which carries the client's file name: two
+        // uploads of IMG_0001.jpg overwrote each other's thumbnail, and the
+        // failure cleanup below could delete the other upload's.
         const proc = await withProcessableImage(tempPath, newFilename);
         try {
-          thumbnailPath = await generateThumbnail(proc.path, { outputBasename: proc.outputBasename, meta: thumbMeta });
+          thumbnailPath = await generateThumbnail(proc.path, { outputBasename: proc.outputBasename || newFilename, meta: thumbMeta });
           try {
             const sharp = require('./isolatedSharp');
             const metadata = await sharp(proc.path).metadata();
@@ -246,6 +254,7 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
       // the file first (issue 1970).
       releaseClaim = claimPromotion(finalKey);
       try {
+        putStarted = true;
         await getStorage().putFromFile(finalKey, tempPath, {
           contentType: file.mimetype,
         });
@@ -405,6 +414,24 @@ async function processUploadedPhotos(files, eventId, uploadedBy = 'admin', categ
       if (promotion && !rowCommitted) {
         await uploadQuota.failedObject(promotion, { storage: getStorage(), settled: promotionSettled })
           .catch(err => logger.warn('Failed upload charge retained', { objectId: promotion.id, error: err.message }));
+      }
+      // failedObject removes only the original, and only with a reservation.
+      // The thumbnail was stored before the cap check, the insert or a
+      // cancellation could fail, and on S3 no watcher ever finds it again.
+      // Each is removed only when no row names it: a commit whose
+      // acknowledgement was lost has a row that still needs both.
+      if (!rowCommitted && (thumbnailPath || (!promotion && putStarted))) {
+        try {
+          const storage = getStorage();
+          if (thumbnailPath && !(await db('photos').where({ thumbnail_path: thumbnailPath }).first('id'))) {
+            await storage.delete(thumbnailPath).catch(() => {});
+          }
+          if (!promotion && putStarted && !(await db('photos').where({ event_id: eventId, path: relativePath }).first('id'))) {
+            await storage.delete(finalKey).catch(() => {});
+          }
+        } catch (cleanupErr) {
+          logger.warn('Failed upload files retained', { path: relativePath, error: cleanupErr.message });
+        }
       }
       logger.error(`Error processing file ${file.originalname}:`, {
         error: error.message,
