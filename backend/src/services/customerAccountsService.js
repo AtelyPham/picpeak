@@ -904,7 +904,8 @@ async function reactivateCustomer(id, reactivatedByAdminId) {
  *     and any backup stop carrying their data (#1593). Matched on the
  *     address as stored *before* this function rewrites it to the sentinel
  *     below, case-insensitively (an address stored with different casing
- *     than the account is still the same mailbox), and on each former
+ *     than the account is still the same mailbox) since the customer took
+ *     it (currentAddressSince), and on each former
  *     address for the time the customer held it (formerAddressWindows,
  *     issue 1971). Contract mail queued to
  *     a signer's own address (not the account email) is covered only for
@@ -958,6 +959,52 @@ async function contractSignerQueueTargets(contractPlan) {
 }
 
 /**
+ * The queued portal invitations this customer accepted. createInvitation
+ * queues one before the account exists, so neither the current-address
+ * bound nor a former-address window covers it, yet it carries the address
+ * and the invite link of this customer. Its variables cannot attribute it:
+ * they are encrypted while pending and the link token is masked once sent.
+ * Its time can: createInvitation queues the mail right after inserting the
+ * invitation, and it refuses a second invitation to the address while one
+ * is pending, so every customer_invitation mail to the invited address from
+ * the instant the invitation was created until it was accepted is that
+ * invitation's. An invitation to the same address that someone else
+ * accepted, or nobody did, falls outside those windows, also one cancelled
+ * and replaced within the same second (not rounded to the second for that
+ * reason, so a queue time a restore floored to the second can miss it). Must run before the
+ * erasure clears accepted_customer_id. An invitation whose times cannot be
+ * read is left alone rather than guessed at.
+ */
+async function acceptedInvitationQueueIds(trx, customerId) {
+  const invitations = await trx('customer_invitations')
+    .where('accepted_customer_id', customerId)
+    .select('email', 'created_at', 'accepted_at');
+  const windows = [];
+  for (const invitation of invitations) {
+    const email = String(invitation.email || '').toLowerCase();
+    const createdAt = storedTimestamp(invitation.created_at);
+    const acceptedAt = storedTimestamp(invitation.accepted_at);
+    if (!email || !createdAt || !acceptedAt) continue;
+    windows.push({ email, since: createdAt, until: acceptedAt });
+  }
+  if (!windows.length) return [];
+  const rows = await trx('email_queue')
+    .where('email_type', 'customer_invitation')
+    .whereIn('status', ['pending', PROTECTED_PENDING_STATUS, 'sent', 'failed', 'cancelled'])
+    .where((w) => {
+      for (const win of windows) {
+        w.orWhere((q) => {
+          q.whereRaw('LOWER(recipient_email) = ?', [win.email])
+            .modify(whereTimestamp, 'created_at', '>=', win.since)
+            .modify(whereTimestamp, 'created_at', '<=', win.until);
+        });
+      }
+    })
+    .select('id');
+  return rows.map((row) => row.id);
+}
+
+/**
  * The addresses this customer held before their current one, each with the
  * window they held it in (issue 1971). updateCustomer changes the address
  * without touching email_queue, so mail queued or sent to a former address
@@ -971,7 +1018,8 @@ async function contractSignerQueueTargets(contractPlan) {
  * address gets a window only when the history shows when the customer took
  * it: a recorded change to it, or the account's own `created` entry. Mail
  * queued before the account existed (the portal invitation) is not matched
- * on a former address: an invitation does not reserve the address, so a
+ * by address (the invitation this customer accepted is matched by its own
+ * time window, acceptedInvitationQueueIds): an invitation does not reserve the address, so a
  * passive account holding it then may have moved off only before the
  * acceptance created this one. An account created before migration 219 has
  * no `created` entry, so its first recorded address (which it may have
@@ -982,16 +1030,17 @@ async function contractSignerQueueTargets(contractPlan) {
  * admin mail belongs to the admin account with that address.
  * Windows are built only from email changes whose times follow the history
  * order; any such entry out of order or unreadable leaves no former address
- * matched.
+ * matched. An earlier tenure on the current address gets a window too:
+ * currentAddressSince covers only the latest one.
  */
-const NOT_FORMER_ADDRESS_MAIL = ['customer_invitation', 'admin_invitation', 'admin_password_reset'];
+const ADMIN_ACCOUNT_MAIL = ['admin_invitation', 'admin_password_reset'];
+const NOT_FORMER_ADDRESS_MAIL = ['customer_invitation', ...ADMIN_ACCOUNT_MAIL];
 
 async function formerAddressWindows(trx, customer) {
   const rows = await trx('accounting_change_history')
     .where({ document_type: 'customer', entity_type: 'customer', document_id: customer.id })
     .orderBy('id', 'asc')
     .select('action', 'changes', 'created_at');
-  const current = String(customer.email || '').toLowerCase();
   const windows = [];
   let held = null;
   let since = null;
@@ -1009,7 +1058,7 @@ async function formerAddressWindows(trx, customer) {
       since = at;
       continue;
     }
-    if (from && held === from && since && from !== current) {
+    if (from && held === from && since) {
       // From the first whole second after taking the address up to (not
       // including) the second it was handed over in. A queued row stamped in
       // the hand-over instant could be the next owner's, and a restore
@@ -1031,6 +1080,58 @@ async function formerAddressWindows(trx, customer) {
 }
 
 /**
+ * Where the match on the customer's CURRENT address starts. Emails are
+ * unique only among current accounts, so the address may have belonged to
+ * another customer before this one took it, and that mail must stay. The
+ * customer has held it at most since the latest recorded email event that
+ * bounds their tenure: their own latest email change (or `created` entry),
+ * and any change by another customer to or from the address. Returns
+ * `{ at, op }` for `created_at <op> at`: when another customer's history
+ * names the address, the whole-second rule of formerAddressWindows (from the
+ * first whole second after the latest such event, exclusive), since mail in
+ * the hand-over second could be the other holder's; when only the
+ * customer's own history does, from the start of the second they took it,
+ * inclusive, so mail queued right after the creation or change (an
+ * invitation sent straight after a direct creation) is erased too.
+ * `undefined` when no such event is recorded (an account from before
+ * migration 219 nobody else's history names: matched unbounded, as before),
+ * or null when one of those times cannot be read, which matches nothing on
+ * the address.
+ */
+async function currentAddressSince(trx, customer) {
+  const current = String(customer.email || '').toLowerCase();
+  if (!current) return null;
+  // Every customer entry that records an email change; the address is
+  // compared on the parsed values below, not in SQL, so no way of writing it
+  // in the stored JSON (case, escapes) can hide an entry.
+  const rows = await trx('accounting_change_history')
+    .where({ document_type: 'customer', entity_type: 'customer' })
+    .where((q) => q.where('document_id', customer.id)
+      .orWhereRaw('CAST(changes AS TEXT) LIKE ?', ['%"email"%']))
+    .select('document_id', 'changes', 'created_at');
+  let ownLatest;
+  let otherLatest;
+  for (const row of rows) {
+    const changes = typeof row.changes === 'string' ? JSON.parse(row.changes) : row.changes;
+    const from = String(changes?.email?.from || '').toLowerCase();
+    const to = String(changes?.email?.to || '').toLowerCase();
+    if (from === to) continue;
+    const own = Number(row.document_id) === Number(customer.id);
+    if (!own && from !== current && to !== current) continue;
+    const at = storedTimestamp(row.created_at);
+    if (!at) return null;
+    if (own && (!ownLatest || at > ownLatest)) ownLatest = at;
+    if (!own && (!otherLatest || at > otherLatest)) otherLatest = at;
+  }
+  const second = (date) => Math.floor(date.getTime() / 1000) * 1000;
+  if (otherLatest) {
+    const latest = ownLatest && ownLatest > otherLatest ? ownLatest : otherLatest;
+    return { at: new Date(second(latest) + 1000), op: '>' };
+  }
+  return ownLatest ? { at: new Date(second(ownLatest)), op: '>=' } : undefined;
+}
+
+/**
  * A timestamp column value as a Date, whatever shape it was stored in: a
  * Date (PostgreSQL), epoch ms as a number or digit string, an ISO string, or
  * SQLite's CURRENT_TIMESTAMP text ('YYYY-MM-DD HH:MM:SS', UTC). Null when
@@ -1048,7 +1149,7 @@ function storedTimestamp(value) {
 }
 
 async function eraseCustomer(id, erasedByAdminId) {
-  const customer = await db('customer_accounts').where('id', id).first();
+  let customer = await db('customer_accounts').where('id', id).first();
   if (!customer) {
     throw new NotFoundError('Customer', id);
   }
@@ -1085,6 +1186,18 @@ async function eraseCustomer(id, erasedByAdminId) {
   const touchedCampaignIds = new Set();
 
   await db.transaction(async (trx) => {
+    // Re-read (and on PostgreSQL lock) the row here: every address match
+    // below must use the address the account has as the erasure commits. An
+    // email change committing during the planning above would otherwise
+    // leave the old address matched as current, unbounded, after another
+    // customer may have taken it.
+    const locked = trx('customer_accounts').where('id', id);
+    if (trx.client.config.client === 'pg') locked.forUpdate();
+    customer = await locked.first();
+    if (!customer) {
+      throw new NotFoundError('Customer', id);
+    }
+
     erasedDocuments = await customerDocumentsService.markErasedForCustomer(id, trx);
     erasedContracts = await contractErasure.apply(trx, contractPlan, eraseActor);
 
@@ -1096,11 +1209,29 @@ async function eraseCustomer(id, erasedByAdminId) {
     // variables + recipient on every row for this address that isn't
     // already gone (sent, failed, or the row just cancelled above) — done
     // ahead of the customer_accounts update below so the match is still
-    // against the real address, not the sentinel. Former addresses count
-    // only for mail queued while the customer held them (formerAddressWindows).
+    // against the real address, not the sentinel. The current address counts
+    // only for mail queued since the customer took it (currentAddressSince),
+    // former ones only for mail queued while the customer held them
+    // (formerAddressWindows).
+    const currentSince = await currentAddressSince(trx, customer);
     const formerWindows = await formerAddressWindows(trx, customer);
     const forCustomer = (q) => q.where((w) => {
-      w.whereRaw('LOWER(recipient_email) = LOWER(?)', [customer.email]);
+      // Admin mail on the current address belongs to the admin account with
+      // that address, not to the customer (ADMIN_ACCOUNT_MAIL).
+      if (currentSince === undefined) {
+        w.where((c) => {
+          c.whereRaw('LOWER(recipient_email) = LOWER(?)', [customer.email])
+            .whereNotIn('email_type', ADMIN_ACCOUNT_MAIL);
+        });
+      } else if (currentSince) {
+        w.where((c) => {
+          c.whereRaw('LOWER(recipient_email) = LOWER(?)', [customer.email])
+            .whereNotIn('email_type', ADMIN_ACCOUNT_MAIL)
+            .modify(whereTimestamp, 'created_at', currentSince.op, currentSince.at);
+        });
+      } else {
+        w.whereRaw('1 = 0');
+      }
       for (const win of formerWindows) {
         w.orWhere((f) => {
           f.whereRaw('LOWER(recipient_email) = ?', [win.email])
@@ -1139,8 +1270,9 @@ async function eraseCustomer(id, erasedByAdminId) {
         }).map((row) => row.id);
       }
     }
-    const matchQueue = (q) => (signerQueueIds.length > 0
-      ? q.where((w) => forCustomer(w).orWhereIn('id', signerQueueIds))
+    const extraQueueIds = [...signerQueueIds, ...await acceptedInvitationQueueIds(trx, id)];
+    const matchQueue = (q) => (extraQueueIds.length > 0
+      ? q.where((w) => forCustomer(w).orWhereIn('id', extraQueueIds))
       : forCustomer(q));
 
     const cancelledQueueRows = await matchQueue(trx('email_queue'))

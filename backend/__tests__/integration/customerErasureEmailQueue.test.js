@@ -29,6 +29,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 process.env.NODE_ENV = 'test';
 process.env.TEST_DATABASE_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'picpeak-erase-mailq-')), 'db.sqlite');
@@ -558,6 +559,76 @@ describe('customer erasure clears email_queue', () => {
     await expectUntouched(earlierSent, firstAddress, 'Earlier Sent', 'sent');
   });
 
+  it('redacts the invitation the customer accepted, queued before the account existed', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer, updateCustomer } = require('../../src/services/customerAccountsService');
+    const { auditedInsert } = require('../../src/services/accountingHistory');
+    const { digestCapabilityToken } = require('../../src/utils/capabilityToken');
+    const { encryptEmailData, PROTECTED_PENDING_STATUS } = require('../../src/utils/emailQueueEncryption');
+    const { redactRecoveryLinksInData } = require('../../src/utils/emailSecretRedaction');
+    const address = 'invited-first@example.com';
+    const adminId = (await db('admin_users').first('id')).id;
+
+    // Stored the way production stores them: encrypted while pending, the
+    // link token masked once sent. Nothing in the variables names the
+    // invitation any more.
+    const queueInvitation = async (token, status, createdAt, name) => {
+      const data = { customer_name: name, invite_link: `https://photos.example.com/customer/invite/${token}` };
+      const [row] = await db('email_queue').insert({
+        recipient_email: address, email_type: 'customer_invitation', status,
+        email_data: JSON.stringify(status === PROTECTED_PENDING_STATUS
+          ? encryptEmailData('customer_invitation', data, address)
+          : redactRecoveryLinksInData(data)),
+        rendered_html: `<p>${name}</p>`, created_at: createdAt, scheduled_at: createdAt, retry_count: 0,
+      }).returning('id');
+      return row?.id ?? row;
+    };
+    const invitationRow = (token, overrides) => ({
+      email: address, token: digestCapabilityToken(token), token_digest: digestCapabilityToken(token),
+      invited_by: adminId, ...overrides,
+    });
+
+    // An invitation nobody accepted (created 10s, expired 12s), then the one
+    // accepted at 20s into a new account that moves off the address at 40s.
+    // The accepted one was mailed (15s) and its link also copied before the
+    // mail went out, so a second copy still waits encrypted (15.5s).
+    const otherToken = crypto.randomBytes(32).toString('hex');
+    const ownToken = crypto.randomBytes(32).toString('hex');
+    const otherInvitation = await queueInvitation(otherToken, 'sent', at(10.2), 'Other Invitation');
+    const ownSent = await queueInvitation(ownToken, 'sent', at(15.1), 'Own Invitation');
+    const ownPending = await queueInvitation(ownToken, PROTECTED_PENDING_STATUS, at(15.5), 'Own Pending');
+    const [created] = await auditedInsert(db, 'customer_accounts', {
+      email: address, display_name: 'Invited 1971', preferred_language: 'de',
+      is_active: 1, created_at: at(20),
+    }, { actor: 'customer-invitation', source: 'test' });
+    await db('customer_invitations').insert([
+      invitationRow(otherToken, { expires_at: at(12), created_at: at(10) }),
+      invitationRow(ownToken, {
+        expires_at: new Date(Date.now() + 86400000).toISOString(),
+        accepted_at: at(20), accepted_customer_id: created.id, created_at: at(15.05),
+      }),
+    ]);
+    await updateCustomer(created.id, { email: 'invited-moved@example.com' }, null);
+    await stampHistory(created.id, [at(20), at(40)]);
+    // Someone else invited to the address after the customer moved off it.
+    const laterToken = crypto.randomBytes(32).toString('hex');
+    // An invitation cancelled 30 ms before the accepted one replaced it, in
+    // the same second (cancelInvitation deletes the invitation, not its mail).
+    const cancelledInvitation = await queueInvitation(crypto.randomBytes(32).toString('hex'), 'sent', at(15.02), 'Cancelled Invitation');
+    const laterInvitation = await queueInvitation(laterToken, 'sent', at(50), 'Later Invitation');
+
+    await eraseCustomer(created.id, null);
+
+    await expectRedacted(ownSent, 'sent');
+    await expectRedacted(ownPending, 'cancelled');
+    for (const [id, name] of [[otherInvitation, 'Other Invitation'], [laterInvitation, 'Later Invitation'], [cancelledInvitation, 'Cancelled Invitation']]) {
+      const row = await db('email_queue').where({ id }).first();
+      expect(row.status).toBe('sent');
+      expect(row.recipient_email).toBe(address);
+      expect(row.rendered_html).toBe(`<p>${name}</p>`);
+    }
+  });
+
   it('does not match the first recorded address of an account created before the change history (issue 1971)', async () => {
     await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
     const { eraseCustomer, updateCustomer } = require('../../src/services/customerAccountsService');
@@ -657,6 +728,207 @@ describe('customer erasure clears email_queue', () => {
     await eraseCustomer(customer.id, null);
 
     await expectRedacted(mail, 'sent');
+  });
+
+  it('matches the current address only from the recorded change to it', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer, updateCustomer } = require('../../src/services/customerAccountsService');
+    const address = 'current-taken@example.com';
+
+    // Another customer held the address until 10s; the customer took it at 20.5s.
+    const earlier = await insertCustomer(db, { email: address });
+    await updateCustomer(earlier.id, { email: 'current-earlier-moved@example.com' }, null);
+    await stampHistory(earlier.id, [at(10)]);
+    const taker = await insertCustomer(db, { email: 'current-taker-start@example.com' });
+    await updateCustomer(taker.id, { email: address }, null);
+    await stampHistory(taker.id, [at(20.5)]);
+
+    const earlierSent = await queueAt(address, 'sent', at(5), 'Earlier Sent');
+    const earlierPending = await queueAt(address, 'pending', at(8), 'Earlier Pending');
+    const takingSecond = await queueAt(address, 'sent', at(20.2), 'Taking Second');
+    const ownPending = await queueAt(address, 'pending', at(30), 'Own Pending');
+    const ownSent = await queueAt(address, 'sent', at(30), 'Own Sent');
+
+    await eraseCustomer(taker.id, null);
+
+    await expectRedacted(ownPending, 'cancelled');
+    await expectRedacted(ownSent, 'sent');
+    await expectUntouched(earlierSent, address, 'Earlier Sent', 'sent');
+    await expectUntouched(earlierPending, address, 'Earlier Pending', 'pending');
+    await expectUntouched(takingSecond, address, 'Taking Second', 'sent');
+  });
+
+  it('matches the current address from the second it was taken when no other holder is recorded', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer } = require('../../src/services/customerAccountsService');
+    const { auditedInsert } = require('../../src/services/accountingHistory');
+    const address = 'current-fresh@example.com';
+
+    // Created directly at 20.3s; mail follows 100 ms later (a portal
+    // invitation, sent by now, and a gallery mail still pending).
+    const [created] = await auditedInsert(db, 'customer_accounts', {
+      email: address, display_name: 'Fresh 1971', preferred_language: 'de',
+      is_active: 1, created_at: at(20.3),
+    }, { actor: 'admin:1', source: 'test' });
+    await stampHistory(created.id, [at(20.3)]);
+    const [inv] = await db('email_queue').insert({
+      recipient_email: address, email_type: 'customer_invitation', status: 'sent',
+      email_data: JSON.stringify({ customer_name: 'Fresh Invitation' }), rendered_html: '<p>Fresh Invitation</p>',
+      created_at: at(20.4), scheduled_at: at(20.4), retry_count: 0,
+    }).returning('id');
+    const invitation = inv?.id ?? inv;
+    const pending = await queueAt(address, 'pending', at(20.4), 'Fresh Pending');
+    const before = await queueAt(address, 'sent', at(19.5), 'Before Creation');
+
+    await eraseCustomer(created.id, null);
+
+    await expectRedacted(invitation, 'sent');
+    await expectRedacted(pending, 'cancelled');
+    await expectUntouched(before, address, 'Before Creation', 'sent');
+  });
+
+  it('still matches an earlier tenure on the current address after the customer returned to it', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer, updateCustomer } = require('../../src/services/customerAccountsService');
+    const { auditedInsert } = require('../../src/services/accountingHistory');
+    const address = 'current-return@example.com';
+
+    // Held the address from 20s to 40s, then from 60s on.
+    const [customer] = await auditedInsert(db, 'customer_accounts', {
+      email: address, display_name: 'Return 1971', preferred_language: 'de',
+      is_active: 1, created_at: at(20),
+    }, { actor: 'admin:1', source: 'test' });
+    await updateCustomer(customer.id, { email: 'current-return-away@example.com' }, null);
+    await updateCustomer(customer.id, { email: address }, null);
+    await stampHistory(customer.id, [at(20), at(40), at(60)]);
+
+    const firstTenure = await queueAt(address, 'sent', at(30), 'First Tenure');
+    const away = await queueAt(address, 'sent', at(50), 'While Away');
+    const secondTenure = await queueAt(address, 'sent', at(70), 'Second Tenure');
+
+    await eraseCustomer(customer.id, null);
+
+    await expectRedacted(firstTenure, 'sent');
+    await expectRedacted(secondTenure, 'sent');
+    await expectUntouched(away, address, 'While Away', 'sent');
+  });
+
+  it('bounds the current address of an account without history by another customer\'s change of it', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer, updateCustomer } = require('../../src/services/customerAccountsService');
+    const address = 'current_legacy%shared@example.com'; // LIKE wildcards in the address
+
+    // Another customer moved off the address at 10s; this account took it in
+    // a change the history never saw (before migration 219).
+    const earlier = await insertCustomer(db, { email: address });
+    await updateCustomer(earlier.id, { email: 'current-legacy-moved@example.com' }, null);
+    await stampHistory(earlier.id, [at(10)]);
+    const legacy = await insertCustomer(db, { email: address });
+
+    const earlierMail = await queueAt(address, 'sent', at(5), 'Earlier Holder');
+    const ownMail = await queueAt(address, 'sent', at(30), 'Legacy Own');
+
+    await eraseCustomer(legacy.id, null);
+
+    await expectRedacted(ownMail, 'sent');
+    await expectUntouched(earlierMail, address, 'Earlier Holder', 'sent');
+  });
+
+  it('finds another customer\'s change of the address however its JSON spells it', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer } = require('../../src/services/customerAccountsService');
+    const address = 'current-spelled@example.com';
+    const earlier = await insertCustomer(db, { email: 'current-spelled-earlier@example.com' });
+    // Upper case and an escaped "@": the same address once parsed.
+    await db('accounting_change_history').insert({
+      document_type: 'customer', document_id: earlier.id, entity_type: 'customer', entity_id: earlier.id,
+      action: 'updated', actor_type: 'system', created_at: at(10),
+      changes: '{"email":{"from":"CURRENT-SPELLED\\u0040EXAMPLE.COM","to":"current-spelled-earlier@example.com"}}',
+    });
+    const legacy = await insertCustomer(db, { email: address });
+    const earlierMail = await queueAt(address, 'sent', at(5), 'Spelled Earlier');
+    const ownMail = await queueAt(address, 'sent', at(30), 'Spelled Own');
+
+    await eraseCustomer(legacy.id, null);
+
+    await expectRedacted(ownMail, 'sent');
+    await expectUntouched(earlierMail, address, 'Spelled Earlier', 'sent');
+  });
+
+  it('leaves admin mail on the current address to the admin account', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer, updateCustomer } = require('../../src/services/customerAccountsService');
+    const queueTyped = async (recipient, type, createdAt, name) => {
+      const [row] = await db('email_queue').insert({
+        recipient_email: recipient, email_type: type, status: 'sent',
+        email_data: JSON.stringify({ customer_name: name }), rendered_html: `<p>${name}</p>`,
+        created_at: createdAt, scheduled_at: createdAt, retry_count: 0,
+      }).returning('id');
+      return row?.id ?? row;
+    };
+
+    // Unbounded match (no history) and bounded match (a recorded change to it).
+    const legacy = await insertCustomer(db, { email: 'current-admin-legacy@example.com' });
+    const mover = await insertCustomer(db, { email: 'current-admin-start@example.com' });
+    await updateCustomer(mover.id, { email: 'current-admin-moved@example.com' }, null);
+    await stampHistory(mover.id, [at(20)]);
+
+    const rows = [];
+    for (const customer of [{ ...legacy }, { ...mover, email: 'current-admin-moved@example.com' }]) {
+      rows.push({
+        email: customer.email,
+        adminInvitation: await queueTyped(customer.email, 'admin_invitation', at(30), 'Admin Invitation'),
+        adminReset: await queueTyped(customer.email, 'admin_password_reset', at(30), 'Admin Reset'),
+        // Sent to the holder (the passive-account promote path): theirs.
+        customerInvitation: await queueTyped(customer.email, 'customer_invitation', at(30), 'Customer Invitation'),
+      });
+    }
+
+    await eraseCustomer(legacy.id, null);
+    await eraseCustomer(mover.id, null);
+
+    for (const row of rows) {
+      await expectUntouched(row.adminInvitation, row.email, 'Admin Invitation', 'sent');
+      await expectUntouched(row.adminReset, row.email, 'Admin Reset', 'sent');
+      await expectRedacted(row.customerInvitation, 'sent');
+    }
+  });
+
+  it('keeps matching the current address of an account without history unbounded when nobody else recorded it', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer } = require('../../src/services/customerAccountsService');
+    const legacy = await insertCustomer(db, { email: 'current-legacy-only@example.com' });
+    const oldMail = await queueAt(legacy.email, 'sent', at(-3600), 'Legacy Old');
+
+    await eraseCustomer(legacy.id, null);
+
+    await expectRedacted(oldMail, 'sent');
+  });
+
+  it('matches the address the account has when the erasure runs, not the one read before planning', async () => {
+    await db('email_queue').where('status', 'pending').update({ status: 'cancelled' });
+    const { eraseCustomer, updateCustomer } = require('../../src/services/customerAccountsService');
+    const contractErasure = require('../../src/services/contract/erasure');
+    const oldAddress = 'planning-old@example.com';
+    const customer = await insertCustomer(db, { email: oldAddress });
+
+    // While the erasure plans its contracts, the customer's address changes
+    // and another customer takes the old one and gets mail on it.
+    let successorMail;
+    const realPlan = contractErasure.plan;
+    const plan = jest.spyOn(contractErasure, 'plan').mockImplementationOnce(async (...args) => {
+      await updateCustomer(customer.id, { email: 'planning-new@example.com' }, null);
+      await insertCustomer(db, { email: oldAddress });
+      successorMail = await queueAt(oldAddress, 'pending', new Date(Date.now() + 5000).toISOString(), 'Successor');
+      return realPlan(...args);
+    });
+    try {
+      await eraseCustomer(customer.id, null);
+    } finally { plan.mockRestore(); }
+
+    await expectUntouched(successorMail, oldAddress, 'Successor', 'pending');
+    const erased = await db('customer_accounts').where({ id: customer.id }).first();
+    expect(erased.email).toMatch(/@deleted\.invalid$/);
   });
 
   it('covers contract mail to a signer address only when it names a contract this erasure redacts', async () => {
