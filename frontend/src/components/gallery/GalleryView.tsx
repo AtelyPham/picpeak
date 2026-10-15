@@ -1616,6 +1616,8 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
               slug={slug}
               state={selectionState}
               used={selectionUsed}
+              requireNameEmail={!!feedbackSettings?.require_name_email}
+              sharedIdentity={feedbackSettings?.identity_mode === 'shared'}
               className="pointer-events-auto"
             />
           </div>
@@ -1918,7 +1920,14 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
 
         {/* "x of y selected", Finish selection, Approve edited photos
             (issue 1733, A1). */}
-        <SelectionSubmitBar slug={slug} state={selectionState} used={selectionUsed} className="mt-4" />
+        <SelectionSubmitBar
+          slug={slug}
+          state={selectionState}
+          used={selectionUsed}
+          requireNameEmail={!!feedbackSettings?.require_name_email}
+          sharedIdentity={feedbackSettings?.identity_mode === 'shared'}
+          className="mt-4"
+        />
 
         {/* Client Access Banner (#172) */}
         {isClient && (
