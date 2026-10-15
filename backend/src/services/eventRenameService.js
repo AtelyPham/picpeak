@@ -11,6 +11,7 @@ const { buildShareLinkVariants } = require('./shareLinkService');
 const { galleryLinkFor } = require('./galleryNotificationService');
 const { queueEmail } = require('./emailProcessor');
 const { getStorage } = require('./storage');
+const { findSlugHolder } = require('./slugRedirects');
 
 /**
  * Run `fn` over `items` with at most `limit` in flight. On the first failure
@@ -114,11 +115,9 @@ class EventRenameService {
       // Generate new slug
       const newSlug = this.generateSlug(event.event_type, newEventName.trim(), event.event_date);
 
-      // Check if slug already exists (for different event)
-      const existingEvent = await db('events')
-        .where({ slug: newSlug })
-        .whereNot({ id: eventId })
-        .first();
+      // Check if slug already exists (for different event). Another
+      // gallery's old slug counts: its links still lead to that gallery.
+      const existingEvent = await findSlugHolder(newSlug, { exceptEventId: eventId });
 
       if (existingEvent) {
         return { valid: false, error: 'An event with this name already exists for the same date', conflicts: [existingEvent.event_name] };
@@ -364,10 +363,12 @@ class EventRenameService {
       .first();
 
     if (existingRedirect) {
-      // Update existing redirect
+      // Update existing redirect. The row may have been written for a gallery
+      // that held this slug before; it belongs to this one now, so a delete of
+      // that other gallery must not cascade it away.
       await trx('slug_redirects')
         .where({ old_slug: oldSlug })
-        .update({ new_slug: newSlug });
+        .update({ new_slug: newSlug, event_id: eventId });
     } else {
       // Create new redirect
       await trx('slug_redirects').insert({
@@ -377,10 +378,19 @@ class EventRenameService {
       });
     }
 
-    // Also update any existing redirects pointing to the old slug
+    // Also update any existing redirects pointing to the old slug. Their
+    // event_id stays: these rows are this gallery's own, or (SQLite, no
+    // foreign keys) a deleted gallery's that must not become this one's.
     await trx('slug_redirects')
       .where({ new_slug: oldSlug })
       .update({ new_slug: newSlug });
+
+    // Renamed back to an earlier name: the chain update above turned that
+    // name's redirect into one pointing at itself. Only that row goes; a
+    // redirect from this slug to another gallery is that gallery's to keep.
+    await trx('slug_redirects')
+      .where({ old_slug: newSlug, new_slug: newSlug })
+      .del();
   }
 
   /**
