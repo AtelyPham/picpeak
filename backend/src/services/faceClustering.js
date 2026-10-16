@@ -983,6 +983,18 @@ async function splitPerson(eventId, personId, faceIds) {
   if (!faceIds?.length) return null;
 
   return db.transaction(async (trx) => {
+    // The event's people lock before the faces are read (PostgreSQL), as
+    // mergePeople takes it (issue 2119). Without it a scan assigning faces to
+    // this person could commit between the read and the recompute below, and
+    // the person's centroid and count would miss its face; and moving faces
+    // and rewriting both people locks rows a scan of the same people writes,
+    // in another order. The event row before it, as a key share: the person
+    // inserted below takes one through its event FK, and the lock order is
+    // event row, then this lock.
+    if (trx.client.config.client === 'pg') {
+      await trx('events').where({ id: eventId }).forKeyShare().first('id');
+    }
+    await lockEventPeople(eventId, trx);
     const faces = await trx('photo_faces')
       .where({ event_id: eventId, person_id: personId })
       .whereIn('id', faceIds)

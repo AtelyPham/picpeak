@@ -307,7 +307,7 @@ async function processPhotoFaces(claimed) {
       //
       // The event's people lock (PostgreSQL) before any face or person row is
       // read or written, as a recluster takes it (issue 2112) and a merge
-      // takes it first thing: a recluster holding it waits for the event's
+      // or split takes it first thing (issue 2119): a recluster holding it waits for the event's
       // face rows, and a re-scan that deleted its old faces first and only
       // then asked for the lock closed a cycle with it. After the claim check,
       // so a superseded scan never holds it while it waits for the photo
