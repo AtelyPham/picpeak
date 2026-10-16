@@ -123,6 +123,34 @@ describe('gallery archive and the download-all cache', () => {
     expect(await storage.exists(cacheKey)).toBe(false);
   });
 
+  it('does not offer a prepared download whose zip the archive removed', async () => {
+    const slug = 'job-gallery';
+    const id = await makeEvent(slug, 2);
+    const downloadJobService = require('../../src/services/downloadJobService');
+    const token = 'a'.repeat(64);
+    const zipPath = downloadJobService.jobKey(slug, token);
+    await storage.put(zipPath, Buffer.from('prepared download'), { contentType: 'application/zip' });
+    await db('download_jobs').insert({
+      token,
+      event_id: id,
+      resolution: 'web',
+      photo_ids: '[]',
+      dedup_key: 'job-gallery-dedup',
+      visibility_scope: 'public',
+      status: 'ready',
+      zip_path: zipPath,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 36e5).toISOString(),
+    });
+
+    await archiveEvent(await db('events').where({ id }).first());
+    const res = await request(app).post(`/admin/archives/${id}/restore`).send({});
+    expect(res.status).toBe(200);
+
+    expect(await storage.exists(zipPath)).toBe(false);
+    expect(await downloadJobService.findReusable(id, 'job-gallery-dedup')).toBeNull();
+  });
+
   it('writes one manifest when a restored gallery is archived again', async () => {
     const slug = 'restored-gallery';
     const id = await makeEvent(slug, 2);

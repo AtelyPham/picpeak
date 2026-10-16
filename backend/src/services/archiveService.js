@@ -696,6 +696,10 @@ async function buildArchive(event, lease) {
       await pruneEmptyDirs(storage.resolveLocalPath(eventPrefix)).catch(() => {});
     }
 
+    // The download-all zip went with the loop above: clear the record that
+    // points at it and cancel a build still in flight.
+    await require('./downloadZipService').cleanup(event.id);
+
     // Delete derived images (thumbnails / heroes / previews / watermarks)
     // for this event's photos. The originals are inside the zip; the
     // derived tiers are throwaway and will be regenerated lazily on
