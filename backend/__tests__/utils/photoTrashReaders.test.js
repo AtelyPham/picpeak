@@ -18,11 +18,11 @@ const SRC = path.join(__dirname, '../../src');
 
 // file: [bare references, why they see trashed rows too]
 const ALL_ROWS = {
-  'routes/adminArchives.js': [4, 'restoring an archive matches files to rows and inserts them; deleting one removes every row and thumbnail'],
+  'routes/adminArchives.js': [5, 'restoring an archive matches files to rows and inserts them; deleting one locks, then removes, every row and thumbnail'],
   'routes/adminCategories.js': [4, 'folder/category restructuring keeps trashed photos consistent for a restore'],
   'routes/adminDashboard.js': [1, 'storage: trashed photos still take space'],
   'routes/adminEvents/crud.js': [1, 'storage: the gallery size counts trashed photos'],
-  'routes/adminEvents/helpers.js': [3, 'gallery deletion removes every row and file, trashed ones included'],
+  'routes/adminEvents/helpers.js': [4, 'gallery deletion locks, then removes, every row and file, trashed ones included'],
   'routes/adminFolders.js': [2, 'folder structure is applied to trashed photos too, so a restore lands in the right folder'],
   'routes/adminImageSecurity.js': [1, 'access log listing is an audit trail and keeps the entries of trashed photos'],
   'routes/adminPhotoDimensions.js': [19, 'repair backfills (dimensions, capture date, EXIF, orientation, credits, tile placeholders) and their progress counts run over every row'],
@@ -39,8 +39,8 @@ const ALL_ROWS = {
   'services/externalPhotoDedupe.js': [8, 'dedupe decides which row owns a file and deletes the others outright, their streaming ladders included'],
   'services/externalRelpathFold.js': [5, 'data backfill run by a migration'],
   'services/faceAutoCategories.js': [3, 'derived categorisation kept consistent for a restore'],
-  'services/faceProcessor.js': [8, 'scan in flight, queueing (the queue skips trashed rows), purge of face data'],
-  'services/faceQueue.js': [5, 'state of a claimed scan and the stuck-scan janitor; the claim itself is live only'],
+  'services/faceProcessor.js': [4, 'guard of a scan claim in flight, queueing (the queue skips trashed rows), purge of face data'],
+  'services/faceQueue.js': [3, 'state of a claimed scan and the stuck-scan janitor; the claim itself is live only'],
   'services/feedbackIntegrity.js': [2, 'migration 309 and the portable restore: the rating dedupe recomputes the average of a photo it removed a duplicate from, and the comment_count backfill recounts every row, trashed or not'],
   'services/feedbackService.js': [5, 'row lock and per-photo counters by id, after the route checked the photo; recounts keep trashed rows consistent'],
   'services/fileWatcher.js': [9, 'which file already belongs to a photo; insert; unlink removes the row whatever its state; start-up repair gives every row on a shared thumbnail, preview or hero its own, trashed rows included'],
