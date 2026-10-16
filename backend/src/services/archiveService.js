@@ -327,12 +327,11 @@ async function archiveEvent(event, { lease: heldLease = null } = {}) {
 }
 
 // Written at the zip root by buildArchive, next to the photos.
-const ARCHIVE_METADATA_FILES = [
-  'photos_manifest.json',
-  'feedback_data.json',
-  'feedback_data.csv',
-  'feedback_summary.json',
-];
+const MANIFEST_FILE = 'photos_manifest.json';
+const FEEDBACK_JSON_FILE = 'feedback_data.json';
+const FEEDBACK_CSV_FILE = 'feedback_data.csv';
+const FEEDBACK_SUMMARY_FILE = 'feedback_summary.json';
+const ARCHIVE_METADATA_FILES = [MANIFEST_FILE, FEEDBACK_JSON_FILE, FEEDBACK_CSV_FILE, FEEDBACK_SUMMARY_FILE];
 
 async function buildArchive(event, lease) {
   const storage = getStorage();
@@ -437,16 +436,16 @@ async function buildArchive(event, lease) {
 
         if (feedbackData && feedbackData.length > 0) {
           feedbackEntries.push({
-            name: 'feedback_data.json',
+            name: FEEDBACK_JSON_FILE,
             buffer: Buffer.from(JSON.stringify(feedbackData, null, 2), 'utf8'),
           });
           feedbackEntries.push({
-            name: 'feedback_data.csv',
+            name: FEEDBACK_CSV_FILE,
             buffer: Buffer.from(convertToCSV(feedbackData), 'utf8'),
           });
           const summary = await feedbackService.getEventFeedbackSummary(event.id);
           feedbackEntries.push({
-            name: 'feedback_summary.json',
+            name: FEEDBACK_SUMMARY_FILE,
             buffer: Buffer.from(JSON.stringify(summary, null, 2), 'utf8'),
           });
           logger.info(`Feedback data exported: ${feedbackData.length} entries`);
@@ -524,7 +523,7 @@ async function buildArchive(event, lease) {
         return { ...fields, zip_path: zipPath };
       });
       photosManifestEntry = {
-        name: 'photos_manifest.json',
+        name: MANIFEST_FILE,
         buffer: Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'),
       };
       logger.info(`Photos manifest prepared: ${manifest.length} entries`);
