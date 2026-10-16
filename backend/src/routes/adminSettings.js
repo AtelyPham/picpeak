@@ -109,8 +109,9 @@ const stripReservedSettingKeys = (settings) => {
 //                                 (settings.security; range-validated — a
 //                                 settings.edit holder could otherwise switch
 //                                 the limiter off through /general)
-//   max_image_requests_*          PUT /admin/image-security/settings
-//                                 (image_security.manage)
+//   max_image_requests_*          retired (issue 2152): nothing reads them
+//                                 any more, and they stay refused here so a
+//                                 generic write cannot bring them back
 //   ledger_*                      PATCH /admin/ledger/mappings/settings
 //                                 (accounting.manage)
 //   restore_*                     PUT /admin/restore/settings (backup.restore;
@@ -1759,8 +1760,7 @@ router.put('/general', adminAuth, requirePermission('settings.edit'), async (req
     if (await rejectUnauthorizedProtectedKeys(settings, req, res)) return;
 
     // The public origin is no longer just an email link: it feeds the CORS
-    // allowlist (server.js) and the Access-Control-Allow-Origin header
-    // (secureImageMiddleware) since #705. A schemeless value like
+    // allowlist (server.js) since #705. A schemeless value like
     // "gallery.example.com" therefore produces both links that don't resolve
     // AND an allowlist entry no browser origin can ever match, so validate it
     // server-side rather than trusting the input type (#1104). require_tld is
