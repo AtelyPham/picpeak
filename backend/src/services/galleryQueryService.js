@@ -97,13 +97,15 @@ async function getGalleryPhotos({ event, query = {}, identity, accessLevel, viaC
   const { sort = 'upload_date', order = 'desc' } = query;
 
   // Get watermark settings to generate cache-busting version for URLs
-  const watermarkSettings = await watermarkService.getWatermarkSettings();
+  const watermarkSettings = await watermarkService.getWatermarkSettingsForEvent(event);
   // The photo route also watermarks on the per-event flag alone (issue 2076),
   // so that flag is part of the version: flipping it must be a new URL, not a
   // 30-minute-fresh cached copy of the other variant.
   const wmVersion = watermarkSettings?.enabled
-    ? `wm=${watermarkSettings.opacity}${watermarkSettings.position}${watermarkSettings.size}`
-    : (parseBooleanInput(event.watermark_downloads, false) ? 'wm=ev' : '');
+    ? `wm=${watermarkService.versionTag(watermarkSettings)}`
+    : (parseBooleanInput(event.watermark_downloads, false)
+      // The gallery's own text is drawn there too, so changing it is a new URL.
+      ? `wm=ev${watermarkSettings?.text ? watermarkService.versionTag(watermarkSettings) : ''}` : '');
 
   // Build the query with sorting
   const sortOrder = order === 'asc' ? 'asc' : 'desc';
