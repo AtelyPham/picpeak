@@ -873,7 +873,7 @@ async function mergePeople(eventId, sourceIds, targetId) {
   const ids = sourceIds.filter((id) => id !== targetId);
   if (!ids.length) return { moved: 0 };
 
-  return db.transaction(async (trx) => {
+  const merge = () => db.transaction(async (trx) => {
     // The event's people lock first (PostgreSQL), as a scan takes it before
     // it touches face or person rows: moving faces and deleting the sources
     // locks the rows a scan of the same people rewrites, in another order
@@ -963,6 +963,21 @@ async function mergePeople(eventId, sourceIds, targetId) {
     await recomputeCentroid(targetId, trx);
     return { moved };
   });
+
+  // Once more after a deadlock on PostgreSQL (SQLSTATE 40P01, issue 2108).
+  // Moving the faces takes a key-share lock on the target through the
+  // foreign key before the sources are deleted; a scan rebuilding the same
+  // people locks them in its own order (one it updates, one it deletes once
+  // it has no faces left). No order taken here fits every scan, and the
+  // transaction has no effect outside the database, so the loser simply runs
+  // again against what the other side committed.
+  try {
+    return await merge();
+  } catch (err) {
+    if (err?.code !== '40P01') throw err;
+    logger.warn(`faceClustering: merge into person ${targetId} hit a deadlock, retrying once`);
+    return merge();
+  }
 }
 
 /**

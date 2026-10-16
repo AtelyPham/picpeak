@@ -342,7 +342,8 @@ async function processPhotoFaces(claimed) {
       }
 
       // Rebuild the people the removed faces belonged to BEFORE assigning the
-      // replacements, so assignment compares against honest centroids.
+      // replacements, so assignment compares against honest centroids. Under
+      // the people lock taken above (issue 2108).
       for (const personId of affectedPeople) {
         await recomputeCentroid(personId, trx);
       }
@@ -414,7 +415,15 @@ async function enqueueEvent(eventId, { onlyUnscanned = false } = {}) {
  */
 async function purgeEvent(eventId) {
   return db.transaction(async (trx) => {
-    // The claims first, as purgePhotoFaces does: on PostgreSQL this locks the
+    // The event row first on PostgreSQL (issue 2108), where this transaction
+    // ends anyway: a capped trash restore, an archive delete and a rename
+    // hold it FOR UPDATE before they touch the photos, and taken last it
+    // closed a lock cycle with each of them. NO KEY UPDATE is the lock the
+    // update below takes, so a scan's key share does not wait for it.
+    if (trx.client.config.client === 'pg') {
+      await trx('events').where({ id: eventId }).forNoKeyUpdate().first('id');
+    }
+    // Then the claims, as purgePhotoFaces does: on PostgreSQL this locks the
     // photo rows, so a scan committing at the same moment either finished
     // before (and its faces are deleted below) or finds its claim gone. With
     // the faces deleted first, a scan could commit in between and its faces
