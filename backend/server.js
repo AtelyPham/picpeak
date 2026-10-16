@@ -608,6 +608,11 @@ app.use(createAuthRateLimitGate(rateLimitService.getAuthLimiter));
 // body is already parsed, so the scoped parser must run first.
 // fallbackLimitBytes mirrors the 2mb parser right below: a body that fits it
 // never triggers the identity check.
+// A chunk body is raw bytes; refuse a mislabelled one before a parser reads it.
+{
+  const { requireOctetStreamChunk, CHUNK_ROUTE_PREFIXES } = require('./src/middleware/chunkBodyType');
+  app.use(CHUNK_ROUTE_PREFIXES, requireOctetStreamChunk);
+}
 app.use(['/api/admin', '/api/v1'], createLargeJsonBody({ limit: '50mb', fallbackLimitBytes: 2 * 1024 * 1024 }));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
