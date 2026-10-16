@@ -304,19 +304,21 @@ async function processPhotoFaces(claimed) {
       // running-mean centroid, so without recomputing those afterwards a
       // re-scan inflates every count (typically doubling it) and leaves ghost
       // people behind when a face is no longer detected.
+      //
+      // The event's people lock (PostgreSQL) before any face or person row is
+      // read or written, as a recluster takes it (issue 2112) and a merge
+      // takes it first thing: a recluster holding it waits for the event's
+      // face rows, and a re-scan that deleted its old faces first and only
+      // then asked for the lock closed a cycle with it. After the claim check,
+      // so a superseded scan never holds it while it waits for the photo
+      // (issue 2069). Taken first, the old people read below are also the ones
+      // a recluster that ran meanwhile left.
+      await lockEventPeople(photo.event_id, trx);
       const affectedPeople = await trx('photo_faces')
         .where({ photo_id: photoId })
         .whereNotNull('person_id')
         .distinct('person_id')
         .pluck('person_id');
-
-      // The event's people lock (PostgreSQL) before any face or person row,
-      // when this scan writes people at all: assignFaces takes it anyway, and
-      // a merge takes it first thing. Taken later, a merge holding it could
-      // wait for the face rows deleted below while this scan waited for the
-      // lock. After the claim check, so a superseded scan never holds it while
-      // it waits for the photo (issue 2069).
-      if (faces.length || affectedPeople.length) await lockEventPeople(photo.event_id, trx);
 
       await trx('photo_faces').where({ photo_id: photoId }).del();
 
