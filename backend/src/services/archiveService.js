@@ -326,6 +326,13 @@ async function archiveEvent(event, { lease: heldLease = null } = {}) {
   }
 }
 
+// Written at the zip root by buildArchive, next to the photos.
+const MANIFEST_FILE = 'photos_manifest.json';
+const FEEDBACK_JSON_FILE = 'feedback_data.json';
+const FEEDBACK_CSV_FILE = 'feedback_data.csv';
+const FEEDBACK_SUMMARY_FILE = 'feedback_summary.json';
+const ARCHIVE_METADATA_FILES = [MANIFEST_FILE, FEEDBACK_JSON_FILE, FEEDBACK_CSV_FILE, FEEDBACK_SUMMARY_FILE];
+
 async function buildArchive(event, lease) {
   const storage = getStorage();
   const archiveName = `${event.slug}.zip`;
@@ -429,16 +436,16 @@ async function buildArchive(event, lease) {
 
         if (feedbackData && feedbackData.length > 0) {
           feedbackEntries.push({
-            name: 'feedback_data.json',
+            name: FEEDBACK_JSON_FILE,
             buffer: Buffer.from(JSON.stringify(feedbackData, null, 2), 'utf8'),
           });
           feedbackEntries.push({
-            name: 'feedback_data.csv',
+            name: FEEDBACK_CSV_FILE,
             buffer: Buffer.from(convertToCSV(feedbackData), 'utf8'),
           });
           const summary = await feedbackService.getEventFeedbackSummary(event.id);
           feedbackEntries.push({
-            name: 'feedback_summary.json',
+            name: FEEDBACK_SUMMARY_FILE,
             buffer: Buffer.from(JSON.stringify(summary, null, 2), 'utf8'),
           });
           logger.info(`Feedback data exported: ${feedbackData.length} entries`);
@@ -450,13 +457,16 @@ async function buildArchive(event, lease) {
     }
 
     // Stream every photo (and any other content under events/active/{slug}/) into
-    // the zip directly from the storage backend.
-    const allEntries = await storage.list(eventPrefix);
-    // The prepared-download cache (.download-cache/all.zip and the download
-    // job artifacts) is derived data: left out of the zip, which it would
-    // otherwise double, and deleted with the originals below.
-    const cachePrefix = `${eventPrefix}/.download-cache/`;
-    const photoEntries = allEntries.filter((entry) => !entry.key.startsWith(cachePrefix));
+    // the zip directly from the storage backend. Two kinds of file under the
+    // prefix stay out of the zip but are still deleted with the originals:
+    // the "Download all" cache, a second copy of every photo, and the
+    // metadata files a restore wrote back, which are rebuilt fresh below and
+    // would otherwise go in twice under the same name.
+    const storedEntries = await storage.list(eventPrefix);
+    const leftOut = new Set(ARCHIVE_METADATA_FILES.map((name) => `${eventPrefix}/${name}`));
+    const photoEntries = storedEntries.filter((entry) => (
+      !leftOut.has(entry.key) && !entry.key.startsWith(`${eventPrefix}/.download-cache/`)
+    ));
 
     // #493: optionally rename zip entries to use original camera filenames.
     // Build a Map<storage_key, original_filename> from the photos table so we
@@ -513,7 +523,7 @@ async function buildArchive(event, lease) {
         return { ...fields, zip_path: zipPath };
       });
       photosManifestEntry = {
-        name: 'photos_manifest.json',
+        name: MANIFEST_FILE,
         buffer: Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'),
       };
       logger.info(`Photos manifest prepared: ${manifest.length} entries`);
@@ -672,7 +682,7 @@ async function buildArchive(event, lease) {
     });
 
     // Delete the originals from storage.
-    for (const entry of allEntries) {
+    for (const entry of storedEntries) {
       await assertStillHeld();
       await storage.delete(entry.key).catch((err) =>
         logger.warn(`Failed to delete archived original ${entry.key}: ${err.message}`)
@@ -684,6 +694,10 @@ async function buildArchive(event, lease) {
     if (storage.kind() === 'local') {
       await pruneEmptyDirs(storage.resolveLocalPath(eventPrefix)).catch(() => {});
     }
+
+    // The download-all zip went with the loop above: clear the record that
+    // points at it and cancel a build still in flight.
+    await require('./downloadZipService').cleanup(event.id);
 
     // Delete derived images (thumbnails / heroes / previews / watermarks)
     // for this event's photos. The originals are inside the zip; the
