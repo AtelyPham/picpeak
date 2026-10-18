@@ -30,7 +30,7 @@ const { heroQueryRedirect } = require('../../utils/heroAnchor');
 const { getStorage } = require('../../services/storage');
 const fs = require('fs');
 const { getStoragePath } = require('../../config/storage');
-const { safePathJoin } = require('../../utils/fileSecurityUtils');
+const { safePathJoin, sniffImageType, sniffImageFileType } = require('../../utils/fileSecurityUtils');
 const {
   originalAssetDenial, grantDenial, isPresentationRenditionKey, isRemuxWebKey, fullResolutionDenial,
   MAXIMUM_PROTECTION_CAP, capsFullSizeView,
@@ -43,6 +43,19 @@ const {
 } = require('../../services/downloadQuota');
 const videoHls = require('../../services/videoHlsService');
 const { refundRateLimit } = require('../../services/rateLimitService');
+
+// The image type a stored object's first bytes prove, or null. A stored
+// watermark is usually the JPEG applyWatermark re-encoded, but it can be the
+// untouched original when there was nothing to draw (issue 2178).
+async function sniffStoredImageType(storage, key) {
+  try {
+    const chunks = [];
+    for await (const chunk of await storage.getRange(key, 0, 63)) chunks.push(chunk);
+    return sniffImageType(Buffer.concat(chunks));
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Download limit (issue 1560): a video without a web copy has no preview
@@ -480,7 +493,8 @@ router.get('/:slug/photo/:photoId',
               const wmStat = await storage.stat(photo.watermark_path);
               if (wmStat) {
                 res.set({
-                  'Content-Type': resolvePhotoContentType(photo),
+                  'Content-Type': await sniffStoredImageType(storage, photo.watermark_path)
+                    || resolvePhotoContentType(photo),
                   'Content-Length': wmStat.size,
                   'Cache-Control': 'private, max-age=1800',
                   'ETag': etag,
@@ -498,8 +512,10 @@ router.get('/:slug/photo/:photoId',
               // the catch below falls back to on-the-fly watermarking.
               const watermarkFilePath = safePathJoin(getStoragePath(), photo.watermark_path);
               if (fs.existsSync(watermarkFilePath)) {
+                // The file keeps the original's extension but holds what
+                // applyWatermark encoded: JPEG for a HEIC/GIF/TIFF (issue 2178).
                 res.set({
-                  'Content-Type': resolvePhotoContentType(photo),
+                  'Content-Type': await sniffImageFileType(watermarkFilePath) || resolvePhotoContentType(photo),
                   'Cache-Control': 'private, max-age=1800',
                   'ETag': etag,
                   'X-Protection-Level': 'basic'
@@ -529,7 +545,7 @@ router.get('/:slug/photo/:photoId',
         }
 
         res.set({
-          'Content-Type': resolvePhotoContentType(photo),
+          'Content-Type': sniffImageType(watermarkedBuffer) || resolvePhotoContentType(photo),
           'Cache-Control': 'private, max-age=1800',
           'ETag': etag,
           'X-Protection-Level': 'basic'
@@ -549,6 +565,9 @@ router.get('/:slug/photo/:photoId',
           pipeStreamToResponse(stream, res, { context: `photo ${photo.id}` });
         } else {
           const absolutePath = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+          // Set before sendFile, which then keeps it instead of guessing from
+          // the extension (issue 2178).
+          res.set('Content-Type', resolvePhotoContentType(photo));
           res.sendFile(absolutePath);
         }
       }

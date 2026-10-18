@@ -7,6 +7,8 @@ const fs = require('fs').promises;
 const { db } = require('../database/db');
 const { getStorage } = require('./storage');
 const logger = require('../utils/logger');
+const { sniffImageType } = require('../utils/fileSecurityUtils');
+const { resolvePhotoContentType } = require('../utils/photoContentType');
 
 // Text goes into the SVG markup: `<` or `&` in it would make the SVG invalid
 // and the mark would silently not render (applyWatermark falls back to the
@@ -450,13 +452,15 @@ class WatermarkService {
 
       const watermarkedBuffer = await this.applyWatermark(originalPath, settings);
 
-      const ext = this.getFileExtension(photo.filename);
       const attempt = require('./mediaAttemptContext').current();
       const relativePath = this.watermarkKey(photo, attempt, settings);
 
       await attempt?.assertCurrent();
       await getStorage().put(relativePath, watermarkedBuffer, {
-        contentType: ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg',
+        // Usually the JPEG applyWatermark re-encoded, but it hands back the
+        // original when it has nothing to draw or fails to render: the bytes
+        // decide, and bytes it never writes are the original's (issue 2178).
+        contentType: sniffImageType(watermarkedBuffer) || resolvePhotoContentType(photo),
       });
       uploaded = relativePath;
       await attempt?.assertCurrent();
