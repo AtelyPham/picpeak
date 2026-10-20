@@ -63,6 +63,8 @@ import { GallerySidebar } from './GallerySidebar';
 import { GalleryToolbar } from './GalleryToolbar';
 import { GalleryFilterPanel } from './GalleryFilterPanel';
 import { GalleryCategoryChips } from './GalleryCategoryChips';
+import { GridDensityControl } from './GridDensityControl';
+import { GridDensityOffered, layoutHasDensity } from './gridDensity';
 import { UserPhotoUpload } from './UserPhotoUpload';
 import { tagChipsFor } from './TagFilterChips';
 import { creditGroups, uploaderRequiresEmail } from '../../utils/photoCredits';
@@ -1517,6 +1519,11 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
     && (filterBarShown || selectionAvailable || isSelectionMode || selectedPhotos.size > 0 || copyFilenames.photos.length > 0);
   const creditPanelShown = creditsVisible && creditGroups(scopedPhotos).length > 0;
   const hasPanelFilters = feedbackEnabled || showMediaFilter || creditPanelShown || tagChips.length > 0;
+  // The viewer's saved tile size (issue 1733, E4) applies only where a
+  // control puts the switch on screen to change it back: the toolbar or the
+  // sidebar. A Carousel gets no switch, so its delivery placeholders keep the
+  // theme size.
+  const densityOffered = (toolbarShown || showSidebar) && layoutHasDensity(theme.galleryLayout);
 
   // Reveal mode (#838): the server returned the event shell with no photos —
   // render the upload-only view for EVERY layout. Enforcement is server-side
@@ -1945,6 +1952,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
       <PhotoDownloadChoiceProvider {...downloadChoiceProps}>
       <GalleryTileBadgesProvider value={tileBadges}>
       <PhotoLabelsProvider neutral={neutralPhotoLabels} photos={filteredPhotos}>
+      <GridDensityOffered.Provider value={densityOffered}>
       <GuestNamePromptModal requireEmail={!!feedbackSettings?.require_name_email} />
       <GuestRecoveryModal />
       {/* Sidebar for non-grid layouts */}
@@ -2207,6 +2215,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
                 />
               ),
             } : undefined}
+            viewControls={<GridDensityControl layout={theme.galleryLayout} />}
             photoCount={filterBarShown ? filteredPhotos.length : undefined}
             copyFilenames={{ count: copyFilenames.photos.length, onClick: () => setShowCopyFilenames(true) }}
             selection={{
@@ -2482,6 +2491,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ slug, event, requiresP
           />
         )}
       </GalleryLayout>
+      </GridDensityOffered.Provider>
       </PhotoLabelsProvider>
       </GalleryTileBadgesProvider>
       </PhotoDownloadChoiceProvider>
