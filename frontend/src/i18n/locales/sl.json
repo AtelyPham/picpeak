@@ -1409,6 +1409,7 @@
     "filterByMinRating": "Moja ocena: {{min}} zvezdic ali več",
     "folders": "Mape",
     "openFolder": "Odpri mapo {{name}}",
+    "imageUnavailable": "Slika ni na voljo",
     "folderPhotoCount": "{{count}} fotografij",
     "backToGallery": "Vse fotografije",
     "downloadFolder": "Prenesi mapo ({{count}})",
