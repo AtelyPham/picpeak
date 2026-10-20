@@ -12,6 +12,32 @@ import { densityColumnDelta, useGridDensity } from '../gridDensity';
 import { FeedbackIdentityModal } from '../../gallery/FeedbackIdentityModal';
 import { feedbackService } from '../../../services/feedback.service';
 import { toDisplayDate, useLocalizedDate } from '../../../hooks/useLocalizedDate';
+import { WINDOW_MIN_PHOTOS } from './rowWindow';
+import { GRID_TILE_ATTR, TIMELINE_GROUP_WINDOW_MIN_PHOTOS, useGridWindow } from './gridWindow';
+
+const GRID_TILE_PROPS = { [GRID_TILE_ATTR]: '' } as React.HTMLAttributes<HTMLDivElement>;
+
+/**
+ * One date group's grid. In a large gallery each group mounts only its rows
+ * near the viewport (issue 2193); the date headers between them stay mounted.
+ */
+const TimelineGroupGrid: React.FC<{
+  photos: Photo[];
+  /** The grid's classes, its columns moved by the viewer's density. */
+  className: string;
+  windowed: boolean;
+  renderTile: (photo: Photo) => React.ReactNode;
+}> = ({ photos, className, windowed, renderTile }) => {
+  const gridRef = useRef<HTMLDivElement>(null);
+  const { tiles, before, after } = useGridWindow(gridRef, photos, windowed);
+  return (
+    <div ref={gridRef} className={className}>
+      {before > 0 && <div aria-hidden="true" style={{ gridColumn: '1 / -1', height: before }} />}
+      {tiles.map(({ photo }) => renderTile(photo))}
+      {after > 0 && <div aria-hidden="true" style={{ gridColumn: '1 / -1', height: after }} />}
+    </div>
+  );
+};
 
 export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
   photos,
@@ -135,8 +161,11 @@ export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
             )}
             
             {/* Photos grid for this date */}
-            <div className={`photo-grid lg:ml-24 grid grid-cols-${cols(2)} sm:grid-cols-${cols(3)} lg:grid-cols-${cols(4)} gap-4`}>
-              {group.photos.map((photo) => {
+            <TimelineGroupGrid
+              photos={group.photos}
+              className={`photo-grid lg:ml-24 grid grid-cols-${cols(2)} sm:grid-cols-${cols(3)} lg:grid-cols-${cols(4)} gap-4`}
+              windowed={photos.length >= WINDOW_MIN_PHOTOS && group.photos.length >= TIMELINE_GROUP_WINDOW_MIN_PHOTOS}
+              renderTile={(photo) => {
                 const actualIndex = photoIndexById.get(photo.id) ?? -1;
                 return (
                   <PhotoCard
@@ -191,6 +220,7 @@ export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                     }}
                     likeBeforeComment
                     checkboxTestId
+                    containerProps={GRID_TILE_PROPS}
                     topLeftControl={isClient && onToggleVisibility
                       ? <ClientVisibilityToggle photo={photo} onToggle={onToggleVisibility} />
                       : undefined}
@@ -208,8 +238,8 @@ export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                     ) : undefined}
                   />
                 );
-              })}
-            </div>
+              }}
+            />
           </div>
         ))}
       </div>
