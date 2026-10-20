@@ -1,0 +1,333 @@
+/**
+ * The gallery toolbar (issue 1733, E8): one sticky bar whose actions swap from
+ * browsing (search, filters, sort, select) to the batch actions as soon as
+ * selection mode is on or anything is selected.
+ */
+import React from 'react';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('react-i18next', async () => {
+  const actual = await vi.importActual<typeof import('react-i18next')>('react-i18next');
+  return {
+    ...actual,
+    useTranslation: () => ({
+      t: (key: string, fallback?: unknown, opts?: Record<string, unknown>) => {
+        const values = typeof fallback === 'object' ? (fallback as Record<string, unknown>) : opts;
+        const count = values?.count;
+        return count === undefined ? key : `${key}:${count}`;
+      },
+      i18n: { language: 'en' },
+    }),
+  };
+});
+vi.mock('../BulkRating', () => ({
+  BulkRating: ({ photoIds }: { photoIds: number[] }) => <div data-testid="bulk-rating">{photoIds.join(',')}</div>,
+}));
+vi.mock('../DownloadQuotaNotice', () => ({ DownloadQuotaNotice: () => null }));
+vi.mock('../GallerySidebarSelectionTray', () => ({
+  GallerySidebarSelectionTray: ({ photos }: { photos: Array<{ id: number }> }) => (
+    <ul data-testid="tray">{photos.map((p) => <li key={p.id}>{p.id}</li>)}</ul>
+  ),
+}));
+
+import { GalleryToolbar, type GalleryToolbarSelection } from '../GalleryToolbar';
+
+const selection = (overrides: Partial<GalleryToolbarSelection> = {}): GalleryToolbarSelection => ({
+  available: true,
+  hasVideos: false,
+  isSelectionMode: false,
+  selectedCount: 0,
+  visibleCount: 12,
+  onStart: vi.fn(),
+  onCancel: vi.fn(),
+  onSelectAll: vi.fn(),
+  onDeselectAll: vi.fn(),
+  ...overrides,
+});
+
+const search = { value: '', onChange: vi.fn() };
+const sort = { sortBy: 'date' as const, onSortChange: vi.fn() };
+
+describe('GalleryToolbar', () => {
+  it('is sticky, under the safe area, and out of scroll anchoring', () => {
+    render(<GalleryToolbar search={search} selection={selection()} />);
+    const bar = screen.getByTestId('gallery-toolbar');
+    expect(bar.className).toContain('sticky');
+    expect(bar.style.top).toContain('env(safe-area-inset-top');
+    expect(bar.style.overflowAnchor).toBe('none');
+  });
+
+  it('shows the browse actions while nothing is selected', () => {
+    const start = vi.fn();
+    render(<GalleryToolbar search={search} sort={sort} selection={selection({ onStart: start })} />);
+    expect(screen.getByTestId('gallery-toolbar')).toHaveAttribute('data-mode', 'browse');
+    expect(screen.getByRole('textbox', { name: 'gallery.searchPhotos' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'gallery.sortByDate' })).toBeInTheDocument();
+    expect(screen.queryByText('gallery.photosSelected:0')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.selectPhotos' }));
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('swaps to the selection actions once a photo is selected, even outside selection mode', () => {
+    const download = vi.fn();
+    render(
+      <GalleryToolbar
+        search={search}
+        sort={sort}
+        selection={selection({
+          selectedCount: 2,
+          download: { onClick: download },
+          bulkRating: { slug: 'g', photoIds: [1, 2] },
+          tray: { photos: [{ id: 1, filename: 'a.jpg' }, { id: 2, filename: 'b.jpg' }] as never, onRemove: vi.fn() },
+        })}
+        copyFilenames={{ count: 2, onClick: vi.fn() }}
+      />,
+    );
+    expect(screen.getByTestId('gallery-toolbar')).toHaveAttribute('data-mode', 'selection');
+    // The browse face is gone, not hidden next to it.
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'gallery.sortByDate' })).toBeNull();
+    expect(screen.getByText('gallery.photosSelected:2')).toBeInTheDocument();
+    expect(screen.getByTestId('bulk-rating')).toHaveTextContent('1,2');
+    expect(screen.getByRole('button', { name: 'gallery.copyFilenames.button (2)' })).toBeInTheDocument();
+    fireEvent.click(screen.getByText('gallery.downloadSelected:2'));
+    expect(download).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers select all over what is on screen, deselect and cancel in selection mode', () => {
+    const sel = selection({ isSelectionMode: true, selectedCount: 0, visibleCount: 5 });
+    render(<GalleryToolbar search={search} selection={sel} />);
+    expect(screen.getByText('gallery.photosSelected:0')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.selectAll (5)' }));
+    expect(sel.onSelectAll).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'gallery.deselectAll' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.cancelSelection' }));
+    expect(sel.onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the filter panel, closes it on Escape and hands focus back', () => {
+    render(
+      <GalleryToolbar
+        search={search}
+        filters={{ activeCount: 0, render: () => <p>panel body</p> }}
+        selection={selection()}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'gallery.filters' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(button);
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('dialog', { name: 'gallery.filters' })).toHaveTextContent('panel body');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(button).toHaveFocus();
+  });
+
+  it('keeps the filter panel within the screen under the stuck bar', () => {
+    render(
+      <GalleryToolbar
+        search={search}
+        filters={{ activeCount: 0, render: () => <p>panel body</p> }}
+        selection={selection()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.filters' }));
+    expect(screen.getByRole('dialog').getAttribute('style')).toContain('100dvh');
+  });
+
+  it('moves focus across the swap when Select and cancel unmount', () => {
+    const face = (isSelectionMode: boolean) => (
+      <GalleryToolbar search={search} selection={selection({ isSelectionMode })} />
+    );
+    const { rerender } = render(face(false));
+    screen.getByRole('button', { name: 'gallery.selectPhotos' }).focus();
+    rerender(face(true));
+    expect(screen.getByRole('button', { name: 'gallery.cancelSelection' })).toHaveFocus();
+    rerender(face(false));
+    expect(screen.getByRole('button', { name: 'gallery.selectPhotos' })).toHaveFocus();
+  });
+
+  it('closes the sort menu when the filter panel opens, and on Escape', () => {
+    render(
+      <GalleryToolbar
+        search={search}
+        sort={sort}
+        filters={{ activeCount: 0, render: () => <p>panel body</p> }}
+        selection={selection()}
+      />,
+    );
+    const sortButton = screen.getByRole('button', { name: 'gallery.sortByDate' });
+    fireEvent.click(sortButton);
+    expect(screen.getByRole('button', { name: 'photoSort.dateTaken' })).toBeInTheDocument();
+    const filterButton = screen.getByRole('button', { name: 'gallery.filters' });
+    fireEvent.pointerDown(filterButton);
+    fireEvent.click(filterButton);
+    expect(screen.queryByRole('button', { name: 'photoSort.dateTaken' })).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'gallery.filters' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.click(sortButton);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('button', { name: 'photoSort.dateTaken' })).toBeNull();
+    expect(sortButton).toHaveFocus();
+  });
+
+  it('keeps only one of Sort and Filters open when driven by keyboard', () => {
+    render(
+      <GalleryToolbar
+        search={search}
+        sort={sort}
+        filters={{ activeCount: 0, render: () => <p>panel body</p> }}
+        selection={selection()}
+      />,
+    );
+    const sortButton = screen.getByRole('button', { name: 'gallery.sortByDate' });
+    const filterButton = screen.getByRole('button', { name: 'gallery.filters' });
+    fireEvent.click(sortButton);
+    filterButton.focus();
+    fireEvent.click(filterButton);
+    expect(screen.queryByRole('button', { name: 'photoSort.dateTaken' })).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'gallery.filters' })).toBeInTheDocument();
+    sortButton.focus();
+    fireEvent.click(sortButton);
+    expect(screen.getByRole('button', { name: 'photoSort.dateTaken' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('hands focus back to Filters when the panel closes itself under it', () => {
+    render(
+      <GalleryToolbar
+        search={search}
+        filters={{ activeCount: 0, render: (close) => <button type="button" onClick={close}>select these</button> }}
+        selection={selection({ isSelectionMode: true, selectedCount: 2 })}
+      />,
+    );
+    const filterButton = screen.getByRole('button', { name: 'gallery.filters' });
+    fireEvent.click(filterButton);
+    const inside = screen.getByRole('button', { name: 'select these' });
+    inside.focus();
+    fireEvent.click(inside);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(filterButton).toHaveFocus();
+  });
+
+  it('leaves an Escape inside something else, like the lightbox, alone', () => {
+    render(
+      <div>
+        <GalleryToolbar
+          search={search}
+          sort={sort}
+          filters={{ activeCount: 0, render: () => <p>panel body</p> }}
+          selection={selection()}
+        />
+        <textarea aria-label="comment" />
+      </div>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.filters' }));
+    const field = screen.getByRole('textbox', { name: 'comment' });
+    field.focus();
+    fireEvent.keyDown(field, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: 'gallery.filters' })).toBeInTheDocument();
+    expect(field).toHaveFocus();
+  });
+
+  it('lets the sort menu scroll within the room under its button', () => {
+    render(<GalleryToolbar search={search} sort={sort} selection={selection()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.sortByDate' }));
+    const menu = screen.getByRole('button', { name: 'photoSort.dateTaken' }).parentElement!;
+    expect(menu.className).toContain('overflow-y-auto');
+    expect(menu.style.maxHeight).toMatch(/px$/);
+  });
+
+  it('closes the filter panel on a press outside it', () => {
+    render(
+      <div>
+        <p>outside</p>
+        <GalleryToolbar search={search} filters={{ activeCount: 0, render: () => <p>panel body</p> }} />
+      </div>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.filters' }));
+    fireEvent.pointerDown(screen.getByText('panel body'));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    fireEvent.pointerDown(screen.getByText('outside'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('names the active filter count on the filter button', () => {
+    render(<GalleryToolbar search={search} filters={{ activeCount: 2, render: () => null }} />);
+    expect(screen.getByRole('button', { name: 'gallery.filters, gallery.filterPanel.activeCount:2' })).toBeInTheDocument();
+  });
+
+  it('closes the filter panel when the panel selects, and the bar swaps', () => {
+    const Harness = () => {
+      const [selected, setSelected] = React.useState(0);
+      return (
+        <GalleryToolbar
+          search={search}
+          filters={{
+            activeCount: 1,
+            render: (close) => (
+              <button type="button" onClick={() => { setSelected(4); close(); }}>select these</button>
+            ),
+          }}
+          selection={selection({ selectedCount: selected, isSelectionMode: selected > 0 })}
+        />
+      );
+    };
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.filters, gallery.filterPanel.activeCount:1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'select these' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByTestId('gallery-toolbar')).toHaveAttribute('data-mode', 'selection');
+    expect(screen.getByText('gallery.photosSelected:4')).toBeInTheDocument();
+  });
+
+  it('opens the selection list from the selection face', () => {
+    render(
+      <GalleryToolbar
+        selection={selection({
+          isSelectionMode: true,
+          selectedCount: 1,
+          tray: { photos: [{ id: 9, filename: 'x.jpg' }] as never, onRemove: vi.fn() },
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.selectionTray.title:1' }));
+    expect(screen.getByTestId('tray')).toHaveTextContent('9');
+  });
+
+  it('does not reopen the selection list by itself once it emptied', () => {
+    const withTray = (ids: number[]) => (
+      <GalleryToolbar
+        selection={selection({
+          isSelectionMode: true,
+          selectedCount: ids.length,
+          tray: { photos: ids.map((id) => ({ id, filename: `${id}.jpg` })) as never, onRemove: vi.fn() },
+        })}
+      />
+    );
+    const { rerender } = render(withTray([9]));
+    fireEvent.click(screen.getByRole('button', { name: 'gallery.selectionTray.title:1' }));
+    expect(screen.getByTestId('tray')).toBeInTheDocument();
+    rerender(withTray([]));
+    expect(screen.queryByTestId('tray')).toBeNull();
+    expect(screen.getByRole('button', { name: 'gallery.cancelSelection' })).toHaveFocus();
+    rerender(withTray([4]));
+    expect(screen.queryByTestId('tray')).toBeNull();
+  });
+
+  it('wraps the browse buttons rather than crushing the search box', () => {
+    render(<GalleryToolbar search={search} sort={sort} selection={selection()} />);
+    const row = screen.getByRole('toolbar', { name: 'gallery.toolbar.browse' });
+    expect(row.className).toContain('flex-wrap');
+    const box = screen.getByRole('textbox', { name: 'gallery.searchPhotos' });
+    expect(box.closest('.min-w-\\[9rem\\]')).not.toBeNull();
+    expect(box.closest('.md\\:min-w-\\[14rem\\]')).not.toBeNull();
+  });
+
+  it('has no Select button where picking is not offered', () => {
+    render(<GalleryToolbar search={search} selection={selection({ available: false })} />);
+    expect(screen.queryByRole('button', { name: 'gallery.selectPhotos' })).toBeNull();
+  });
+});
