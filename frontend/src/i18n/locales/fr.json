@@ -3386,6 +3386,7 @@
     "rateStar_one": "Noter {{count}} étoile",
     "rateStar_other": "Noter {{count}} étoiles",
     "removeRating": "Retirer la note",
+    "ratePhoto": "Noter la photo",
     "rateSelected": "Noter la sélection",
     "bulkRatingPartial": "{{rated}} photos sur {{total}} ont été notées",
     "ratingLimitReached": "Limite de notes atteinte. Réessayez plus tard.",
@@ -3457,8 +3458,10 @@
       "reopenError": "Impossible de rouvrir l’envoi"
     },
     "annotation": {
-      "draw": "Dessiner sur la photo",
-      "edit": "Modifier le dessin",
+      "modeLabel": "Mode",
+      "modeSelect": "Sélection",
+      "modeAnnotate": "Annoter",
+      "hint": "Pour dessiner sur la photo, passez en mode Annoter.",
       "remove": "Retirer le dessin",
       "attached": "Dessin joint",
       "inProgress": "Terminez le dessin sur la photo, puis envoyez votre commentaire.",

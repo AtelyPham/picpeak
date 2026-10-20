@@ -3493,6 +3493,7 @@
     "rateStar_one": "Avaliar {{count}} estrela",
     "rateStar_other": "Avaliar {{count}} estrelas",
     "removeRating": "Remover a avaliação",
+    "ratePhoto": "Avaliar a foto",
     "rateSelected": "Avaliar a seleção",
     "bulkRatingPartial": "{{rated}} de {{total}} fotos foram avaliadas",
     "ratingLimitReached": "Limite de avaliações atingido. Tente novamente mais tarde.",
@@ -3577,8 +3578,10 @@
       "reopenError": "Não foi possível reabrir o envio"
     },
     "annotation": {
-      "draw": "Desenhar na foto",
-      "edit": "Editar desenho",
+      "modeLabel": "Modo",
+      "modeSelect": "Selecionar",
+      "modeAnnotate": "Anotar",
+      "hint": "Para desenhar na foto, mude para Anotar.",
       "remove": "Remover desenho",
       "attached": "Desenho anexado",
       "inProgress": "Termine o desenho na foto e depois envie o seu comentário.",

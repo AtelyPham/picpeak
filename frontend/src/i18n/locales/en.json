@@ -6546,6 +6546,7 @@
     "rateStar_one": "Rate {{count}} star",
     "rateStar_other": "Rate {{count}} stars",
     "removeRating": "Remove rating",
+    "ratePhoto": "Rate photo",
     "rateSelected": "Rate selected",
     "bulkRatingPartial": "{{rated}} of {{total}} photos were rated",
     "ratingLimitReached": "Rating limit reached. Try again later.",
@@ -6632,8 +6633,10 @@
       "reopenError": "Failed to reopen the submission"
     },
     "annotation": {
-      "draw": "Draw on photo",
-      "edit": "Edit drawing",
+      "modeLabel": "Mode",
+      "modeSelect": "Select",
+      "modeAnnotate": "Annotate",
+      "hint": "To draw on the photo, switch to Annotate.",
       "remove": "Remove drawing",
       "attached": "Drawing attached",
       "inProgress": "Finish the drawing on the photo, then send your comment.",
