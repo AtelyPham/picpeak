@@ -185,7 +185,17 @@ async function describesRow(row, f) {
       return Number(m.width) === Number(row.width) && Number(m.height) === Number(row.height)
         && Math.abs(Number(m.duration) - Number(row.duration)) < 0.5;
     }
-    const { width, height } = orientedDimensions(await sharp(f.full).metadata());
+    // A camera RAW is measured on its embedded preview, as on import.
+    const proc = isRawFilename(f.name)
+      ? await withProcessableImage(f.full, f.name)
+      : { path: f.full, cleanup: () => {} };
+    let width;
+    let height;
+    try {
+      ({ width, height } = orientedDimensions(await sharp(proc.path).metadata()));
+    } finally {
+      await proc.cleanup();
+    }
     if (width !== Number(row.width) || height !== Number(row.height)) return false;
     // Two pictures without a capture date prove nothing: no match.
     if (!row.captured_at) return false;
@@ -330,7 +340,18 @@ const DERIVATIVE_COLUMNS = ['thumbnail_path', 'preview_path', 'hero_path', 'wate
  * 'deferred' (automatic pass, file still being written) or 'skipped' (not
  * served from the share, or not refreshed this time).
  */
-async function refreshChangedFile(row, f, { automatic, settleMs }) {
+async function refreshChangedFile(row, f, options) {
+  // A camera RAW's embedded preview, extracted once below for the dimensions
+  // and the thumbnail, and removed when the refresh is done.
+  const held = { preview: null };
+  try {
+    return await refreshChangedFileWith(row, f, options, held);
+  } finally {
+    if (held.preview) await held.preview.cleanup();
+  }
+}
+
+async function refreshChangedFileWith(row, f, { automatic, settleMs }, held) {
   const served = row.source_origin === 'external' || row.source_origin === 'reference';
   if (!served) return 'skipped';
   const isVideo = row.media_type === 'video' || isVideoFile(f.name);
@@ -370,6 +391,8 @@ async function refreshChangedFile(row, f, { automatic, settleMs }) {
   let exif = {};
   let credit = null;
   let video = null;
+  // What sharp reads: the file itself, or for a camera RAW its preview.
+  let readable = f.full;
   if (isVideo) {
     // What ffprobe can tell, as on import. A file it cannot read still
     // gets the refresh (the poster falls back to the placeholder, as on
@@ -385,8 +408,17 @@ async function refreshChangedFile(row, f, { automatic, settleMs }) {
     // SQLite's single connection.
     video = { probed, webCopy: await require('./videoRenditionService').isEnabled() };
   } else {
+    if (isRawFilename(f.name)) {
+      try {
+        held.preview = await retryTransient(() => withProcessableImage(f.full, f.name));
+      } catch (previewErr) {
+        logger.warn(`Could not extract the embedded preview of changed external file ${f.rel}: ${previewErr.message}`);
+        return 'skipped';
+      }
+      readable = held.preview.path;
+    }
     try {
-      ({ width, height } = orientedDimensions(await retryTransient(() => sharp(f.full).metadata())));
+      ({ width, height } = orientedDimensions(await retryTransient(() => sharp(readable).metadata())));
     } catch (dimErr) {
       // Unreadable now (a half-written file the settle rule missed, or a
       // format Sharp refuses): keep the row as it is and try on the next pass.
@@ -582,7 +614,7 @@ async function refreshChangedFile(row, f, { automatic, settleMs }) {
     try {
       const meta = {};
       const outputBasename = `ext${row.id}_${path.basename(f.rel)}`;
-      const thumbnailPath = await generateThumbnail(f.full, { outputBasename, meta });
+      const thumbnailPath = await generateThumbnail(readable, { outputBasename, meta });
       if (thumbnailPath) {
         await db('photos').where(thisVersion)
           .whereNull('thumbnail_path')

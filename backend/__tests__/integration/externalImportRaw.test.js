@@ -96,6 +96,9 @@ describe('external import of camera RAW', () => {
           }).jpeg().toFile(previewPath);
           return { path: previewPath, outputBasename: mockPath.basename(sourceName), cleanup: mockCleanup };
         }),
+        // exifr reads the date off a real RAW; these bytes carry none.
+        extractCaptureDate: jest.fn(async (filePath) => (/\.arw$/i.test(filePath)
+          ? new Date('2026-09-14T10:00:00Z') : actual.extractCaptureDate(filePath))),
       };
     });
     // The database is fine; only this one read fails, as in a blip.
@@ -242,4 +245,38 @@ describe('external import of camera RAW', () => {
     expect(res.status).toBe(200);
     expect(await rows(eventId)).toEqual([expect.objectContaining({ filename: 'DSC03991.ARW', width: 400, height: 600 })]);
   }, 30000);
+
+  // Lightroom writes a rating or keywords into a DNG in place. The row takes
+  // the new version like a JPG's does, its dimensions read from the preview.
+  it('refreshes a RAW edited in place from its embedded preview', async () => {
+    const eventId = await seedEvent();
+    await allowTypes('jpg,jpeg,png,webp,arw');
+    await writeRaw('shoot/DSC03991.ARW');
+    expect((await runImport(eventId)).status).toBe(200);
+
+    const edited = Buffer.concat([NOT_DECODABLE_RAW, Buffer.from(' rated 5 stars')]);
+    await fs.promises.writeFile(path.join(mediaRoot, 'shoot/DSC03991.ARW'), edited);
+    const res = await runImport(eventId);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ refreshed: 1 });
+    const [photo] = await rows(eventId);
+    expect(photo).toMatchObject({ size_bytes: edited.length, width: 400, height: 600 });
+    expect(photo.thumbnail_path).toBeTruthy();
+  });
+
+  it('follows a RAW renamed on the share instead of importing it again', async () => {
+    const eventId = await seedEvent();
+    await allowTypes('jpg,jpeg,png,webp,arw');
+    await writeRaw('shoot/DSC03991.ARW');
+    expect((await runImport(eventId)).status).toBe(200);
+    const [before] = await rows(eventId);
+
+    await fs.promises.rename(path.join(mediaRoot, 'shoot/DSC03991.ARW'), path.join(mediaRoot, 'shoot/Ceremony-01.ARW'));
+    const res = await runImport(eventId);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ moved: 1, imported: 0 });
+    expect(await rows(eventId)).toEqual([expect.objectContaining({ id: before.id, filename: 'Ceremony-01.ARW' })]);
+  });
 });
