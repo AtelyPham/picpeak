@@ -269,12 +269,36 @@ class DownloadJobService {
     return expected === job.dedup_key;
   }
 
+  // Only a job still in flight: one cancelForEvent() failed keeps its reason.
   async _fail(id, message) {
-    await db('download_jobs').where({ id }).update({
+    await db('download_jobs').where({ id }).whereIn('status', ['pending', 'building']).update({
       status: 'failed',
       error: String(message).slice(0, 500),
       completed_at: new Date().toISOString(),
     });
+  }
+
+  /**
+   * Fail every queued, building and ready job of a gallery and delete the
+   * zips of the ready ones. The archive calls it before it deletes the
+   * gallery's files. A build still running finds its row failed: it stops,
+   * or throws away the zip it uploaded instead of marking the job ready.
+   */
+  async cancelForEvent(eventId, message) {
+    await db('download_jobs')
+      .where({ event_id: eventId })
+      .whereIn('status', ['pending', 'building', 'ready'])
+      .update({ status: 'failed', error: message, completed_at: new Date().toISOString() });
+    // Read after the update, so a build that went ready just before it is
+    // in here with its zip_path.
+    const withZip = await db('download_jobs')
+      .where({ event_id: eventId, status: 'failed' })
+      .whereNotNull('zip_path');
+    const storage = getStorage();
+    for (const job of withZip) {
+      await storage.delete(job.zip_path).catch((e) =>
+        logger.warn('Failed deleting download job artifact', { jobId: job.id, error: e.message }));
+    }
   }
 
   async _build(id, event, resolution, photoIds, watermarkSettings, accessLevel) {
@@ -288,7 +312,10 @@ class DownloadJobService {
 
     let tmpDir;
     try {
-      await db('download_jobs').where({ id }).update({ status: 'building', heartbeat_at: new Date().toISOString() });
+      // A job the archive failed while it waited for a slot stays failed.
+      const started = await db('download_jobs').where({ id, status: 'pending' })
+        .update({ status: 'building', heartbeat_at: new Date().toISOString() });
+      if (started === 0) return;
 
       // Same query that produced the dedup identity, so the archive can never
       // contain photos the requester wasn't entitled to at creation time.
@@ -311,6 +338,7 @@ class DownloadJobService {
 
       let appended = 0;
       const appendedIds = [];
+      let cancelled = false;
       await new Promise((resolve, reject) => {
         const output = fs.createWriteStream(tmpPath);
         // level 0 — photos are already compressed, so deflate only burns CPU.
@@ -350,9 +378,14 @@ class DownloadJobService {
               // Progress is coarse (photo count, not bytes) but it is what the
               // modal needs to show movement on a long build.
               if (appended % 10 === 0 || appended === photos.length) {
-                // Doubles as the lease heartbeat — see LEASE_TIMEOUT_MS.
-                await db('download_jobs').where({ id })
+                // Doubles as the lease heartbeat — see LEASE_TIMEOUT_MS. No
+                // row updated means the archive cancelled the job.
+                const alive = await db('download_jobs').where({ id, status: 'building' })
                   .update({ photo_count: appended, heartbeat_at: new Date().toISOString() });
+                if (alive === 0) {
+                  cancelled = true;
+                  break;
+                }
               }
             } catch (err) {
               logger.warn('Skipping photo in download job', { jobId: id, photoId: photo.id, error: err.message });
@@ -362,16 +395,22 @@ class DownloadJobService {
         })().catch((err) => { guard.destroyAll(); reject(err); });
       });
 
+      if (cancelled) return;
       if (appended === 0) {
         await this._fail(id, 'No photos could be packaged');
         return;
       }
 
       const stat = await fsp.stat(tmpPath);
-      const key = this.jobKey(event.slug, (await db('download_jobs').where({ id }).first()).token);
+      const row = await db('download_jobs').where({ id }).first();
+      if (row.status !== 'building') return;
+      const key = this.jobKey(event.slug, row.token);
       await storage.putFromFile(key, tmpPath);
 
-      await db('download_jobs').where({ id }).update({
+      // Only a job still building goes ready. The archive can cancel it
+      // during the upload, after it deleted the gallery's files: then the
+      // zip belongs to no job and goes too.
+      const committed = await db('download_jobs').where({ id, status: 'building' }).update({
         status: 'ready',
         zip_path: key,
         size_bytes: stat.size,
@@ -385,6 +424,11 @@ class DownloadJobService {
         delivered_photo_ids: JSON.stringify(appendedIds),
         completed_at: new Date().toISOString(),
       });
+      if (committed === 0) {
+        await storage.delete(key).catch((e) =>
+          logger.warn('Failed deleting download job artifact', { jobId: id, error: e.message }));
+        return;
+      }
       logger.info('Download job ready', { jobId: id, photos: appended, bytes: stat.size });
       // Whoever asked to be mailed (issue 1733). The archive is ready either
       // way, so a mail that cannot be queued must not fail the job.

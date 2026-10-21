@@ -673,13 +673,13 @@ async function buildArchive(event, lease) {
 
     // The download cache goes with the originals and is not in the zip, so a
     // finished download job would be reused after a restore and answer 410
-    // until it expired: fail them, the next request builds a new one.
+    // until it expired: fail them, the next request builds a new one. A job
+    // still building would finish after the delete below and upload its zip
+    // again, so it is failed too.
     await assertStillHeld();
-    await db('download_jobs').where({ event_id: event.id, status: 'ready' }).update({
-      status: 'failed',
-      error: 'The gallery was archived, please request the download again',
-      completed_at: new Date().toISOString(),
-    });
+    await require('./downloadJobService').cancelForEvent(
+      event.id, 'The gallery was archived, please request the download again'
+    );
 
     // Delete the originals from storage.
     for (const entry of storedEntries) {
